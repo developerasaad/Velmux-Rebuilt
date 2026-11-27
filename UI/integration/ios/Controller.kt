@@ -44,7 +44,7 @@ internal fun IosMediaPreview(locator: String, modifier: Modifier, onUnsupported:
     DisposableEffect(controller) {
         onDispose { provider.releasePreview(controller) }
     }
-    UIKitViewController(factory = { controller }, modifier = modifier)
+    UIKitViewController(factory = { controller }, modifier = modifier, accessibilityEnabled = true)
 }
 
 /** The native application owns the session independently of controller presentation. */

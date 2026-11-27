@@ -7,6 +7,9 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.SystemClock
+import android.os.Build
+import android.os.Bundle
+import android.util.Log
 import android.provider.DocumentsContract
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -25,6 +28,9 @@ import androidx.test.uiautomator.Until
 import com.velmux.ui.app.JobSnapshot
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 import org.junit.runner.RunWith
 import uniffi.velmux_core.AudioCodec
 import uniffi.velmux_core.EngineException
@@ -50,6 +56,14 @@ class ConversionIntegrationTest {
     private val resolver get() = context.contentResolver
     private val provider = Uri.parse("content://com.velmux.mobile.test.control")
     private val device get() = UiDevice.getInstance(instrumentation)
+
+    @get:Rule
+    val retainFailureEvidence = object : TestWatcher() {
+        override fun failed(error: Throwable, description: Description) {
+            runCatching { capture("failure-${description.methodName.take(60)}.png") }
+            runCatching { retainText("failure-${description.methodName.take(60)}.txt", error.stackTraceToString()) }
+        }
+    }
 
     @Test
     fun systemPickerCancelThenVideoConversionPublishesDecodedOutput() {
@@ -121,6 +135,9 @@ class ConversionIntegrationTest {
             for ((format, codec) in listOf(OutputFormat.M4A to AudioCodec.AAC, OutputFormat.FLAC to AudioCodec.FLAC)) {
                 val stem = "native-audio-${UUID.randomUUID()}"
                 val configuration = defaults.copy(format = format, audioCodec = codec, fileName = stem)
+                val facts = "Source: ${inspected.info}\nAccepted intent: $configuration\n"
+                Log.i("VelmuxMediaVerification", facts.take(3000))
+                retainText("audio-${format.name.lowercase()}-facts.txt", facts)
                 val key = UUID.randomUUID().toString()
                 val accepted = media.submitNative(inspected.id, key, configuration)
                 acceptedIds.add(accepted.id)
@@ -445,8 +462,18 @@ class ConversionIntegrationTest {
             root = device.wait(Until.findObject(By.text("Velmux Test Sources")), 10_000)
         }
         requireNotNull(root) { "The read-only test document provider was not listed by DocumentsUI" }.click()
-        val document = device.wait(Until.findObject(By.text(name)), 10_000)
-            ?: error("The generated verification source was not visible: $name")
+        var document = device.wait(Until.findObject(By.text(name)), 3_000)
+        if (document == null) {
+            // DocumentsUI sorts these genuine source rows; the requested video
+            // can be below the first screen when all fixture formats are listed.
+            val list = UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(10)
+            runCatching { list.scrollIntoView(UiSelector().text(name)) }
+            document = device.wait(Until.findObject(By.text(name)), 3_000)
+        }
+        if (document == null) {
+            capture("failure-picker-source-list.png")
+            error("The generated verification source was not visible after scrolling: $name")
+        }
         document.click()
         if (!device.wait(Until.hasObject(By.pkg(context.packageName)), 5_000)) {
             device.findObject(By.text(java.util.regex.Pattern.compile("(?i)open")))?.click()
@@ -472,9 +499,27 @@ class ConversionIntegrationTest {
 
     private fun capture(name: String) {
         device.waitForIdle(2_000)
-        val directory = File(requireNotNull(context.getExternalFilesDir(null)), "screenshots")
+        val directory = File(context.filesDir, "screenshots")
         check(directory.isDirectory || directory.mkdirs())
-        assertTrue("Could not retain an actual device screenshot", device.takeScreenshot(File(directory, name)))
+        val screenshot = File(directory, name)
+        assertTrue("Could not retain an actual device screenshot", device.takeScreenshot(screenshot))
+        retainEvidence(name, screenshot.readBytes())
+        val hierarchy = File(directory, name.removeSuffix(".png") + ".xml")
+        device.dumpWindowHierarchy(hierarchy)
+        retainEvidence(hierarchy.name, hierarchy.readBytes())
+    }
+
+    private fun retainText(name: String, text: String) = retainEvidence(name, text.take(100_000).toByteArray(Charsets.UTF_8))
+
+    private fun retainEvidence(name: String, bytes: ByteArray) {
+        val key = "api-${Build.VERSION.SDK_INT}-$name"
+        for (offset in bytes.indices step 256 * 1024) {
+            val chunk = bytes.copyOfRange(offset, minOf(bytes.size, offset + 256 * 1024))
+            resolver.call(provider, "write-evidence", key, Bundle().apply {
+                putByteArray("bytes", chunk)
+                putLong("offset", offset.toLong())
+            }) ?: error("The standalone fixture APK did not retain verification evidence")
+        }
     }
 
     private fun waitUntil(message: String, timeout: Long = 30_000, predicate: () -> Boolean) {

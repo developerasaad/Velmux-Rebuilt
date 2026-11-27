@@ -352,6 +352,9 @@ pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<Form
                     .filter(|stream| stream.kind == kind)
                     .all(|stream| {
                         (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }) > 0
+                            && (option.format != OutputFormat::M4a
+                                || stream.kind != StreamKind::Audio
+                                || matches!(stream.codec.as_str(), "aac" | "alac"))
                     })
             };
             if !compatible(StreamKind::Video) {

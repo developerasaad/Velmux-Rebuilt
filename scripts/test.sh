@@ -13,6 +13,7 @@ case "${1:-}" in
       api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')
       mkdir -p "build/android-screenshots/api-$api"
       adb pull /sdcard/Android/data/com.velmux.mobile/files/screenshots "build/android-screenshots/api-$api/" || true
+      adb exec-out run-as com.velmux.mobile.fixtures tar -C files -cf - evidence > "build/android-screenshots/api-$api/fixture-evidence.tar" || true
       if [ "$result" -ne 0 ]; then
         adb root || true
         adb wait-for-device || true
@@ -33,6 +34,9 @@ case "${1:-}" in
   ios-simulator)
     capture_ios() {
       result=$?
+      if [ -f build/ios-source-hashes.json ]; then
+        python3 scripts/ci/seed-ios-fixtures.py --verify build/ios-source-hashes.json || result=1
+      fi
       if [ -d build/ios-tests.xcresult ]; then
         xcrun xcresulttool export attachments --path build/ios-tests.xcresult --output-path build/ios-screenshots || true
       fi
@@ -51,9 +55,11 @@ case "${1:-}" in
       CODE_SIGNING_ALLOWED=NO build-for-testing
     app=build/xcode/tests/Build/Products/Debug-iphonesimulator/Velmux.app
     xcrun simctl install "$device" "$app"
-    container=$(xcrun simctl get_app_container "$device" com.velmux.mobile data)
-    mkdir -p "$container/Documents/UITestSources"
-    cp build/media-fixtures/video.mp4 build/media-fixtures/stereo.wav "$container/Documents/UITestSources/"
+    xcrun simctl install "$device" build/xcode/tests/Build/Products/Debug-iphonesimulator/VelmuxMediaFixtures.app
+    container=$(xcrun simctl get_app_container "$device" com.velmux.mediafixtures data)
+    python3 scripts/ci/seed-ios-fixtures.py "$container" build/media-fixtures build/ios-source-hashes.json
+    xcrun simctl launch "$device" com.velmux.mediafixtures
+    xcrun simctl terminate "$device" com.velmux.mediafixtures
     xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Debug \
       -sdk iphonesimulator -destination "platform=iOS Simulator,id=$device" \
       -derivedDataPath build/xcode/tests -resultBundlePath build/ios-tests.xcresult -parallel-testing-enabled NO \

@@ -168,6 +168,7 @@ impl Runtime {
         Ok(total)
     }
     pub fn clear_cache(&self) -> Result<(), EngineError> {
+        crate::media::input::cleanup_staging(&PathBuf::from(self.provider.cache_root()))?;
         let previews = self.previews.lock().map_err(internal)?;
         let referenced: HashSet<_> = previews.values().map(|entry| entry.path.clone()).collect();
         for entry in fs::read_dir(self.preview_directory()?)

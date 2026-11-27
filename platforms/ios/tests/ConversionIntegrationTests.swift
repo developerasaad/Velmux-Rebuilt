@@ -278,7 +278,7 @@ final class ConversionIntegrationTests: XCTestCase {
         let terminal = try await onWorker { () -> JobSnapshot in
             try media.beginNative()
             let before = try media.jobsNative().map(\.id).sorted()
-            let canceled = try media.newRequest()
+            let canceled = try media.beginRequest()
             canceled.cancel()
             defer { canceled.close() }
             XCTAssertThrowsError(try media.inspectWithRequestNative(locator: sourceURL.absoluteString, name: "video-large.mp4", video: true, request: canceled))
@@ -314,7 +314,7 @@ final class ConversionIntegrationTests: XCTestCase {
         XCTAssertEqual(try digest(sourceURL), sourceHash)
         let evidence = XCTAttachment(string: "Accepted job cancellation race settled as \(terminal.state); repeated cancellation returned normally; original hash unchanged.")
         evidence.name = "Cancellation terminal outcome"
-        evidence.lifetime = .keepAlways
+        evidence.lifetime = XCTAttachment.Lifetime.keepAlways
         add(evidence)
     }
 

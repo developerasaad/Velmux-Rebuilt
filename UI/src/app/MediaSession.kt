@@ -129,7 +129,7 @@ class MediaSession(private val engine: Engine) {
     }
 
     @Throws(IllegalStateException::class)
-    fun newRequest(): MediaRequest = synchronized(requestGate) {
+    fun beginRequest(): MediaRequest = synchronized(requestGate) {
         checkOpen()
         MediaRequest { request -> synchronized(requestGate) { requests.remove(request) } }
             .also { requests.add(it) }
@@ -183,11 +183,17 @@ class MediaSession(private val engine: Engine) {
         val audio = primary?.audio?.let { info ->
             listOfNotNull(info.sampleRate?.let { "$it Hz" }, info.channelLayout).joinToString(" · ").ifBlank { null }
         }
+        val container = when {
+            source.info.container.split(',').any { it == "mov" || it == "mp4" } -> "MP4 / QuickTime"
+            source.info.container.split(',').contains("matroska") -> "Matroska / WebM"
+            else -> source.info.container.uppercase()
+        }
+        val orientation = primary?.video?.rotationDegreesCounterClockwise?.takeIf { it != 0.0 }?.let { "Rotation ${it.toInt()}°" }
         return SourceSnapshot(
             id = source.id,
             locator = source.locator,
             name = source.displayName,
-            summary = listOfNotNull(source.info.container, primary?.codec, geometry, audio).joinToString(" · "),
+            summary = listOfNotNull(container, primary?.codec, geometry, orientation, audio).joinToString(" · "),
             durationUs = source.info.durationUs,
             byteSize = source.info.byteSize.signedOrNull(),
             info = source.info,
@@ -360,7 +366,7 @@ class MediaSession(private val engine: Engine) {
     }
 
     private fun <T> ownRequest(action: (MediaRequest) -> T): T {
-        val request = newRequest()
+        val request = beginRequest()
         try {
             return action(request)
         } finally {

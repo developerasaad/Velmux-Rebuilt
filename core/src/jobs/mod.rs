@@ -190,6 +190,10 @@ impl Runtime {
             preview_slot: Mutex::new(()),
         });
         runtime.restore()?;
+        // Cache cleanup is best effort at startup. Explicit Clear Cache reports
+        // storage errors; inability to remove disposable files must not disable
+        // unrelated direct-source jobs or their restoration.
+        let _ = runtime.clear_cache();
         let owned = runtime.clone();
         let worker = thread::Builder::new()
             .name("velmux-media-worker".into())

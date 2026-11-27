@@ -114,7 +114,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
                 if (failure != null) alert = Alert("Source unavailable", failure)
                 else if (selected != null) {
                     preparing = true
-                    val request = media.newRequest()
+                    val request = media.beginRequest()
                     preparation = request
                     scope.launch {
                         var inspected: SourceSnapshot? = null
@@ -184,7 +184,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
                             if (!submitting) {
                                 val acceptedConfig = settings
                                 submitting = true
-                                val request = media.newRequest(); preparation = request
+                                val request = media.beginRequest(); preparation = request
                                 scope.launch {
                                     try {
                                         media.submit(selected.id, submissionKey, acceptedConfig, request)
@@ -195,10 +195,10 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
                             }
                         }, modifier = Modifier.weight(1f))
                     }
-                    Destination.Jobs -> if (actions != null) JobsScreen(jobs, actions,
+                    Destination.Jobs -> if (!ready) LoadingSection("Restoring jobs…") else if (actions != null) JobsScreen(jobs, actions,
                         onCancel = { id -> jobAction { media.cancel(id) } }, onRestart = { id -> jobAction { media.restart(id) } },
                         onRetryPublication = { id -> jobAction { media.retryPublication(id) } }, onDismiss = { id -> jobAction { media.dismiss(id) } }, modifier = Modifier.weight(1f))
-                    Destination.Settings -> if(actions != null) SettingsScreen(appearance, outputLocation, cacheBytes,
+                    Destination.Settings -> if (!ready) LoadingSection("Loading settings…") else if(actions != null) SettingsScreen(appearance, outputLocation, cacheBytes,
                         onAppearance = { value -> scope.launch { try { media.setAppearance(value); appearance = value } catch(error:Exception) { showFailure(error) } } },
                         onClearCache = { scope.launch { try { media.clearCache(); cacheBytes = media.cacheBytes(); banner = "Unused preview cache cleared. Active sources, unfinished jobs and published files are protected." } catch(error:Exception) { showFailure(error) } } }, actions = actions, modifier = Modifier.weight(1f))
                 }
@@ -208,6 +208,14 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
             VelmuxAlert(current.title, current.detail, current.confirm,
                 onConfirm = { alert = null; current.action?.invoke() }, onDismiss = { alert = null }, dismissLabel = current.cancel)
         }
+    }
+}
+
+@Composable
+private fun LoadingSection(label: String) {
+    Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        CircularProgressIndicator(Modifier.size(24.dp))
+        Text(label)
     }
 }
 

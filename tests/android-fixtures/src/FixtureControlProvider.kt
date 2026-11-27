@@ -16,6 +16,7 @@ class FixtureControlProvider : ContentProvider() {
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
         val root = requireNotNull(context)
         FixtureFiles.requireControlCaller(root)
+        if (method == "write-evidence") return retainEvidence(root, requireNotNull(arg), requireNotNull(extras))
         require(method == "grant-fixture" || method == "revoke-fixture") { "Unknown fixture control request" }
         val name = requireNotNull(arg)
         FixtureFiles.open(root, name)
@@ -29,6 +30,27 @@ class FixtureControlProvider : ContentProvider() {
         } finally { Binder.restoreCallingIdentity(identity) }
         return Bundle().apply { putString("uri", uri.toString()) }
     }
+
+    private fun retainEvidence(context: android.content.Context, name: String, extras: Bundle): Bundle {
+        require(name.matches(Regex("[A-Za-z0-9_.-]{1,96}")) &&
+            name.substringAfterLast('.') in setOf("png", "xml", "txt")) { "Invalid verification artifact name" }
+        val bytes = requireNotNull(extras.getByteArray("bytes"))
+        val offset = extras.getLong("offset", -1)
+        require(bytes.size <= 256 * 1024 && offset in 0..4L * 1024 * 1024 && offset + bytes.size <= 4L * 1024 * 1024)
+        val root = java.io.File(context.filesDir, "evidence")
+        check(root.isDirectory || root.mkdirs())
+        synchronized(evidenceLock) {
+            val output = java.io.File(root, name)
+            require(offset == 0L || (output.isFile && output.length() == offset)) { "Verification artifact chunks arrived out of order" }
+            java.io.FileOutputStream(output, offset != 0L).use { stream ->
+                stream.write(bytes)
+                stream.fd.sync()
+            }
+        }
+        return Bundle().apply { putLong("size", offset + bytes.size) }
+    }
+
+    private companion object { val evidenceLock = Any() }
 
     override fun getType(uri: Uri): String? = null
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? = throw UnsupportedOperationException()

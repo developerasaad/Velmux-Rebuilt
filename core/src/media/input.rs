@@ -4,6 +4,7 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     ffi::{c_int, c_void},
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -11,11 +12,11 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::{FileExt, MetadataExt, OpenOptionsExt},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, LazyLock, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -27,6 +28,8 @@ const AVERROR_EOF: c_int = -541478725;
 const AVERROR_EXIT: c_int = -1414092869;
 const MAX_STREAMS: usize = 256;
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_STAGING: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 struct ProbeOptions(Vec<*mut sys::AVDictionary>);
 impl Drop for ProbeOptions {
@@ -69,6 +72,7 @@ struct Reader {
     cancellation: Arc<CancellationToken>,
     deadline: Option<Instant>,
     io_error: Option<String>,
+    io_error_is_storage: bool,
 }
 
 impl Reader {
@@ -125,7 +129,14 @@ impl Drop for Reader {
         drop(self.staged.take());
         drop(self.lease.take());
         if let Some(path) = self.staged_path.take() {
-            let _ = fs::remove_file(path);
+            // Hold the same lock as orphan reconciliation through removal. A
+            // live stage remains protected until both descriptors and the native
+            // source lease have been released, even during partial preparation.
+            let mut active = ACTIVE_STAGING
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _ = remove_staging_file(&path);
+            active.remove(&path);
         }
     }
 }
@@ -227,6 +238,7 @@ impl Input {
             cancellation,
             deadline: Some(Instant::now() + STAGING_TIMEOUT),
             io_error: None,
+            io_error_is_storage: false,
         });
         reader.check()?;
         let fd = reader.file().as_raw_fd();
@@ -360,6 +372,11 @@ impl Input {
     pub(crate) fn check_result(&self, result: c_int, context: &str) -> Result<(), EngineError> {
         self.reader.check()?;
         if let Some(detail) = &self.reader.io_error {
+            if self.reader.io_error_is_storage {
+                return Err(EngineError::Storage {
+                    detail: detail.clone(),
+                });
+            }
             return Err(EngineError::SourceAccess {
                 detail: detail.clone(),
             });
@@ -414,10 +431,13 @@ impl Input {
         };
         for position in positions {
             self.reader.check()?;
-            let count = self
-                .reader
-                .read_at(&mut bytes, position)
-                .map_err(access_error)?;
+            let count = self.reader.read_at(&mut bytes, position).map_err(|error| {
+                if self.reader.staged.is_some() {
+                    storage_error(error)
+                } else {
+                    access_error(error)
+                }
+            })?;
             digest.update(position.to_le_bytes());
             digest.update((count as u64).to_le_bytes());
             digest.update(&bytes[..count]);
@@ -455,6 +475,7 @@ unsafe extern "C" fn deny_external_open(
             let reader = &mut *(opaque.cast::<Reader>());
             reader.io_error =
                 Some("This media refers to another file outside the selected source".into());
+            reader.io_error_is_storage = false;
         }
     }
     -libc::EACCES
@@ -488,7 +509,13 @@ unsafe extern "C" fn read_packet(
             count as c_int
         }
         Err(error) => {
-            reader.io_error = Some(format!("Unable to read the source: {error}"));
+            reader.io_error_is_storage = reader.staged.is_some();
+            let description = if reader.io_error_is_storage {
+                "staged source cache"
+            } else {
+                "source"
+            };
+            reader.io_error = Some(format!("Unable to read the {description}: {error}"));
             -error.raw_os_error().unwrap_or(libc::EIO)
         }
     }
@@ -530,53 +557,181 @@ unsafe extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i6
     position as i64
 }
 
-fn stage_nonseekable(reader: &mut Reader, cache: &std::path::Path) -> Result<(), EngineError> {
+/// Reconciles only our ephemeral staging namespace. Accepted jobs retain the
+/// original provider locator, never a path in this directory. After process
+/// death no live input can reference these files; unknown entries are preserved.
+pub(crate) fn cleanup_staging(cache: &Path) -> Result<(), EngineError> {
     if !cache.is_absolute() {
         return Err(EngineError::InvalidStorageRoot);
     }
-    fs::create_dir_all(cache).map_err(access_error)?;
+    let cache = match cache.canonicalize() {
+        Ok(cache) => cache,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage_error(error)),
+    };
+    let directory = cache.join("input-staging");
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage_error(error)),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    let active = ACTIVE_STAGING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for entry in fs::read_dir(&directory).map_err(storage_error)? {
+        let entry = entry.map_err(storage_error)?;
+        let path = entry.path();
+        if !owned_staging_name(&entry.file_name()) || active.contains(&path) {
+            continue;
+        }
+        remove_staging_file(&path).map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn owned_staging_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name
+        .to_str()
+        .and_then(|name| name.strip_prefix("source-"))
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let mut parts = name.split('-');
+    (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    }) && parts.next().is_none()
+}
+
+fn remove_staging_file(path: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+    // Do not follow a replaced staging-directory symlink, or a named file that
+    // became a symlink. unlinkat stays bound to this opened directory even if
+    // another thread renames its path while reconciliation is running.
+    let directory = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(parent)
+    {
+        Ok(directory) => directory,
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT | libc::ELOOP | libc::ENOTDIR)
+            ) =>
+        {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
+    let name = std::ffi::CString::new(path.file_name().unwrap().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        let error = io::Error::last_os_error();
+        return if error.kind() == io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
+    if unsafe { metadata.assume_init() }.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Ok(());
+    }
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn stage_nonseekable(reader: &mut Reader, cache: &Path) -> Result<(), EngineError> {
+    if !cache.is_absolute() {
+        return Err(EngineError::InvalidStorageRoot);
+    }
+    fs::create_dir_all(cache).map_err(storage_error)?;
     let directory = cache
         .canonicalize()
-        .map_err(access_error)?
+        .map_err(storage_error)?
         .join("input-staging");
-    fs::create_dir_all(&directory).map_err(access_error)?;
+    fs::create_dir_all(&directory).map_err(storage_error)?;
     if fs::symlink_metadata(&directory)
-        .map_err(access_error)?
+        .map_err(storage_error)?
         .file_type()
         .is_symlink()
     {
-        return Err(EngineError::SourceAccess {
+        return Err(EngineError::Storage {
             detail: "The input staging directory is not a private directory".into(),
         });
     }
+    let directory_handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(&directory)
+        .map_err(storage_error)?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let mut staged = None;
+    let mut active = ACTIVE_STAGING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     for _ in 0..32 {
         let sequence = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = directory.join(format!(
             "source-{}-{timestamp}-{sequence}.tmp",
             std::process::id()
         ));
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
+        let name = std::ffi::CString::new(path.file_name().unwrap().to_str().unwrap()).unwrap();
+        let fd = unsafe {
+            libc::openat(
+                directory_handle.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                // mode_t is u16 on Apple; C variadic arguments require its
+                // integer promotion rather than passing a Rust u16 directly.
+                0o600 as libc::c_int,
+            )
+        };
+        let result = if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { File::from_raw_fd(fd) })
+        };
+        match result {
             Ok(file) => {
+                active.insert(path.clone());
                 reader.staged_path = Some(path);
                 staged = Some(file);
                 break;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(access_error(error)),
+            Err(error) => return Err(storage_error(error)),
         }
     }
-    let mut staged = staged.ok_or_else(|| internal("Unable to reserve an input staging file"))?;
+    drop(active);
+    let mut staged = staged.ok_or_else(|| EngineError::Storage {
+        detail: "Unable to reserve an input staging file".into(),
+    })?;
     let fd = reader.file().as_raw_fd();
     let mut skip = reader.offset;
     let mut copied = 0u64;
@@ -636,7 +791,7 @@ fn stage_nonseekable(reader: &mut Reader, cache: &std::path::Path) -> Result<(),
         if copied % (1024 * 1024) < BUFFER_SIZE as u64 {
             let mut space = std::mem::MaybeUninit::<libc::statvfs>::uninit();
             if unsafe { libc::fstatvfs(staged.as_raw_fd(), space.as_mut_ptr()) } != 0 {
-                return Err(access_error(io::Error::last_os_error()));
+                return Err(storage_error(io::Error::last_os_error()));
             }
             let space = unsafe { space.assume_init() };
             let available = u128::from(space.f_bavail).saturating_mul(u128::from(space.f_frsize));
@@ -646,7 +801,7 @@ fn stage_nonseekable(reader: &mut Reader, cache: &std::path::Path) -> Result<(),
                 });
             }
         }
-        staged.write_all(&buffer[..count]).map_err(access_error)?;
+        staged.write_all(&buffer[..count]).map_err(storage_error)?;
         copied = copied
             .checked_add(count as u64)
             .filter(|length| *length <= i64::MAX as u64)
@@ -654,7 +809,7 @@ fn stage_nonseekable(reader: &mut Reader, cache: &std::path::Path) -> Result<(),
                 detail: "The staged source is too large".into(),
             })?;
     }
-    staged.flush().map_err(access_error)?;
+    staged.flush().map_err(storage_error)?;
     reader.offset = 0;
     reader.length = Some(copied);
     reader.staged = Some(staged);
@@ -663,6 +818,11 @@ fn stage_nonseekable(reader: &mut Reader, cache: &std::path::Path) -> Result<(),
 
 fn access_error(error: io::Error) -> EngineError {
     EngineError::SourceAccess {
+        detail: error.to_string(),
+    }
+}
+fn storage_error(error: io::Error) -> EngineError {
+    EngineError::Storage {
         detail: error.to_string(),
     }
 }
@@ -706,6 +866,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             deadline: None,
             io_error: None,
+            io_error_is_storage: false,
         }
     }
 
@@ -814,8 +975,115 @@ mod tests {
         assert_eq!(&bytes[..7], b"PAYLOAD");
         let staged = state.staged_path.clone().unwrap();
         assert!(staged.is_file());
+        cleanup_staging(&workspace.0).unwrap();
+        assert!(staged.is_file(), "A live reader still owns this stage");
         drop(state);
         assert!(!staged.exists());
+    }
+
+    #[test]
+    fn cleanup_preserves_a_pipe_stage_while_preparation_is_still_running() {
+        let workspace = Workspace::new();
+        let mut descriptors = [0; 2];
+        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+        let read = unsafe { File::from_raw_fd(descriptors[0]) };
+        let mut write = unsafe { File::from_raw_fd(descriptors[1]) };
+        write.write_all(b"streaming input").unwrap();
+        // Keep the writer open: the staging worker must remain active until
+        // cancellation instead of treating a briefly empty pipe as EOF.
+        let mut state = reader(read, 0, None);
+        let token = state.cancellation.clone();
+        let cache = workspace.0.clone();
+        let worker = std::thread::spawn(move || stage_nonseekable(&mut state, &cache));
+        let canonical = workspace.0.canonicalize().unwrap().join("input-staging");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let staged = loop {
+            let found = ACTIVE_STAGING
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|path| path.parent() == Some(canonical.as_path()))
+                .cloned();
+            if let Some(path) = found {
+                break Some(path);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let result = cleanup_staging(&workspace.0);
+        let preserved = staged.as_ref().is_some_and(|path| path.is_file());
+        token.cancel();
+        let outcome = worker.join().unwrap();
+        drop(write);
+        result.unwrap();
+        let staged = staged.expect("The pipe worker never registered its stage");
+        assert!(
+            preserved,
+            "Orphan cleanup removed a stage from an active pipe"
+        );
+        assert!(matches!(outcome, Err(EngineError::Cancelled)));
+        assert!(!staged.exists());
+        assert!(!ACTIVE_STAGING.lock().unwrap().contains(&staged));
+    }
+
+    #[test]
+    fn cleanup_removes_owned_orphans_and_preserves_unknown_files_and_symlinks() {
+        use std::os::unix::fs::symlink;
+        let workspace = Workspace::new();
+        let directory = workspace.0.join("input-staging");
+        fs::create_dir(&directory).unwrap();
+        let orphan = directory.join("source-123-456789-0.tmp");
+        fs::write(&orphan, b"orphaned ephemeral bytes").unwrap();
+        let unknown = [
+            "source-not-a-pid-1-2.tmp",
+            "source-1-2.tmp",
+            "source-1-2-3-4.tmp",
+            "source-1-2-3.tmp.backup",
+            "source-1--3.tmp",
+            "notes.txt",
+        ];
+        for name in unknown {
+            fs::write(directory.join(name), b"preserve").unwrap();
+        }
+        let outside = workspace.0.join("original-media");
+        fs::write(&outside, b"original bytes").unwrap();
+        let linked = directory.join("source-1-2-3.tmp");
+        symlink(&outside, &linked).unwrap();
+        let nested = directory.join("source-9-8-7.tmp");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("source-1-2-3.tmp"), b"not traversed").unwrap();
+        cleanup_staging(&workspace.0).unwrap();
+        cleanup_staging(&workspace.0).unwrap();
+        assert!(!orphan.exists());
+        for name in unknown {
+            assert_eq!(fs::read(directory.join(name)).unwrap(), b"preserve");
+        }
+        assert!(fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&outside).unwrap(), b"original bytes");
+        assert!(nested.join("source-1-2-3.tmp").is_file());
+        let redirected = Workspace::new();
+        symlink(&directory, redirected.0.join("input-staging")).unwrap();
+        fs::write(&orphan, b"preserve through directory symlink").unwrap();
+        cleanup_staging(&redirected.0).unwrap();
+        assert!(orphan.is_file());
+    }
+
+    #[test]
+    fn staging_cache_filesystem_failures_are_storage_errors() {
+        let workspace = Workspace::new();
+        fs::write(workspace.0.join("input-staging"), b"not a directory").unwrap();
+        let path = workspace.0.join("source");
+        fs::write(&path, b"source bytes").unwrap();
+        let mut state = reader(File::open(path).unwrap(), 0, None);
+        assert!(matches!(
+            stage_nonseekable(&mut state, &workspace.0),
+            Err(EngineError::Storage { .. })
+        ));
     }
 
     #[test]

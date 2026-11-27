@@ -57,7 +57,7 @@ fun ConverterWorkspace(
                 Choice("Sample rate", config.sampleRate?.let { "$it Hz" } ?: "Original") { sheet = "Sample rate" }
                 Choice("Channels", when(config.channels) { 1u -> "Mono"; 2u -> "Stereo"; else -> "Original" }) { sheet = "Channels" }
                 if(lossyControls && config.audioCodec != AudioCodec.COPY) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic") { sheet = "Audio bitrate" }
-                if(lossless) Text("Lossless output uses the selected representation; no lossy bitrate applies.", style = MaterialTheme.typography.bodySmall)
+                if(lossless) Text("PCM and FLAC use their selected sample representation; a lossy bitrate does not apply.", style = MaterialTheme.typography.bodySmall)
             }
             if(lossless && config.audioBitrate != null || config.audioCodec == AudioCodec.COPY && (config.audioBitrate != null || config.sampleRate != null || config.channels != null)) {
                 Text("The retained audio settings conflict with this choice.", color = MaterialTheme.colorScheme.error)
@@ -136,7 +136,7 @@ private fun WorkspacePreview(media: MediaSession, source: SourceSnapshot, video:
     LaunchedEffect(source.id, fallback, seek) {
         if(fallback) {
             result = null; error = null; loading = true
-            val request = media.newRequest()
+            val request = media.beginRequest()
             try { result = media.preview(source.id, requestedPosition.toLong(), request) }
             catch(cancelled: CancellationException) { throw cancelled }
             catch(failure: Exception) { error = failure.message ?: "This preview could not be prepared." }

@@ -84,6 +84,9 @@ def check_case(case):
     if "video_codec" in case:
         assert len(video) == 1 and video[0]["codec_name"] == case["video_codec"], path
         assert (video[0]["width"], video[0]["height"]) == (case["width"], case["height"]), path
+        if "display_aspect_ratio" in case:
+            actual = Fraction(video[0]["display_aspect_ratio"].replace(":", "/"))
+            assert_close(float(actual), float(Fraction(case["display_aspect_ratio"])), 0.0001, f"{path}: display aspect ratio")
         if "frame_rate" in case:
             assert_close(float(Fraction(video[0]["avg_frame_rate"])), case["frame_rate"], 0.01, f"{path}: frame rate")
             timestamps = sorted(float(packet["pts_time"]) for packet in media_packets(info, "video"))

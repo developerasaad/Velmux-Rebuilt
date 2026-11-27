@@ -18,6 +18,30 @@ use std::{
 const MAX_CHAPTERS: usize = 4096;
 const MAX_METADATA_ENTRIES: usize = 256;
 const MAX_METADATA_BYTES: usize = 4096;
+const MAX_SNAPSHOT_METADATA_BYTES: usize = 512 * 1024;
+
+#[derive(Default)]
+struct MetadataBudget {
+    retained_bytes: usize,
+}
+
+impl MetadataBudget {
+    fn retain(&mut self, key_bytes: usize, value_bytes: usize) -> Result<(), EngineError> {
+        // Empty metadata entries still have record/transport overhead. Charge
+        // their in-memory record size as well as actual retained UTF-8 bytes.
+        let next = self
+            .retained_bytes
+            .checked_add(mem::size_of::<MetadataEntry>())
+            .and_then(|size| size.checked_add(key_bytes))
+            .and_then(|size| size.checked_add(value_bytes))
+            .filter(|size| *size <= MAX_SNAPSHOT_METADATA_BYTES)
+            .ok_or_else(|| EngineError::Platform {
+                detail: "This media exceeds the 512 KiB inspection metadata limit".into(),
+            })?;
+        self.retained_bytes = next;
+        Ok(())
+    }
+}
 
 pub(crate) fn inspect(
     source: OpenedSource,
@@ -47,6 +71,8 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
             return Err(invalid("The source did not provide a media description"));
         }
         let descriptor = &*format.iformat;
+        let mut metadata_budget = MetadataBudget::default();
+        let container_metadata = metadata(format.metadata, &mut metadata_budget)?;
         let mut streams = Vec::with_capacity(format.nb_streams as usize);
         for index in 0..format.nb_streams as usize {
             input.check_cancelled()?;
@@ -54,7 +80,12 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
             if stream.is_null() || (*stream).codecpar.is_null() {
                 return Err(invalid("The source contains an invalid stream description"));
             }
-            streams.push(stream_info(&*stream, index, &identity));
+            streams.push(stream_info(
+                &*stream,
+                index,
+                &identity,
+                &mut metadata_budget,
+            )?);
         }
         if format.nb_chapters as usize > MAX_CHAPTERS {
             return Err(invalid(
@@ -76,7 +107,7 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
                 id: chapter.id,
                 start_time_us: timestamp(chapter.start, chapter.time_base),
                 end_time_us: timestamp(chapter.end, chapter.time_base),
-                metadata: metadata(chapter.metadata),
+                metadata: metadata(chapter.metadata, &mut metadata_budget)?,
             });
         }
         let container = text(descriptor.name).unwrap_or_else(|| "unknown".into());
@@ -102,7 +133,7 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
             start_time_us,
             bit_rate: positive_i64(format.bit_rate),
             streams,
-            metadata: metadata(format.metadata),
+            metadata: container_metadata,
             chapters,
             staged: input.was_staged(),
         })
@@ -133,7 +164,12 @@ fn content_duration(
     duration_us
 }
 
-unsafe fn stream_info(stream: &sys::AVStream, index: usize, identity: &str) -> StreamInfo {
+unsafe fn stream_info(
+    stream: &sys::AVStream,
+    index: usize,
+    identity: &str,
+    metadata_budget: &mut MetadataBudget,
+) -> Result<StreamInfo, EngineError> {
     let parameters = &*stream.codecpar;
     let descriptor = sys::avcodec_descriptor_get(parameters.codec_id);
     let codec =
@@ -164,7 +200,7 @@ unsafe fn stream_info(stream: &sys::AVStream, index: usize, identity: &str) -> S
             },
         }
     });
-    StreamInfo {
+    Ok(StreamInfo {
         id: format!("{identity}:{index}:{}", stream.id),
         index: index as u32,
         container_id: stream.id,
@@ -194,11 +230,11 @@ unsafe fn stream_info(stream: &sys::AVStream, index: usize, identity: &str) -> S
             None
         },
         level: (parameters.level > 0).then_some(parameters.level),
-        metadata: metadata(stream.metadata),
+        metadata: metadata(stream.metadata, metadata_budget)?,
         video,
         audio,
         subtitle,
-    }
+    })
 }
 
 unsafe fn video_info(stream: &sys::AVStream, parameters: &sys::AVCodecParameters) -> VideoInfo {
@@ -368,7 +404,10 @@ unsafe fn side_data(stream: &sys::AVStream, kind: sys::AVPacketSideDataType) -> 
     (data.cast_const(), size)
 }
 
-unsafe fn metadata(dictionary: *const sys::AVDictionary) -> Vec<MetadataEntry> {
+unsafe fn metadata(
+    dictionary: *const sys::AVDictionary,
+    budget: &mut MetadataBudget,
+) -> Result<Vec<MetadataEntry>, EngineError> {
     let mut result = Vec::new();
     let mut cursor = ptr::null_mut();
     for _ in 0..MAX_METADATA_ENTRIES {
@@ -381,12 +420,12 @@ unsafe fn metadata(dictionary: *const sys::AVDictionary) -> Vec<MetadataEntry> {
         if cursor.is_null() {
             break;
         }
-        result.push(MetadataEntry {
-            key: text((*cursor).key).unwrap_or_default(),
-            value: text((*cursor).value).unwrap_or_default(),
-        });
+        let key = text((*cursor).key).unwrap_or_default();
+        let value = text((*cursor).value).unwrap_or_default();
+        budget.retain(key.len(), value.len())?;
+        result.push(MetadataEntry { key, value });
     }
-    result
+    Ok(result)
 }
 
 unsafe fn text(pointer: *const c_char) -> Option<String> {
@@ -456,7 +495,77 @@ fn invalid(detail: &str) -> EngineError {
 
 #[cfg(test)]
 mod tests {
-    use super::content_duration;
+    use super::*;
+
+    #[test]
+    fn snapshot_budget_is_shared_across_many_small_dictionaries() {
+        struct Dictionary(*mut sys::AVDictionary);
+        impl Drop for Dictionary {
+            fn drop(&mut self) {
+                unsafe {
+                    sys::av_dict_free(&mut self.0);
+                }
+            }
+        }
+        let mut dictionary = Dictionary(ptr::null_mut());
+        let value = std::ffi::CString::new("v".repeat(1024)).unwrap();
+        unsafe {
+            assert_eq!(
+                sys::av_dict_set(&mut dictionary.0, c"title".as_ptr(), value.as_ptr(), 0),
+                0
+            );
+        }
+        let mut budget = MetadataBudget::default();
+        let mut retained = Vec::new();
+        loop {
+            let previous = budget.retained_bytes;
+            match unsafe { metadata(dictionary.0, &mut budget) } {
+                Ok(entries) => {
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].value.len(), 1024);
+                    retained.push(entries);
+                }
+                Err(error) => {
+                    assert!(
+                        matches!(error, EngineError::Platform { detail } if detail.contains("512 KiB inspection metadata limit"))
+                    );
+                    assert_eq!(
+                        budget.retained_bytes, previous,
+                        "A rejected entry must not consume budget"
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(
+            retained.len() > MAX_METADATA_ENTRIES,
+            "The limit must accumulate across separate dictionaries"
+        );
+        assert!(budget.retained_bytes <= MAX_SNAPSHOT_METADATA_BYTES);
+        // Inspection failure never alters FFmpeg's original dictionary.
+        let mut fresh_budget = MetadataBudget::default();
+        let original = unsafe { metadata(dictionary.0, &mut fresh_budget) }.unwrap();
+        assert_eq!(original[0].key, "title");
+        assert_eq!(original[0].value, value.to_str().unwrap());
+    }
+
+    #[test]
+    fn metadata_budget_counts_empty_records_and_rejects_arithmetic_overflow() {
+        let mut budget = MetadataBudget::default();
+        for _ in 0..MAX_SNAPSHOT_METADATA_BYTES / mem::size_of::<MetadataEntry>() {
+            budget.retain(0, 0).unwrap();
+        }
+        assert!(matches!(
+            budget.retain(0, 0),
+            Err(EngineError::Platform { .. })
+        ));
+        let previous = budget.retained_bytes;
+        assert!(matches!(
+            budget.retain(usize::MAX, 1),
+            Err(EngineError::Platform { .. })
+        ));
+        assert_eq!(budget.retained_bytes, previous);
+    }
 
     #[test]
     fn matroska_header_endpoint_uses_the_shared_content_origin() {

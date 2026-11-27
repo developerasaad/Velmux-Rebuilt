@@ -1,7 +1,8 @@
 import XCTest
 
 /// Exercises the actual system document picker. CI seeds generated fixtures in
-/// the installed application's Documents/UITestSources before this target runs.
+/// the separate fixture application's Documents/UITestSources before this target
+/// runs. Selecting its Files entry crosses the Velmux application's sandbox.
 /// No application launch hook or direct picker-delegate invocation supplies URLs.
 final class PickerFlowUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -92,7 +93,7 @@ final class PickerFlowUITests: XCTestCase {
             throw failure("The real system picker did not expose On My iPhone/iPad; seeded fixture selection is unverified")
         }
         local.tap()
-        try tap(label: "Velmux")
+        try tap(label: "Velmux Media Fixtures")
         try tap(label: "UITestSources")
         capture("System Files picker — generated fixture folder")
         // shouldShowFileExtensions is enabled, but accept Files' extensionless

@@ -8,6 +8,9 @@
             <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
                 <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="B00000000000000000000040" BuildableName="VelmuxUITests.xctest" BlueprintName="VelmuxUITests" ReferencedContainer="container:Velmux.xcodeproj"/>
             </BuildActionEntry>
+            <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+                <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="C00000000000000000000040" BuildableName="VelmuxMediaFixtures.app" BlueprintName="VelmuxMediaFixtures" ReferencedContainer="container:Velmux.xcodeproj"/>
+            </BuildActionEntry>
         </BuildActionEntries>
     </BuildAction>
     <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">

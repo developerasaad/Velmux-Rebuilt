@@ -465,8 +465,10 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                             != Some(if channels == 1 { "mono" } else { "stereo" })
                 })
                 || config.audio_bitrate.is_some();
-            let compatible =
-                unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
+            let compatible = (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) })
+                > 0
+                && (config.format != OutputFormat::M4a
+                    || matches!(stream.codec.as_str(), "aac" | "alac"));
             if config.audio_codec == AudioCodec::Copy && transform {
                 return Err(invalid(
                     "The selected audio settings require encoding; choose a compatible encoder.",
@@ -477,10 +479,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             let codec_change = stream.codec != desired
                 || (desired == "aac" && explicit_target && stream.profile.as_deref() != Some("LC"));
             let encode = config.audio_codec != AudioCodec::Copy
-                && (transform
-                    || !compatible
-                    || ((config.operation == Operation::AudioConverter || explicit_target)
-                        && codec_change));
+                && (transform || !compatible || (explicit_target && codec_change));
             if encode {
                 if !stream.decoder_available {
                     return Err(invalid(
@@ -535,7 +534,11 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
         } else {
             stream.codec_id
         };
-        if unsafe { sys::avformat_query_codec(muxer, target_id as _, 0) } <= 0 {
+        if (unsafe { sys::avformat_query_codec(muxer, target_id as _, 0) }) <= 0
+            || (config.format == OutputFormat::M4a
+                && stream.kind == StreamKind::Audio
+                && !matches!(item.expected_codec.as_str(), "aac" | "alac"))
+        {
             return Err(invalid(format!("{} stream {} is incompatible with this container. Choose a compatible format; tracks are never silently discarded.",stream.codec,stream.index)));
         }
         streams.push(item);

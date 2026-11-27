@@ -277,6 +277,16 @@ unsafe fn make_transform(
     (*dec).thread_count = 2;
     (*dec).max_pixels = 64 * 1024 * 1024;
     (*dec).max_samples = 16 * 1024 * 1024;
+    if (*dec).codec_type == sys::AVMEDIA_TYPE_AUDIO
+        && (*dec).ch_layout.order == sys::AV_CHANNEL_ORDER_UNSPEC
+        && matches!((*dec).ch_layout.nb_channels, 1 | 2)
+    {
+        // Unmasked mono/stereo PCM has ordered samples but no explicit speaker
+        // mask. Resolve the conventional layout without mixing or dropping them.
+        let count = (*dec).ch_layout.nb_channels;
+        sys::av_channel_layout_uninit(&mut (*dec).ch_layout);
+        sys::av_channel_layout_default(&mut (*dec).ch_layout, count);
+    }
     check(
         sys::avcodec_open2(dec, decoder_codec, ptr::null_mut()),
         "Decode",
@@ -302,6 +312,21 @@ unsafe fn make_transform(
             } else {
                 sys::AVRational { num: 1, den: 1 }
             };
+        (*enc).sample_aspect_ratio = sys::av_mul_q(
+            (*enc).sample_aspect_ratio,
+            sys::AVRational {
+                num: (*dec).width.checked_mul((*enc).height).ok_or_else(|| {
+                    EngineError::InvalidMedia {
+                        detail: "Video aspect-ratio arithmetic exceeded its bounds.".into(),
+                    }
+                })?,
+                den: (*dec).height.checked_mul((*enc).width).ok_or_else(|| {
+                    EngineError::InvalidMedia {
+                        detail: "Video aspect-ratio arithmetic exceeded its bounds.".into(),
+                    }
+                })?,
+            },
+        );
         (*enc).time_base = if config.frame_rate == FrameRate::Fps30 {
             sys::AVRational { num: 1, den: 30 }
         } else {
@@ -388,10 +413,23 @@ unsafe fn make_transform(
             (*enc).bit_rate = i64::from(config.audio_bitrate.unwrap_or(192_000));
         }
     }
-    check(
-        sys::avcodec_open2(enc, encoder_codec, ptr::null_mut()),
-        "Encode",
-    )?;
+    let opened = sys::avcodec_open2(enc, encoder_codec, ptr::null_mut());
+    if opened < 0 {
+        let mut layout = [0 as std::ffi::c_char; 128];
+        sys::av_channel_layout_describe(&(*enc).ch_layout, layout.as_mut_ptr(), layout.len());
+        return Err(EngineError::Encoding {
+            detail: format!(
+                "Cannot initialize {} ({}×{}, {} Hz, {}, sample format {}): {}",
+                encoder_name.to_string_lossy(),
+                (*enc).width,
+                (*enc).height,
+                (*enc).sample_rate,
+                CStr::from_ptr(layout.as_ptr()).to_string_lossy(),
+                (*enc).sample_fmt,
+                failure(opened, "Encode")
+            ),
+        });
+    }
     check(
         sys::avcodec_parameters_from_context((*out).codecpar, enc),
         "Encode",

@@ -168,7 +168,7 @@ jobs:
       - id: framework-identity
         env:
           NATIVE_ID: ${{ steps.identity.outputs.key }}
-          SOURCE_ID: ${{ hashFiles('UI/src/**', 'UI/integration/**', 'UI/resources/**', 'UI/build.gradle.kts', 'core/src/**', 'core/Cargo.*', 'core/build.rs', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'rust-toolchain.toml', 'gradle/wrapper/**') }}
+          SOURCE_ID: ${{ hashFiles('UI/src/**', 'UI/integration/**', 'UI/resources/**', 'UI/build.gradle.kts', 'core/src/**', 'core/Cargo.*', 'core/build.rs', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'rust-toolchain.toml', 'gradle/wrapper/**', '.cargo/**', 'scripts/ci/apple-framework.sh', 'scripts/check-build-environment.sh', '.github/workflows/foundation.yml') }}
         run: echo "key=apple-framework-v1-${{ runner.os }}-${{ runner.arch }}-$NATIVE_ID-$SOURCE_ID" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v4
         id: device-framework
@@ -211,6 +211,7 @@ jobs:
           path: |
             build/ios-tests.xcresult
             build/ios-tests.log
+            build/ios-source-hashes.json
             build/ios-screenshots
             build/ios/iphoneos/VelmuxUI.framework/Headers/VelmuxUI.h
           retention-days: 7

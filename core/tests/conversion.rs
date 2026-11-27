@@ -542,7 +542,7 @@ fn real_video_downscale_respects_encoder_alignment_and_target_bounds() {
     config.video_codec = VideoCodec::H264;
     config.video_size = VideoSize::Sd480;
     let record = harness.complete(&harness.submit(&source, config).id);
-    harness.expect(vec![json!({"path":record.output.unwrap().locator,"video_codec":"h264","width":852,"height":480,"audio_codecs":[],"duration":1.0})]);
+    harness.expect(vec![json!({"path":record.output.unwrap().locator,"video_codec":"h264","width":852,"height":480,"display_aspect_ratio":"16/9","audio_codecs":[],"duration":1.0})]);
 }
 
 #[test]
@@ -1277,4 +1277,14 @@ fn canceled_and_obsolete_preview_requests_release_native_sources_and_scratch() {
         .collect();
     assert_eq!(remaining, vec![unidentified]);
     assert!(harness.engine().jobs().unwrap().is_empty());
+}
+
+#[test]
+fn unmasked_stereo_pcm_encodes_aac_without_losing_channel_identity() {
+    let harness = Harness::new("wav-aac");
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.audio_codec = AudioCodec::Aac;
+    let result = harness.complete(&harness.submit(&source, config).id);
+    harness.expect(vec![expectation(&result, "aac", 2, 48_000)]);
 }
