@@ -169,5 +169,7 @@ jobs:
         if: always()
         with:
           name: ios-foundation-evidence
-          path: build/ios-tests.xcresult
+          path: |
+            build/ios-tests.xcresult
+            build/ios-tests.log
           retention-days: 7

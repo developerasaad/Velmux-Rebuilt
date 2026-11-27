@@ -7,7 +7,13 @@ final class FoundationIntegrationTests: XCTestCase {
     @MainActor
     func testApplicationHostUsesLiveSharedSession() throws {
         let host = try XCTUnwrap(UIApplication.shared.delegate as? AppDelegate)
-        XCTAssertNotNil(host.window?.rootViewController)
+        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "CADisableMinimumFrameDurationOnPhone") as? Bool, true)
+        let window = try XCTUnwrap(host.window)
+        let controller = try XCTUnwrap(window.rootViewController)
+        controller.loadViewIfNeeded()
+        XCTAssertTrue(controller.isViewLoaded)
+        XCTAssertFalse(window.isHidden)
+        XCTAssertNotNil(controller.view.window)
         let session = try XCTUnwrap(host.session)
         let report = try session.inspect()
         XCTAssertTrue(report.ffmpegVersion.hasPrefix("7.1."))

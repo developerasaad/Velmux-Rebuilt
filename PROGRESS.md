@@ -41,6 +41,9 @@ The host Rust tests demonstrate linked FFmpeg registries, record values, native-
 - Apple [45931075511](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931075511), `662af3d`: unsigned device app build passed. Simulator compilation attempted unsupported x86_64 alongside arm64; the project now explicitly selects arm64, matching the Kotlin/Rust/native artifacts, and selects an SDK-matched runtime. Actual simulator tests remain pending.
 - Gobley 0.3.7 is retained. An upstream JNA regression was investigated, but symbolication identified platform-library bundling rather than evidence for changing the binding generator.
 
+- [Independent native link probes 45935213040](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45935213040), `74d2362`, reproduced the NDK path defect with tiny Clang shared-library builds: default/API-first lookup uses shared libc; explicitly prioritizing the generic ABI directory pulls static Bionic. The broad SDK search path has been removed.
+- iOS job in [45934049976](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45934049976), `22f65bd`, passed the device build and all five simulator interoperability tests. Inspection also found a Compose plist sanity exception despite green XCTest status. The required high-refresh plist key and a stronger visible-controller launch assertion are added; the shell now rejects uncaught Kotlin exceptions in the simulator log.
+
 ## Acceptance remaining
 
 Demonstrate real Android and iOS host-to-Rust-to-FFmpeg calls and provider callbacks at runtime, cancellation/errors/lifetime behavior, Android API 29/newer launch and iOS simulator launch, plus successful unsigned Apple device-target linkage. Inspect final workflow evidence and review the integrated result before accepting Milestone 1.

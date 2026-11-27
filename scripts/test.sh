@@ -36,7 +36,12 @@ case "${1:-}" in
     xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Debug \
       -sdk iphonesimulator -destination "platform=iOS Simulator,id=$device" \
       -derivedDataPath build/xcode/tests -resultBundlePath build/ios-tests.xcresult \
-      CODE_SIGNING_ALLOWED=NO test
+      CODE_SIGNING_ALLOWED=NO test 2>&1 | tee build/ios-tests.log
+    python3 - <<'CHECK_IOS_LOG'
+from pathlib import Path
+if 'Uncaught Kotlin exception:' in Path('build/ios-tests.log').read_text(errors='replace'):
+    raise SystemExit('The iOS host logged an uncaught Kotlin exception during runtime verification')
+CHECK_IOS_LOG
     ;;
   *) echo 'Usage: scripts/test.sh host|android|ios-simulator' >&2; exit 2 ;;
 esac
