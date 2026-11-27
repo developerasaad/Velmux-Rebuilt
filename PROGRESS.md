@@ -22,6 +22,13 @@ Milestone 1 — Engineering foundation: in progress. Milestones 2–7 are pendin
 - Initial Android CI selected the hosted default NDK 27.3 rather than the required 27.2. Identity validation rejected it before construction. CI now explicitly resolves the pinned NDK; host/Apple construction continues without an unchanged rerun.
 - Local source checks passed: full specification byte equality, shell/Python parsing, Xcode project/plist syntax and Rust formatting. These do not prove linking or runtime correctness.
 
+## CI evidence
+
+- [Source checks 45926839454](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45926839454), `3814f83`: passed on attempt 2. Attempt 1 failed Maven plugin resolution; the published pinned POM was independently reachable and the unchanged retry passed.
+- [Android native dependencies 45926413147](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45926413147), `baed2e9`: both arm64-v8a and x86_64 construction/compiled-component validation passed. x86_64 reported 512 decoders, 195 encoders, 177 muxers and 350 demuxers. These are build-tree capability checks, not mobile runtime or hardware-processing proof.
+- Initial Apple job in run 45926113131 failed x265 C linking because its pkg-config closure omitted libc++. A focused x265/zimg Apple runtime correction is under integration; no Apple acceptance is claimed.
+- Host native construction is still in progress.
+
 ## Acceptance still pending
 
 Dependency construction and target capability verification; Android/iOS linking, launch, callbacks, cancellation and lifetime tests; host tests; actual CI run inspection. No product tools or physical-device behavior are claimed.
