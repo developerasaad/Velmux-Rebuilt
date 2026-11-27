@@ -114,11 +114,12 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
         return Err(invalid("Choose a format for the selected converter."));
     }
     if config.file_name.trim().is_empty()
+        || config.file_name.trim() != config.file_name
         || config.file_name.len() > 180
         || config
             .file_name
             .chars()
-            .any(|c| c.is_control() || "/\\:".contains(c))
+            .any(|c| c.is_control() || "/\\:*?\"<>|".contains(c))
         || config.file_name.starts_with('.')
         || config.file_name.ends_with('.')
     {
@@ -215,11 +216,19 @@ pub(crate) fn default_config(
         .file_stem()
         .and_then(|v| v.to_str())
         .unwrap_or("media");
-    let stem: String = stem
+    let mut clean = String::new();
+    for c in stem
+        .trim()
+        .trim_start_matches('.')
         .chars()
-        .filter(|c| !c.is_control() && !"/\\:".contains(*c))
-        .take(100)
-        .collect();
+        .filter(|c| !c.is_control() && !"/\\:*?\"<>|".contains(*c))
+    {
+        if clean.len() + c.len_utf8() > 150 {
+            break;
+        }
+        clean.push(c);
+    }
+    let stem = clean.trim().trim_matches('.');
     ConversionConfig {
         operation,
         format: if operation == Operation::VideoConverter {
@@ -259,9 +268,9 @@ pub(crate) fn catalog(operation: Operation) -> Vec<FormatOption> {
         ]
     } else {
         vec![
-            (OutputFormat::M4a, "M4A · AAC"),
+            (OutputFormat::M4a, "M4A"),
             (OutputFormat::Mp3, "MP3"),
-            (OutputFormat::Wav, "WAV · PCM 16-bit"),
+            (OutputFormat::Wav, "WAV"),
             (OutputFormat::Flac, "FLAC"),
         ]
     };
@@ -291,4 +300,17 @@ pub(crate) fn catalog(operation: Operation) -> Vec<FormatOption> {
             },
         })
         .collect()
+}
+
+pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<FormatOption> {
+    use crate::{ffmpeg::sys, StreamKind};
+    catalog(operation).into_iter().filter_map(|mut option|{
+        let name=std::ffi::CString::new(option.format.muxer()).unwrap();
+        let muxer=unsafe{sys::av_guess_format(name.as_ptr(),std::ptr::null(),std::ptr::null())};
+        if muxer.is_null(){return None;}
+        let compatible=|kind:StreamKind| info.streams.iter().filter(|stream|stream.kind==kind).all(|stream|unsafe{sys::avformat_query_codec(muxer,stream.codec_id as _,0)}>0);
+        if !compatible(StreamKind::Video){option.video_codecs.retain(|codec|*codec!=VideoCodec::Copy);}
+        if !compatible(StreamKind::Audio){option.audio_codecs.retain(|codec|*codec!=AudioCodec::Copy);}
+        Some(option)
+    }).collect()
 }

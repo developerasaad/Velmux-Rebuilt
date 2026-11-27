@@ -290,10 +290,10 @@ final class IosMediaServices: NSObject, MediaServices {
         return NativePublished(locator: url.absoluteString, displayName: record.outputName, size: size)
     }
 
-    func publicationStatus(reservation: NativeReservation) throws -> NativePublished? {
+    func publicationStatus(reservation: NativeReservation) throws -> NativePublicationStatus {
         Self.publicationLock.lock()
         defer { Self.publicationLock.unlock() }
-        return try publishedResult(readReservation(reservation))
+        return NativePublicationStatus(output: try publishedResult(readReservation(reservation)))
     }
 
     func publishOutput(reservation: NativeReservation, workingPath: String, expectedSize: Int64) throws -> NativePublished {

@@ -7,6 +7,8 @@ data class SelectedSource(val locator: String, val displayName: String)
 data class NativeSource(val fd: Int, val offset: Long, val length: Long, val leaseId: String)
 data class NativeReservation(val locator: String, val displayName: String, val mimeType: String)
 data class NativePublished(val locator: String, val displayName: String, val size: Long)
+/** A non-null result separates "not published" from NSError failure in Swift/ObjC. */
+data class NativePublicationStatus(val output: NativePublished?)
 
 class PlatformFailure(message: String) : Exception(message)
 
@@ -22,7 +24,7 @@ interface MediaServices {
     @Throws(PlatformFailure::class)
     fun publishOutput(reservation: NativeReservation, workingPath: String, expectedSize: Long): NativePublished
     @Throws(PlatformFailure::class)
-    fun publicationStatus(reservation: NativeReservation): NativePublished?
+    fun publicationStatus(reservation: NativeReservation): NativePublicationStatus
     fun discardReservation(reservation: NativeReservation)
 }
 

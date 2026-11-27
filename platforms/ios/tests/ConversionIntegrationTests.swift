@@ -344,7 +344,7 @@ final class ConversionIntegrationTests: XCTestCase {
         let actions = try XCTUnwrap(host.mediaActions)
         let controller = actions.createPreview(locator: clip.locator) {
             XCTFail("The encoded fallback preview must be playable")
-            return KotlinUnit()
+            return
         }
         defer { actions.releasePreview(controller: controller) }
         controller.loadViewIfNeeded()
@@ -381,7 +381,7 @@ final class ConversionIntegrationTests: XCTestCase {
             XCTAssertNil(selected)
             XCTAssertNil(error, "Picker cancellation is not an error")
             canceled.fulfill()
-            return KotlinUnit()
+            return
         }
         var picker: UIDocumentPickerViewController?
         for _ in 0..<100 {

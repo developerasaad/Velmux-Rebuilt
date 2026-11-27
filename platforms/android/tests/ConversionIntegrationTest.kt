@@ -449,7 +449,7 @@ class ConversionIntegrationTest {
             ?: error("The generated verification source was not visible: $name")
         document.click()
         if (!device.wait(Until.hasObject(By.pkg(context.packageName)), 5_000)) {
-            device.findObject(By.textMatches("(?i)open"))?.click()
+            device.findObject(By.text(java.util.regex.Pattern.compile("(?i)open")))?.click()
         }
         assertTrue("The picker did not return the selected document", device.wait(Until.hasObject(By.pkg(context.packageName)), 15_000))
     }

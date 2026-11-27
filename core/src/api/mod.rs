@@ -169,6 +169,13 @@ impl Engine {
     pub fn media_catalog(&self, operation: crate::Operation) -> Vec<crate::FormatOption> {
         crate::configuration::catalog(operation)
     }
+    pub fn media_catalog_for_source(
+        &self,
+        id: String,
+        operation: crate::Operation,
+    ) -> Result<Vec<crate::FormatOption>, EngineError> {
+        self.media_runtime()?.source_catalog(&id, operation)
+    }
     pub fn validate_configuration(
         &self,
         id: String,

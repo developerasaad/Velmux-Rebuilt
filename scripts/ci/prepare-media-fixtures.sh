@@ -36,7 +36,7 @@ run_ffmpeg -f lavfi -i 'testsrc2=size=320x180:rate=30:duration=3' \
   -c:v libx264 -preset ultrafast -threads:v 1 -pix_fmt yuv420p "$fixtures/vfr.mkv"
 run_ffmpeg -i "$fixtures/video.mp4" -an -vf setsar=4/3 -c:v libx264 \
   -preset ultrafast -threads:v 1 "$fixtures/sar-intermediate.mp4"
-run_ffmpeg -i "$fixtures/sar-intermediate.mp4" -c copy -metadata:s:v:0 rotate=90 "$fixtures/rotated-sar.mp4"
+run_ffmpeg -display_rotation:v:0 90 -i "$fixtures/sar-intermediate.mp4" -c copy "$fixtures/rotated-sar.mp4"
 rm "$fixtures/sar-intermediate.mp4"
 cat > "$fixtures/captions.srt" <<'SUBTITLES'
 1
@@ -62,7 +62,9 @@ for path in root.iterdir():
         probes[path.name] = json.loads(subprocess.check_output(
             ['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-show_chapters', '-of', 'json', str(path)], text=True, timeout=15))
 (root / 'probes.json').write_text(json.dumps(probes, indent=2) + '\n')
-print('Independent rotation facts:', probes['rotated-sar.mp4']['streams'][0].get('side_data_list'))
+rotation = probes['rotated-sar.mp4']['streams'][0].get('side_data_list', [])
+print('Independent rotation facts:', rotation)
+assert any(abs(item.get('rotation', 0)) == 90 for item in rotation), 'The independently generated rotation fixture lacks its required display matrix'
 files = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
          for path in root.iterdir() if path.name != 'fixtures.json' and path.is_file()}
 manifest = {'files': files, 'ffmpeg_version': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0]}

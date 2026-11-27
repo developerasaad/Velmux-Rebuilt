@@ -130,14 +130,14 @@ class AndroidMediaServices(context: Context) : MediaServices {
             }
         }
 
-    override fun publicationStatus(reservation: NativeReservation): NativePublished? =
-        platformOperation("The saved output could not be inspected. Check storage access and retry.") {
+    override fun publicationStatus(reservation: NativeReservation): com.velmux.ui.app.NativePublicationStatus =
+        com.velmux.ui.app.NativePublicationStatus(platformOperation("The saved output could not be inspected. Check storage access and retry.") {
             synchronized(publicationLock) {
                 val row = readRow(reservationUri(reservation.locator)) ?: return@synchronized null
                 requireOwned(row)
                 if (row.pending) null else published(row)
             }
-        }
+        })
 
     override fun discardReservation(reservation: NativeReservation) {
         // A failure leaves unpublished scratch for later reconciliation. Never delete published media.

@@ -316,6 +316,16 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| configuration::invalid("Select and inspect a source before continuing."))
     }
+    pub fn source_catalog(
+        &self,
+        id: &str,
+        operation: Operation,
+    ) -> Result<Vec<crate::FormatOption>, EngineError> {
+        Ok(configuration::source_catalog(
+            &self.asset(id)?.info,
+            operation,
+        ))
+    }
     pub fn defaults(
         &self,
         id: &str,

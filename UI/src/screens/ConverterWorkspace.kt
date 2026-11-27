@@ -5,6 +5,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
@@ -20,7 +21,7 @@ fun ConverterWorkspace(
     submitting: Boolean, onChange: (ConversionConfig) -> Unit, onConvert: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val formats = remember(media, video) { media.catalog(video) }
+    val formats = remember(media, source.id, video) { media.catalogForSource(source.id, video) }
     val format = formats.firstOrNull { it.format == config.format }
     var sheet by remember { mutableStateOf<String?>(null) }
     var advancedAudio by remember { mutableStateOf(false) }
@@ -58,8 +59,16 @@ fun ConverterWorkspace(
                 if(lossyControls && config.audioCodec != AudioCodec.COPY) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic") { sheet = "Audio bitrate" }
                 if(lossless) Text("Lossless output uses the selected representation; no lossy bitrate applies.", style = MaterialTheme.typography.bodySmall)
             }
+            if(lossless && config.audioBitrate != null || config.audioCodec == AudioCodec.COPY && (config.audioBitrate != null || config.sampleRate != null || config.channels != null)) {
+                Text("The retained audio settings conflict with this choice.", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { onChange(config.copy(audioBitrate = null, sampleRate = null, channels = null)) }) { Text("Use original audio settings") }
+            }
+            if(config.videoCodec == VideoCodec.COPY && (config.videoSize != VideoSize.ORIGINAL || config.frameRate != FrameRate.ORIGINAL || config.quality != 23.toUByte())) {
+                Text("Copying requires original video settings.", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL, quality = 23u)) }) { Text("Use original video settings") }
+            }
             OutlinedTextField(config.fileName, onValueChange = { onChange(config.copy(fileName = it)) }, label = { Text("Output name") }, suffix = { Text(".${format?.extension ?: ""}") },
-                singleLine = true, enabled = !submitting, isError = config.fileName.isBlank(), modifier = Modifier.fillMaxWidth())
+                singleLine = true, enabled = !submitting, isError = config.fileName.isBlank(), modifier = Modifier.fillMaxWidth().testTag("output-name"))
             Text("The source is checked again before acceptance. Incompatible tracks are reported instead of being discarded.", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(12.dp))
         }
@@ -153,7 +162,7 @@ private fun WorkspacePreview(media: MediaSession, source: SourceSnapshot, video:
 
 @Composable
 private fun Choice(title: String, value: String, onClick: () -> Unit) {
-    OutlinedButton(onClick, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
+    OutlinedButton(onClick, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("choice-$title"), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
         Text(title, Modifier.weight(1f)); Text(value)
     }
 }

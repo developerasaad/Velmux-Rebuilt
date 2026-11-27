@@ -239,6 +239,8 @@ class MediaSession(private val engine: Engine) {
         checkOpen()
         engine.mediaCatalog(operation(video))
     }
+    @Throws(EngineException::class, IllegalStateException::class)
+    fun catalogForSource(id: String, video: Boolean): List<FormatOption> = ready { engine.mediaCatalogForSource(id, operation(video)) }
 
     @Throws(EngineException::class, IllegalStateException::class)
     suspend fun validate(id: String, configuration: ConversionConfig) = withContext(Dispatchers.Default) {
@@ -420,7 +422,7 @@ private class NativeMediaAdapter(private val native: MediaServices) : MediaProvi
     }
 
     override fun publicationStatus(reservation: OutputReservation): PublishedOutput? = storageCall {
-        native.publicationStatus(reservation.native())?.published()
+        native.publicationStatus(reservation.native()).output?.published()
     }
 
     override fun discardReservation(reservation: OutputReservation) {

@@ -330,7 +330,7 @@ unsafe fn make_transform(
     } else {
         (*enc).sample_rate = plan.sample_rate.unwrap() as i32;
         let channels = plan.channels.unwrap() as i32;
-        if channels == (*dec).ch_layout.nb_channels {
+        if config.channels.is_none() && channels == (*dec).ch_layout.nb_channels {
             check(
                 sys::av_channel_layout_copy(&mut (*enc).ch_layout, &(*dec).ch_layout),
                 "Encode",

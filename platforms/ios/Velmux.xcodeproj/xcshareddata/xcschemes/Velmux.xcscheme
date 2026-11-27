@@ -5,12 +5,18 @@
             <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
                 <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000040" BuildableName="Velmux.app" BlueprintName="Velmux" ReferencedContainer="container:Velmux.xcodeproj"/>
             </BuildActionEntry>
+            <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+                <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="B00000000000000000000040" BuildableName="VelmuxUITests.xctest" BlueprintName="VelmuxUITests" ReferencedContainer="container:Velmux.xcodeproj"/>
+            </BuildActionEntry>
         </BuildActionEntries>
     </BuildAction>
     <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
         <Testables>
-            <TestableReference skipped="NO">
+            <TestableReference skipped="NO" parallelizable="NO">
                 <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A00000000000000000000041" BuildableName="VelmuxTests.xctest" BlueprintName="VelmuxTests" ReferencedContainer="container:Velmux.xcodeproj"/>
+            </TestableReference>
+            <TestableReference skipped="NO" parallelizable="NO">
+                <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="B00000000000000000000040" BuildableName="VelmuxUITests.xctest" BlueprintName="VelmuxUITests" ReferencedContainer="container:Velmux.xcodeproj"/>
             </TestableReference>
         </Testables>
     </TestAction>

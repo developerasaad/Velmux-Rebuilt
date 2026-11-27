@@ -586,7 +586,14 @@ fn original_vfr_and_positive_origin_preserve_real_packet_timing() {
         let mut encode = harness.defaults(&source, Operation::VideoConverter);
         encode.format = OutputFormat::Matroska;
         encode.video_codec = VideoCodec::H264;
-        encode.audio_codec = AudioCodec::Aac;
+        if source
+            .info
+            .streams
+            .iter()
+            .any(|stream| stream.kind == StreamKind::Audio)
+        {
+            encode.audio_codec = AudioCodec::Aac;
+        }
         encode.file_name = format!(
             "{}_encoded",
             Path::new(name).file_stem().unwrap().to_str().unwrap()

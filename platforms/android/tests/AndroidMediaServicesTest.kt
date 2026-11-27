@@ -77,10 +77,10 @@ class AndroidMediaServicesTest {
             val restarted = AndroidMediaServices(context)
             val second = restarted.reserveOutput(job, "another-name.bin", "application/octet-stream")
             assertEquals(first.locator, second.locator)
-            assertNull(restarted.publicationStatus(first))
+            assertNull(restarted.publicationStatus(first).output)
             expectFailure { restarted.publishOutput(first, working.absolutePath, bytes.size.toLong() + 1) }
             assertTrue(working.isFile)
-            assertNull(restarted.publicationStatus(first))
+            assertNull(restarted.publicationStatus(first).output)
             val published = restarted.publishOutput(first, working.absolutePath, bytes.size.toLong())
             assertEquals(bytes.size.toLong(), published.size)
             context.contentResolver.openInputStream(Uri.parse(published.locator))!!.use {
@@ -90,7 +90,7 @@ class AndroidMediaServicesTest {
             assertEquals(published, restarted.publishOutput(first, working.absolutePath, bytes.size.toLong()))
             assertEquals(first.locator, AndroidMediaServices(context).reserveOutput(job, "again.bin", "application/octet-stream").locator)
             restarted.discardReservation(first)
-            assertEquals(published, restarted.publicationStatus(first))
+            assertEquals(published, restarted.publicationStatus(first).output)
         } finally {
             working.delete()
             // Explicitly remove this manufactured test output, outside production cleanup policy.

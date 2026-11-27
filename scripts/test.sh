@@ -40,8 +40,17 @@ case "${1:-}" in
     xcrun simctl bootstatus "$device" -b
     xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Debug \
       -sdk iphonesimulator -destination "platform=iOS Simulator,id=$device" \
-      -derivedDataPath build/xcode/tests -resultBundlePath build/ios-tests.xcresult \
-      CODE_SIGNING_ALLOWED=NO test 2>&1 | tee build/ios-tests.log
+      -derivedDataPath build/xcode/tests -parallel-testing-enabled NO \
+      CODE_SIGNING_ALLOWED=NO build-for-testing
+    app=build/xcode/tests/Build/Products/Debug-iphonesimulator/Velmux.app
+    xcrun simctl install "$device" "$app"
+    container=$(xcrun simctl get_app_container "$device" com.velmux.mobile data)
+    mkdir -p "$container/Documents/UITestSources"
+    cp build/media-fixtures/video.mp4 build/media-fixtures/stereo.wav "$container/Documents/UITestSources/"
+    xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Debug \
+      -sdk iphonesimulator -destination "platform=iOS Simulator,id=$device" \
+      -derivedDataPath build/xcode/tests -resultBundlePath build/ios-tests.xcresult -parallel-testing-enabled NO \
+      CODE_SIGNING_ALLOWED=NO test-without-building 2>&1 | tee build/ios-tests.log
     python3 - <<'CHECK_IOS_LOG'
 from pathlib import Path
 if 'Uncaught Kotlin exception:' in Path('build/ios-tests.log').read_text(errors='replace'):

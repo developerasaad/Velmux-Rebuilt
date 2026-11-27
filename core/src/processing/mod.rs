@@ -283,6 +283,19 @@ pub(crate) fn validate_operation(
 pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, EngineError> {
     validate_fields(config)?;
     validate_operation(info, config.operation)?;
+    if !info
+        .streams
+        .iter()
+        .any(|stream| stream.kind == StreamKind::Audio)
+        && (!matches!(config.audio_codec, AudioCodec::Automatic | AudioCodec::Copy)
+            || config.audio_bitrate.is_some()
+            || config.sample_rate.is_some()
+            || config.channels.is_some())
+    {
+        return Err(invalid(
+            "This source has no audio stream to apply these audio settings to.",
+        ));
+    }
     let muxer_name = CString::new(config.format.muxer()).unwrap();
     let muxer =
         unsafe { sys::av_guess_format(muxer_name.as_ptr(), std::ptr::null(), std::ptr::null()) };
@@ -412,13 +425,19 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             } else {
                 desired
             };
-            let transform = config.sample_rate.is_some()
-                || config.channels.is_some()
+            let transform = config
+                .sample_rate
+                .is_some_and(|rate| Some(rate) != audio.sample_rate)
+                || config.channels.is_some_and(|channels| {
+                    Some(channels) != audio.channels
+                        || audio.channel_layout.as_deref()
+                            != Some(if channels == 1 { "mono" } else { "stereo" })
+                })
                 || config.audio_bitrate.is_some();
             let compatible =
                 unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
             let encode = config.audio_codec != AudioCodec::Copy
-                && (config.audio_codec != AudioCodec::Automatic
+                && (!matches!(config.audio_codec, AudioCodec::Automatic | AudioCodec::Copy)
                     || transform
                     || !compatible
                     || (config.operation == Operation::AudioConverter && stream.codec != desired));

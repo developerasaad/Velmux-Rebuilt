@@ -7,7 +7,7 @@ import VelmuxUI
 /** UIKit actions are confined to the main queue; file access runs on workers. */
 final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, UIDocumentPickerDelegate, UIDocumentInteractionControllerDelegate, UIAdaptivePresentationControllerDelegate {
     private let presentationHost: () -> UIViewController?
-    private var selection: ((SelectedSource?, String?) -> KotlinUnit)?
+    private var selection: ((SelectedSource?, String?) -> Void)?
     private var selectionID: UUID?
     private var resolvingSelection = false
     private var documentInteraction: UIDocumentInteractionController?
@@ -22,7 +22,7 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
         return host
     }
 
-    func selectSource(video: Bool, completion: @escaping (SelectedSource?, String?) -> KotlinUnit) {
+    func selectSource(video: Bool, completion: @escaping (SelectedSource?, String?) -> Void) {
         DispatchQueue.main.async {
             guard self.selection == nil else {
                 _ = completion(nil, "A document selection is already open.")
@@ -82,7 +82,7 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
         }
     }
 
-    func openOutput(locator: String, completion: @escaping (String?) -> KotlinUnit) {
+    func openOutput(locator: String, completion: @escaping (String?) -> Void) {
         DispatchQueue.main.async {
             guard let url = URL(string: locator), url.isFileURL,
                   FileManager.default.isReadableFile(atPath: url.path),
@@ -103,7 +103,7 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
         }
     }
 
-    func shareOutput(locator: String, completion: @escaping (String?) -> KotlinUnit) {
+    func shareOutput(locator: String, completion: @escaping (String?) -> Void) {
         DispatchQueue.main.async {
             guard let url = URL(string: locator), url.isFileURL,
                   FileManager.default.isReadableFile(atPath: url.path),
@@ -130,7 +130,7 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
         if documentInteraction === controller { documentInteraction = nil }
     }
 
-    func createPreview(locator: String, onUnsupported: @escaping () -> KotlinUnit) -> UIViewController {
+    func createPreview(locator: String, onUnsupported: @escaping () -> Void) -> UIViewController {
         dispatchPrecondition(condition: .onQueue(.main))
         do {
             let url = try IosMediaServices.resolveSource(locator)

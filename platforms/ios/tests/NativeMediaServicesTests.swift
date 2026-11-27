@@ -63,7 +63,7 @@ final class NativeMediaServicesTests: XCTestCase {
         let reservation = try services.reserveOutput(jobId: "stable-job-1", fileName: "video.mp4", mimeType: "video/mp4")
         let repeated = try services.reserveOutput(jobId: "stable-job-1", fileName: "video.mp4", mimeType: "video/mp4")
         XCTAssertEqual(repeated.locator, reservation.locator)
-        XCTAssertNil(try services.publicationStatus(reservation: reservation))
+        XCTAssertNil(try services.publicationStatus(reservation: reservation).output)
         let published = try services.publishOutput(reservation: reservation, workingPath: working.path, expectedSize: Int64(bytes.count))
         let outputURL = try XCTUnwrap(URL(string: published.locator))
         XCTAssertEqual(try Data(contentsOf: outputURL), bytes)
@@ -76,7 +76,7 @@ final class NativeMediaServicesTests: XCTestCase {
         record["published"] = false
         try JSONSerialization.data(withJSONObject: record).write(to: manifest, options: .atomic)
         let restarted = IosMediaServices(operationalRoot: services.operationalRoot, cacheDirectory: services.cacheDirectory, outputDirectory: services.outputDirectory)
-        let recovered = try XCTUnwrap(restarted.publicationStatus(reservation: reservation))
+        let recovered = try XCTUnwrap(restarted.publicationStatus(reservation: reservation).output)
         XCTAssertEqual(recovered.locator, published.locator)
         XCTAssertEqual(try restarted.publishOutput(reservation: reservation, workingPath: working.path, expectedSize: Int64(bytes.count)).locator, published.locator)
         restarted.discardReservation(reservation: reservation)
@@ -132,7 +132,7 @@ final class NativeMediaServicesTests: XCTestCase {
         let size = Int64(try Data(contentsOf: working).count)
         let result = try services.publishOutput(reservation: second, workingPath: working.path, expectedSize: size)
         XCTAssertTrue(result.displayName.contains(" (1).mp4"))
-        XCTAssertEqual(try services.publicationStatus(reservation: second)?.locator, result.locator)
+        XCTAssertEqual(try services.publicationStatus(reservation: second).output?.locator, result.locator)
     }
 
     @MainActor
@@ -142,7 +142,7 @@ final class NativeMediaServicesTests: XCTestCase {
         let actions = IosMediaActions { nil }
         let controller = actions.createPreview(locator: fixture.absoluteString) {
             XCTFail("Valid PCM audio should play natively")
-            return KotlinUnit()
+            return
         }
         defer { actions.releasePreview(controller: controller) }
         controller.loadViewIfNeeded()
