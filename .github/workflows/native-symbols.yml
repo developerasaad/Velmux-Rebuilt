@@ -1,0 +1,39 @@
+name: Native crash symbolication
+on:
+  workflow_dispatch:
+    inputs:
+      addresses:
+        description: Space-separated x86_64 ELF addresses from an emulator tombstone
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  symbols:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: rustup toolchain install 1.99.1 --profile minimal --target x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          cache-on-failure: true
+      - uses: gradle/actions/setup-gradle@v4
+      - run: bash scripts/ci/setup-native.sh
+      - id: identity
+        run: bash scripts/ci/native-key.sh android x86_64
+      - uses: actions/cache/restore@v4
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-android-x86_64-${{ steps.identity.outputs.key }}
+      - name: Reconstruct the matching native debug library
+        run: ./gradlew -PbindingsTarget=android :UI:cargoBuildAndroidX64Debug
+      - name: Resolve native addresses and dependencies
+        env:
+          ADDRESSES: ${{ inputs.addresses }}
+        run: python3 scripts/ci/symbolize-android.py "$ADDRESSES"

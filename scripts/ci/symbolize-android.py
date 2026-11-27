@@ -5,13 +5,36 @@ from pathlib import Path
 import re
 import struct
 import subprocess
+import sys
 import zipfile
+
+ndk = Path(os.environ.get('ANDROID_NDK_HOME', os.environ.get('ANDROID_NDK_ROOT', '')))
+addr2line = next(ndk.glob('toolchains/llvm/prebuilt/*/bin/llvm-addr2line'))
+if len(sys.argv) > 1:
+    addresses = [hex(int(value, 16)) for value in sys.argv[1].split()]
+    library = Path('core/target/x86_64-linux-android/debug/libvelmux_core.so')
+    subprocess.run([str(addr2line), '-f', '-C', '-e', str(library), *addresses], check=True)
+    readelf = addr2line.with_name('llvm-readelf')
+    subprocess.run([str(readelf), '-d', str(library)], check=True)
+    raise SystemExit(0)
 
 apk_path = Path('platforms/android/build/outputs/apk/debug/android-debug.apk')
 log = Path('build/android-logcat.txt').read_text(errors='replace')
 pcs = {int(value, 16) for value in re.findall(r'#\d+ pc ([0-9a-f]+).*com\.velmux\.mobile.*base\.apk', log)}
-ndk = Path(os.environ.get('ANDROID_NDK_HOME', os.environ.get('ANDROID_NDK_ROOT', '')))
-addr2line = next(ndk.glob('toolchains/llvm/prebuilt/*/bin/llvm-addr2line'))
+# Android 10 sometimes reports a PC relative to the executable map, not the
+# complete ELF or APK. Resolve its absolute RIP through the retained map first.
+for tombstone in Path('build/android-tombstones').glob('tombstone_*'):
+    text = tombstone.read_text(errors='replace')
+    match = re.search(r'\brip ([0-9a-f]+)', text)
+    if not match:
+        continue
+    instruction = int(match.group(1), 16)
+    for line in text.splitlines():
+        mapping = re.search(r"([0-9a-f']+)-([0-9a-f']+)\s+r-x\s+([0-9a-f]+).*com\.velmux\.mobile.*base\.apk", line)
+        if mapping:
+            start, end, file_offset = [int(value.replace("'", ''), 16) for value in mapping.groups()]
+            if start <= instruction <= end:
+                pcs.add(file_offset + instruction - start)
 with zipfile.ZipFile(apk_path) as apk:
     for entry in apk.infolist():
         if not entry.filename.startswith('lib/x86_64/') or not entry.filename.endswith('.so'):
