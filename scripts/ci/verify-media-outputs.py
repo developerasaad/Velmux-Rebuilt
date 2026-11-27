@@ -79,6 +79,8 @@ def check_case(case):
     path = Path(case["path"])
     assert path.is_file() and path.stat().st_size > 64, f"Missing/nontrivial output: {path}"
     info = probe(path, packets=True)
+    if "container" in case:
+        assert case["container"] in info["format"]["format_name"].split(','), f"{path}: output container differs from the accepted format"
     pictures = [stream for stream in info["streams"] if stream["codec_type"] == "video" and stream.get("disposition", {}).get("attached_pic")]
     video = [stream for stream in info["streams"] if stream["codec_type"] == "video" and not stream.get("disposition", {}).get("attached_pic")]
     audio = [stream for stream in info["streams"] if stream["codec_type"] == "audio"]
@@ -166,6 +168,18 @@ def check_case(case):
             shift = float(result[0]["pts_time"]) - float(original[0]["pts_time"])
             for before, after in zip(original, result):
                 assert_close(float(after["pts_time"]) - shift, float(before["pts_time"]), 0.002, f"{path}: copied presentation timestamp")
+        if case.get("reencoded_video"):
+            original = media_packets(source, "video")
+            result = media_packets(info, "video")
+            assert len(original) == len(result) > 0, f"{path}: video encoding changed frame count"
+            assert [packet["data_hash"] for packet in original] != [packet["data_hash"] for packet in result], f"{path}: explicit encoding only copied compressed video"
+        if "decoded_video_frames" in case:
+            frames = json.loads(run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-of", "json", str(path)]))
+            assert len(frames.get("frames", [])) == case["decoded_video_frames"], f"{path}: independently decoded frame count changed"
+        if case.get("match_source_frame"):
+            actual = first_rgb(path, case["width"], case["height"])
+            original = first_rgb(FIXTURES / case["source"], case["width"], case["height"])
+            assert rgb_error(actual, original) < 15, f"{path}: encoded picture does not match the selected source"
         if case.get("preserve_video_timestamps"):
             original = sorted(float(packet["pts_time"]) for packet in media_packets(source, "video"))
             result = sorted(float(packet["pts_time"]) for packet in media_packets(info, "video"))

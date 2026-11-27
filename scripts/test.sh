@@ -14,6 +14,9 @@ case "${1:-}" in
       mkdir -p "build/android-screenshots/api-$api"
       adb pull /sdcard/Android/data/com.velmux.mobile/files/screenshots "build/android-screenshots/api-$api/" || true
       adb exec-out run-as com.velmux.mobile.fixtures tar -C files -cf - evidence > "build/android-screenshots/api-$api/fixture-evidence.tar" || true
+      if [ "$result" -eq 0 ]; then
+        python3 scripts/ci/verify-mobile-outputs.py android "build/android-screenshots/api-$api/fixture-evidence.tar" "$api" || result=1
+      fi
       if [ "$result" -ne 0 ]; then
         adb root || true
         adb wait-for-device || true
@@ -39,6 +42,12 @@ case "${1:-}" in
       fi
       if [ -d build/ios-tests.xcresult ]; then
         xcrun xcresulttool export attachments --path build/ios-tests.xcresult --output-path build/ios-screenshots || true
+      fi
+      if [ "$result" -eq 0 ]; then
+        published_container=$(xcrun simctl get_app_container "$device" com.velmux.mobile data) || result=1
+        if [ "$result" -eq 0 ]; then
+          python3 scripts/ci/verify-mobile-outputs.py ios "$published_container" || result=1
+        fi
       fi
       exit "$result"
     }

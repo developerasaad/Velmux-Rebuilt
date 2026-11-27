@@ -379,6 +379,8 @@ class ConversionIntegrationTest {
         clickText("Convert", exact = true)
         awaitText("Conversion was not accepted", exact = true)
         awaitText("Use a filename")
+        assertTrue("The shared alert exposed generated binding field labels",
+            device.hasObject(By.text("Use a filename of 1–180 bytes without path separators or control characters.")))
         assertEquals("Rejected configuration created a job", before, media.jobsNative().map { it.id }.toSet())
         capture("ui-invalid-output-alert.png")
         clickText("OK", exact = true)
@@ -688,9 +690,13 @@ class ConversionIntegrationTest {
     }
 
     private fun awaitPicker() {
-        val pickerPackage = context.packageManager.resolveActivity(AndroidPlatformActions.selectionIntent(true), 0)?.activityInfo?.packageName
-            ?: error("No system document picker is installed")
-        assertTrue("The system document picker did not open", device.wait(Until.hasObject(By.pkg(pickerPackage)), 15_000))
+        // Package visibility can hide an intent handler from resolveActivity
+        // even though Android successfully launches it. Observe the real
+        // DocumentsUI surface on these emulator images instead of querying it.
+        waitUntil("The system document picker did not open", 15_000) {
+            val foreground = device.currentPackageName
+            foreground?.endsWith(".documentsui") == true && device.hasObject(By.pkg(foreground))
+        }
     }
 
     private fun chooseDocument(name: String) {

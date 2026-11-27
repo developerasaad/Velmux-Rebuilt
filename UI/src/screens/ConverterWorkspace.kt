@@ -44,11 +44,11 @@ fun ConverterWorkspace(
                 Text(source.summary, style = MaterialTheme.typography.bodySmall)
                 Text(listOfNotNull(source.durationUs?.let { duration(it) }, source.byteSize?.let { bytes(it) }).joinToString(" · "))
                 WorkspacePreview(media, source, previewHeight)
-                Choice("Format", format?.label ?: config.format.name) { sheet = "Format" }
+                Choice("Format", format?.label ?: config.format.name, enabled = !submitting) { sheet = "Format" }
                 if (video) {
-                    Choice("Codec", videoCodec(config.videoCodec)) { sheet = "Codec" }
-                    Choice("Resolution", when(config.videoSize) { VideoSize.ORIGINAL -> "Original"; VideoSize.HD720 -> "720p bounds"; VideoSize.SD480 -> "480p bounds" }) { sheet = "Resolution" }
-                    Choice("Frame rate", if(config.frameRate == FrameRate.ORIGINAL) "Original timing" else "30 fps") { sheet = "Frame rate" }
+                    Choice("Codec", videoCodec(config.videoCodec), enabled = !submitting) { sheet = "Codec" }
+                    Choice("Resolution", when(config.videoSize) { VideoSize.ORIGINAL -> "Original"; VideoSize.HD720 -> "720p bounds"; VideoSize.SD480 -> "480p bounds" }, enabled = !submitting) { sheet = "Resolution" }
+                    Choice("Frame rate", if(config.frameRate == FrameRate.ORIGINAL) "Original timing" else "30 fps", enabled = !submitting) { sheet = "Frame rate" }
                     if(qualityVisible) {
                         Text("Encoding quality · ${config.quality}", style = MaterialTheme.typography.titleSmall)
                         Slider(value = config.quality.toFloat(), onValueChange = { onChange(config.copy(quality = it.toInt().toUByte())) }, valueRange = 18f..28f, steps = 9, enabled = !submitting)
@@ -61,33 +61,33 @@ fun ConverterWorkspace(
                     if(source.info.streams.any { it.kind == StreamKind.AUDIO }) TextButton(onClick = { advancedAudio = !advancedAudio }) { Text(if(advancedAudio) "Hide audio settings" else "Audio settings") }
                 }
                 if(!video || advancedAudio) {
-                    Choice("Audio codec", audioCodec(config.audioCodec)) { sheet = "Audio codec" }
-                    Choice("Sample rate", config.sampleRate?.let { "$it Hz" } ?: "Original") { sheet = "Sample rate" }
-                    Choice("Channels", when(config.channels) { 1u -> "Mono"; 2u -> "Stereo"; else -> "Original" }) { sheet = "Channels" }
-                    if(lossyControls && config.audioCodec != AudioCodec.COPY) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic") { sheet = "Audio bitrate" }
+                    Choice("Audio codec", audioCodec(config.audioCodec), enabled = !submitting) { sheet = "Audio codec" }
+                    Choice("Sample rate", config.sampleRate?.let { "$it Hz" } ?: "Original", enabled = !submitting) { sheet = "Sample rate" }
+                    Choice("Channels", when(config.channels) { 1u -> "Mono"; 2u -> "Stereo"; else -> "Original" }, enabled = !submitting) { sheet = "Channels" }
+                    if(lossyControls && config.audioCodec != AudioCodec.COPY) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic", enabled = !submitting) { sheet = "Audio bitrate" }
                     if(lossless) Text("PCM and FLAC use their selected sample representation; a lossy bitrate does not apply.", style = MaterialTheme.typography.bodySmall)
                     if((config.sampleRate ?: 0u) !in choices.sampleRates) Text("The retained sample rate is unavailable for this route. Choose an applicable sample rate.", color = MaterialTheme.colorScheme.error)
                     if((config.channels ?: 0u) !in choices.channels) Text("The retained channel count is unavailable for this route. Choose Mono or Stereo.", color = MaterialTheme.colorScheme.error)
                     if(config.audioBitrate != null && config.audioBitrate !in choices.audioBitrates && !lossless && config.audioCodec != AudioCodec.COPY) {
                         Text("The retained bitrate is unavailable at this sampling and channel count.", color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = { onChange(config.copy(audioBitrate = null)) }) { Text("Use automatic bitrate") }
+                        TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioBitrate = null)) }) { Text("Use automatic bitrate") }
                     }
                 }
                 if(format != null && (video && config.videoCodec !in format.videoCodecs || source.info.streams.any { it.kind == StreamKind.AUDIO } && config.audioCodec !in format.audioCodecs)) {
                     Text("The retained codec is incompatible with this format.", color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { onChange(config.copy(videoCodec = VideoCodec.AUTOMATIC, audioCodec = AudioCodec.AUTOMATIC)) }) { Text("Use automatic codecs") }
+                    TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoCodec = VideoCodec.AUTOMATIC, audioCodec = AudioCodec.AUTOMATIC)) }) { Text("Use automatic codecs") }
                 }
                 if(video && (config.videoSize !in choices.videoSizes || config.frameRate !in choices.frameRates)) {
                     Text("This route preserves original video geometry and timing.", color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL)) }) { Text("Use original geometry and timing") }
+                    TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL)) }) { Text("Use original geometry and timing") }
                 }
                 if(lossless && config.audioBitrate != null || config.audioCodec == AudioCodec.COPY && (config.audioBitrate != null || (config.sampleRate ?: 0u) !in choices.sampleRates || (config.channels ?: 0u) !in choices.channels)) {
                     Text("The retained audio settings conflict with this choice.", color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { onChange(config.copy(audioBitrate = null, sampleRate = null, channels = null)) }) { Text("Use original audio settings") }
+                    TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioBitrate = null, sampleRate = null, channels = null)) }) { Text("Use original audio settings") }
                 }
                 if(config.videoCodec == VideoCodec.COPY && (config.frameRate != FrameRate.ORIGINAL || config.quality != 23.toUByte())) {
                     Text("Copying requires original video settings.", color = MaterialTheme.colorScheme.error)
-                    TextButton(onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL, quality = 23u)) }) { Text("Use original video settings") }
+                    TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL, quality = 23u)) }) { Text("Use original video settings") }
                 }
                 OutlinedTextField(config.fileName, onValueChange = { onChange(config.copy(fileName = it)) }, label = { Text("Output name") }, suffix = { Text(".${format?.extension ?: ""}") },
                     singleLine = true, enabled = !submitting, isError = config.fileName.isBlank(), modifier = Modifier.fillMaxWidth().testTag("output-name"))
@@ -162,7 +162,7 @@ private fun WorkspacePreview(media: MediaSession, source: SourceSnapshot, previe
             val request = media.beginRequest()
             try { result = media.preview(source.id, requestedPosition.toLong(), request) }
             catch(cancelled: CancellationException) { throw cancelled }
-            catch(failure: Exception) { error = failure.message ?: "This preview could not be prepared." }
+            catch(failure: Exception) { error = failure.userMessage("This preview could not be prepared.") }
             finally { request.close(); loading = false }
         }
     }
@@ -187,12 +187,12 @@ private fun WorkspacePreview(media: MediaSession, source: SourceSnapshot, previe
 }
 
 @Composable
-private fun Choice(title: String, value: String, onClick: () -> Unit) {
-    OutlinedButton(onClick, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("choice-$title"), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
+private fun Choice(title: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
+    OutlinedButton(onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("choice-$title"), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
         Text(title, Modifier.weight(1f)); Text(value)
     }
 }
 private fun videoCodec(value: VideoCodec) = when(value) { VideoCodec.AUTOMATIC -> "Automatic"; VideoCodec.H264 -> "H.264"; VideoCodec.COPY -> "Copy compatible streams" }
 private fun audioCodec(value: AudioCodec) = when(value) { AudioCodec.AUTOMATIC -> "Automatic"; AudioCodec.AAC -> "AAC"; AudioCodec.MP3 -> "MP3"; AudioCodec.PCM_S16LE -> "PCM 16-bit"; AudioCodec.FLAC -> "FLAC"; AudioCodec.COPY -> "Copy compatible streams" }
 private fun duration(value: Long): String { val seconds = value.coerceAtLeast(0) / 1_000_000; return "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}" }
-private fun bytes(value: Long): String = if(value < 1_048_576) "${value / 1024} KB" else "${value / 1_048_576} MB"
+private fun bytes(value: Long): String = formatByteCount(value.toULong())

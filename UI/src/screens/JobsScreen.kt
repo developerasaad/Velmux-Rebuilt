@@ -27,6 +27,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.velmux.ui.app.PlatformActions
+import com.velmux.ui.app.userMessage
 import com.velmux.ui.components.VelmuxAlert
 import uniffi.velmux_core.JobRecord
 import uniffi.velmux_core.JobState
@@ -114,11 +115,11 @@ fun JobsScreen(
                             job.output?.let { output ->
                                 Button(onClick = {
                                     try { actions.openOutput(output.locator) { actionFailure = it } }
-                                    catch (error: Exception) { actionFailure = error.message?.take(300) ?: "The result could not be opened." }
+                                    catch (error: Exception) { actionFailure = error.userMessage("The result could not be opened.") }
                                 }) { Text("Open") }
                                 OutlinedButton(onClick = {
                                     try { actions.shareOutput(output.locator) { actionFailure = it } }
-                                    catch (error: Exception) { actionFailure = error.message?.take(300) ?: "The result could not be shared." }
+                                    catch (error: Exception) { actionFailure = error.userMessage("The result could not be shared.") }
                                 }) { Text("Share") }
                             }
                         }

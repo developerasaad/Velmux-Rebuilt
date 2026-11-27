@@ -53,7 +53,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
 
     fun showFailure(error: Throwable, title: String = "Unable to continue") {
         if (error is CancellationException || error is EngineException.Cancelled) return
-        alert = Alert(title, error.message?.take(1000) ?: "The operation could not be completed. Try again.")
+        alert = Alert(title, error.userMessage("The operation could not be completed. Try again."))
     }
     fun leaveWorkspace() {
         preparation?.cancel()
