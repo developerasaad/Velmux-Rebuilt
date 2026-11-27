@@ -31,6 +31,10 @@ Milestone 1 — Engineering foundation: in progress. Milestones 2–7 are pendin
 
 - Host and Android integration have been dispatched against `8e29cf7` before the unrelated Apple-builder correction, preserving exact matching native artifact identities. Source revisions remain explicit; no cached artifact is relabeled.
 
+- First host/Android integration attempts reached Rust compilation and found omitted opaque-type declarations in the generated bindgen output. The function allowlist now explicitly includes the four required opaque types. Neither attempt established runtime correctness.
+- The superseded Apple integration attempt was canceled before its known Rust compile failure, so dependency construction can be saved independently before app verification.
+- Native identity schema 3 hashes each complete target recipe rather than unrelated builders, plus both host C/C++ compilers. This deliberately invalidates initial keys once; artifacts are rebuilt, never relabeled. Subsequent target-only recipe edits preserve other targets' caches.
+
 ## Acceptance still pending
 
 Dependency construction and target capability verification; Android/iOS linking, launch, callbacks, cancellation and lifetime tests; host tests; actual CI run inspection. No product tools or physical-device behavior are claimed.

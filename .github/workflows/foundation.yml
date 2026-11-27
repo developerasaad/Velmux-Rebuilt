@@ -26,7 +26,15 @@ jobs:
       - run: bash scripts/ci/setup-native.sh
       - id: identity
         run: bash scripts/ci/native-key.sh host
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-host-host-${{ steps.identity.outputs.key }}
+      - name: Construct host dependencies
+        run: bash scripts/ffmpeg/fetch.sh host
+      - uses: actions/cache/save@v4
+        if: steps.native-cache.outputs.cache-hit != 'true'
         with:
           path: scripts/ffmpeg-builder/out
           key: native-host-host-${{ steps.identity.outputs.key }}
@@ -51,12 +59,26 @@ jobs:
       - id: arm64
         run: bash scripts/ci/native-key.sh android arm64-v8a
       - uses: actions/cache/restore@v4
+        id: arm64-cache
         with:
           path: scripts/ffmpeg-builder/out
           key: native-android-arm64-v8a-${{ steps.arm64.outputs.key }}
       - id: x64
         run: bash scripts/ci/native-key.sh android x86_64
       - uses: actions/cache/restore@v4
+        id: x64-cache
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-android-x86_64-${{ steps.x64.outputs.key }}
+      - name: Construct Android dependencies
+        run: bash scripts/ffmpeg/build-android.sh arm64-v8a x86_64
+      - uses: actions/cache/save@v4
+        if: steps.arm64-cache.outputs.cache-hit != 'true'
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-android-arm64-v8a-${{ steps.arm64.outputs.key }}
+      - uses: actions/cache/save@v4
+        if: steps.x64-cache.outputs.cache-hit != 'true'
         with:
           path: scripts/ffmpeg-builder/out
           key: native-android-x86_64-${{ steps.x64.outputs.key }}
@@ -108,7 +130,15 @@ jobs:
       - run: bash scripts/ci/setup-native.sh
       - id: identity
         run: bash scripts/ci/native-key.sh ios
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-ios-arm64-${{ steps.identity.outputs.key }}
+      - name: Construct Apple dependencies
+        run: bash scripts/ffmpeg/build-ios.sh
+      - uses: actions/cache/save@v4
+        if: steps.native-cache.outputs.cache-hit != 'true'
         with:
           path: scripts/ffmpeg-builder/out
           key: native-ios-arm64-${{ steps.identity.outputs.key }}

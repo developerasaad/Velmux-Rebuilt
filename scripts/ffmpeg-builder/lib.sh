@@ -427,11 +427,21 @@ import hashlib, json, os, pathlib, platform, subprocess, sys
 builder = pathlib.Path(sys.argv[1])
 root = builder.parent.parent
 target = sys.argv[2]
-inputs = {"schema": 2, "target": target, "policy": sorted(sys.argv[3:])}
-files = list(builder.glob("*.sh")) + list(builder.glob("*.py"))
-files += list((builder / "probe").glob("*.c")) + [builder / "versions.json"]
-files += list((root / "scripts/ffmpeg").glob("*.sh"))
-files += [root / "scripts/lib/common.sh", root / "scripts/lib/config.sh"]
+inputs = {"schema": 3, "target": target, "policy": sorted(sys.argv[3:])}
+# Hash the complete target recipe. An Apple-only correction must not evict
+# valid Android/host artifacts; shared helper or version changes affect all.
+files = [builder / "lib.sh", builder / "versions.json", builder / "validate.py",
+         builder / f"build-{target}.sh",
+         root / "scripts/ffmpeg/fetch.sh", root / "scripts/ffmpeg/identity.sh",
+         root / "scripts/lib/common.sh", root / "scripts/lib/config.sh"]
+if target == "host":
+    files += [builder / "probe/velmux-ffmpeg-probe.c", root / "scripts/ffmpeg/build-linux.sh"]
+elif target in {"android", "ios"}:
+    files += [builder / "manifest-from-config.py", root / f"scripts/ffmpeg/build-{target}.sh"]
+    if target == "ios":
+        files += [builder / "package-ios-xcframework.sh"]
+else:
+    raise SystemExit("unknown identity target: " + target)
 inputs["sources"] = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
                      for p in sorted(files)}
 # In-process source builds prepend generated cross wrappers and pinned
@@ -463,6 +473,7 @@ inputs["optionalBuildTools"] = {
 }
 if target == "host":
     inputs["compiler"] = command([os.environ.get("CC", "cc"), "--version"])
+    inputs["cxxCompiler"] = command([os.environ.get("CXX", "c++"), "--version"])
     if platform.system() == "Linux":
         inputs["libc"] = command(["getconf", "GNU_LIBC_VERSION"])
     zlib_environment = tool_environment.copy()

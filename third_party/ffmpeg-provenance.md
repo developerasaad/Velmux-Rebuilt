@@ -98,3 +98,5 @@ physical hardware availability.
 ## Apple static link closure correction
 
 The first new Apple CI build exposed missing C++ runtime declarations in x265's cross-generated pkg-config file. The Apple builder explicitly includes `-lc++`, and zimg uses `STL_LIBS=-lc++ -lm` rather than its GNU libstdc++ default. Retained-prefix repair is idempotent and runs outside installation guards. This correction is Apple-specific; previously verified Android/host artifacts remain identified by their original source revisions, without relabeling their cache identities.
+
+Artifact identity schema 3 covers the complete target-specific construction closure and shared helpers. It excludes unrelated target builders, includes both host C/C++ compiler versions, and intentionally invalidates initial schema-2 artifacts once. Old artifacts are not relabeled. Native caches are saved immediately after construction, before independent application checks.
