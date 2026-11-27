@@ -8,7 +8,7 @@ Substantial builds run in GitHub Actions. Native libraries are constructed from 
 
 ## Development commands
 
-Substantial commands below are intended for CI or a deliberately provisioned build machine. Use JDK 21, Rust 1.99.1, Python 3, the pinned Android NDK, and Xcode 16.4 on a real Mac for Apple targets. CMake 3.31.6, Ninja 1.11.1.3, Meson 1.7.2, pkg-config, NASM and GNU autotools are required for native construction. `scripts/ci/setup-native.sh` provisions disposable CI workers only.
+Substantial commands below are intended for CI or a deliberately provisioned build machine. Use Bash 5 for Android commands, JDK 21, Rust 1.99.1, Python 3, the pinned Android NDK, and Xcode 16.4 on a real Mac for Apple targets. Build entry points require unset CC/CXX/CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS; native compiler changes belong in the hashed repository recipe. Direct dependency wrappers have the same clean-environment requirement. CMake 3.31.6, Ninja 1.11.1.3, Meson 1.7.2, pkg-config, NASM and GNU autotools are required for native construction. `scripts/ci/setup-native.sh` provisions disposable CI workers only.
 
 ```sh
 bash scripts/ci/check-sources.sh

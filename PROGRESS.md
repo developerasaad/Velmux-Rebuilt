@@ -35,6 +35,9 @@ Milestone 1 — Engineering foundation: in progress. Milestones 2–7 are pendin
 - The superseded Apple integration attempt was canceled before its known Rust compile failure, so dependency construction can be saved independently before app verification.
 - Native identity schema 3 hashes each complete target recipe rather than unrelated builders, plus both host C/C++ compilers. This deliberately invalidates initial keys once; artifacts are rebuilt, never relabeled. Subsequent target-only recipe edits preserve other targets' caches.
 
+- Independently reran all nine identity isolation/tool-version/PATH regression assertions locally after inspecting the fixture script. These are cache-rule tests with tool stubs, not native compiler verification. They now run in Source checks.
+- Public build/test entry points and CI setup enforce the selected clean compiler environment. Android commands require Bash 5; unverified custom compiler flag environments are not supported.
+
 ## Acceptance still pending
 
 Dependency construction and target capability verification; Android/iOS linking, launch, callbacks, cancellation and lifetime tests; host tests; actual CI run inspection. No product tools or physical-device behavior are claimed.

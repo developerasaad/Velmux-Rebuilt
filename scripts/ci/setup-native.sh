@@ -2,6 +2,7 @@
 # Run only on disposable CI workers; never alter a developer workstation.
 set -euo pipefail
 [ "${CI:-}" = "true" ] || { echo "This setup script requires a CI worker" >&2; exit 1; }
+bash scripts/check-build-environment.sh
 case "$(uname -s)" in
   Linux)
     sudo apt-get update -qq

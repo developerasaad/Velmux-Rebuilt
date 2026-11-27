@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+bash scripts/check-build-environment.sh "${1:-}"
 case "${1:-}" in
   host) bash scripts/ci/verify-host.sh ;;
   android)
