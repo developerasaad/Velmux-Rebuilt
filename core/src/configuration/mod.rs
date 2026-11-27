@@ -234,7 +234,7 @@ pub(crate) fn default_config(
         .find(|option| option.format == preferred)
         .or_else(|| available.first())
         .map_or(preferred, |option| option.format);
-    ConversionConfig {
+    let mut config = ConversionConfig {
         operation,
         format,
         video_codec: VideoCodec::Automatic,
@@ -249,7 +249,32 @@ pub(crate) fn default_config(
             "{}_converted",
             if stem.is_empty() { "media" } else { &stem }
         ),
+    };
+    let has_audio = source
+        .streams
+        .iter()
+        .any(|stream| stream.kind == crate::StreamKind::Audio);
+    if has_audio {
+        let current = choices(source, &config);
+        if !current.sample_rates.contains(&0) || !current.channels.contains(&0) {
+            for option in available
+                .iter()
+                .filter(|option| option.audio_codecs.contains(&AudioCodec::Copy))
+                .chain(
+                    available
+                        .iter()
+                        .filter(|option| !option.audio_codecs.contains(&AudioCodec::Copy)),
+                )
+            {
+                config.format = option.format;
+                let candidate = choices(source, &config);
+                if candidate.sample_rates.contains(&0) && candidate.channels.contains(&0) {
+                    break;
+                }
+            }
+        }
     }
+    config
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -259,6 +284,195 @@ pub struct FormatOption {
     pub extension: String,
     pub video_codecs: Vec<VideoCodec>,
     pub audio_codecs: Vec<AudioCodec>,
+}
+
+/// Cheap choices for the current intent. Zero denotes the source's original
+/// sampling/layout or automatic bitrate; no source probing or pipeline planning.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ConfigurationChoices {
+    pub video_sizes: Vec<VideoSize>,
+    pub frame_rates: Vec<FrameRate>,
+    pub sample_rates: Vec<u32>,
+    pub channels: Vec<u32>,
+    pub audio_bitrates: Vec<u32>,
+}
+
+pub(crate) fn audio_target(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Mp3 => "mp3",
+        OutputFormat::Wav => "pcm_s16le",
+        OutputFormat::Flac => "flac",
+        _ => "aac",
+    }
+}
+
+pub(crate) fn audio_encoding_required(
+    stream: &crate::StreamInfo,
+    config: &ConversionConfig,
+    compatible: bool,
+) -> bool {
+    let Some(audio) = &stream.audio else {
+        return false;
+    };
+    let transform = config
+        .sample_rate
+        .is_some_and(|rate| Some(rate) != audio.sample_rate)
+        || config.channels.is_some_and(|channels| {
+            Some(channels) != audio.channels
+                || audio.channel_layout.as_deref()
+                    != Some(if channels == 1 { "mono" } else { "stereo" })
+        })
+        || config.audio_bitrate.is_some();
+    let explicit = !matches!(config.audio_codec, AudioCodec::Automatic | AudioCodec::Copy);
+    let target = audio_target(config.format);
+    config.audio_codec != AudioCodec::Copy
+        && (transform
+            || !compatible
+            || explicit
+                && (stream.codec != target
+                    || target == "aac" && stream.profile.as_deref() != Some("LC")))
+}
+
+pub(crate) fn audio_rate_supported(target: &str, rate: u32) -> bool {
+    match target {
+        "aac" => [
+            8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000,
+        ]
+        .contains(&rate),
+        "mp3" => [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000].contains(&rate),
+        _ => (8000..=192000).contains(&rate),
+    }
+}
+
+pub(crate) fn audio_bitrate_supported(
+    target: &str,
+    rate: u32,
+    channels: u32,
+    bitrate: u32,
+) -> bool {
+    match target {
+        "aac" => u64::from(bitrate) <= u64::from(rate) * u64::from(channels) * 6,
+        "mp3" if rate < 16000 => bitrate <= 64000,
+        "mp3" if rate < 32000 => bitrate <= 160000,
+        "mp3" => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn automatic_audio_bitrate(target: &str, rate: u32, channels: u32) -> u32 {
+    match target {
+        "aac" => 192000.min(rate.saturating_mul(channels).saturating_mul(6)),
+        "mp3" if rate < 16000 => 64000,
+        "mp3" if rate < 32000 => 128000,
+        _ => 192000,
+    }
+}
+
+pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> ConfigurationChoices {
+    use crate::{ffmpeg::sys, StreamKind};
+    let format = source_catalog(info, config.operation)
+        .into_iter()
+        .find(|item| item.format == config.format);
+    let can_encode_video = format
+        .as_ref()
+        .is_some_and(|item| item.video_codecs.contains(&VideoCodec::H264))
+        && config.video_codec != VideoCodec::Copy
+        && info
+            .streams
+            .iter()
+            .filter(|stream| {
+                stream.kind == StreamKind::Video
+                    && !stream
+                        .video
+                        .as_ref()
+                        .is_some_and(|video| video.attached_picture)
+            })
+            .all(|stream| stream.decoder_available);
+    let muxer_name = std::ffi::CString::new(config.format.muxer()).unwrap();
+    let muxer =
+        unsafe { sys::av_guess_format(muxer_name.as_ptr(), std::ptr::null(), std::ptr::null()) };
+    let audio: Vec<_> = info
+        .streams
+        .iter()
+        .filter(|stream| stream.kind == StreamKind::Audio)
+        .collect();
+    let target = audio_target(config.format);
+    let valid = |candidate: &ConversionConfig,
+                 check_rate: bool,
+                 check_channels: bool,
+                 check_bitrate: bool| {
+        !audio.is_empty()
+            && !muxer.is_null()
+            && audio.iter().all(|stream| {
+                let Some(facts) = &stream.audio else {
+                    return false;
+                };
+                let compatible =
+                    unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0
+                        && (candidate.format != OutputFormat::M4a
+                            || matches!(stream.codec.as_str(), "aac" | "alac"));
+                if !audio_encoding_required(stream, candidate, compatible) {
+                    return true;
+                }
+                let rate = candidate.sample_rate.or(facts.sample_rate);
+                let channels = candidate.channels.or(facts.channels);
+                stream.decoder_available
+                    && (!check_rate || rate.is_some_and(|rate| audio_rate_supported(target, rate)))
+                    && (!check_channels
+                        || channels.is_some_and(|channels| {
+                            (1..=if target == "mp3" { 2 } else { 8 }).contains(&channels)
+                        }))
+                    && (!check_bitrate
+                        || candidate.audio_bitrate.is_none_or(|bitrate| {
+                            rate.zip(channels).is_some_and(|(rate, channels)| {
+                                audio_bitrate_supported(target, rate, channels, bitrate)
+                            })
+                        }))
+            })
+    };
+    let mut result = ConfigurationChoices {
+        video_sizes: vec![VideoSize::Original],
+        frame_rates: vec![FrameRate::Original],
+        sample_rates: Vec::new(),
+        channels: Vec::new(),
+        audio_bitrates: Vec::new(),
+    };
+    if can_encode_video {
+        result
+            .video_sizes
+            .extend([VideoSize::Hd720, VideoSize::Sd480]);
+        result.frame_rates.push(FrameRate::Fps30);
+    }
+    for rate in [0, 44100, 48000] {
+        if config.audio_codec == AudioCodec::Copy && rate != 0 {
+            continue;
+        }
+        let mut candidate = config.clone();
+        candidate.sample_rate = (rate != 0).then_some(rate);
+        if valid(&candidate, true, false, false) {
+            result.sample_rates.push(rate);
+        }
+    }
+    for channels in [0, 1, 2] {
+        if config.audio_codec == AudioCodec::Copy && channels != 0 {
+            continue;
+        }
+        let mut candidate = config.clone();
+        candidate.channels = (channels != 0).then_some(channels);
+        if valid(&candidate, false, true, false) {
+            result.channels.push(channels);
+        }
+    }
+    if config.audio_codec != AudioCodec::Copy && matches!(target, "aac" | "mp3") {
+        for bitrate in [0, 128000, 192000, 256000] {
+            let mut candidate = config.clone();
+            candidate.audio_bitrate = (bitrate != 0).then_some(bitrate);
+            if valid(&candidate, false, false, true) {
+                result.audio_bitrates.push(bitrate);
+            }
+        }
+    }
+    result
 }
 
 pub(crate) fn catalog(operation: Operation) -> Vec<FormatOption> {
@@ -367,6 +581,33 @@ pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<Form
                                 || matches!(stream.codec.as_str(), "aac" | "alac"))
                     })
             };
+            if info.streams.iter().any(|stream| {
+                stream.kind == StreamKind::Video
+                    && !stream
+                        .video
+                        .as_ref()
+                        .is_some_and(|video| video.attached_picture)
+                    && !stream.decoder_available
+            }) {
+                option
+                    .video_codecs
+                    .retain(|codec| *codec != VideoCodec::H264);
+                if !compatible(StreamKind::Video) {
+                    return None;
+                }
+            }
+            if info
+                .streams
+                .iter()
+                .any(|stream| stream.kind == StreamKind::Audio && !stream.decoder_available)
+            {
+                if !compatible(StreamKind::Audio) {
+                    return None;
+                }
+                option
+                    .audio_codecs
+                    .retain(|codec| matches!(codec, AudioCodec::Automatic | AudioCodec::Copy));
+            }
             if !compatible(StreamKind::Video) {
                 option
                     .video_codecs

@@ -29,6 +29,15 @@ pub struct PublishedOutput {
 pub trait MediaProvider: Send + Sync {
     fn cache_root(&self) -> String;
     fn output_location(&self) -> String;
+    /// Acquire durable OS access for a locator before its first Rust use. This
+    /// is separate from the lifetime of any individual transferred descriptor.
+    fn retain_source_access(&self, locator: String) -> Result<(), EngineError>;
+    /// Best-effort release of only this application's acquired durable access.
+    /// Never close an existing descriptor lease or modify the original document.
+    fn release_source_access(&self, locator: String);
+    /// At startup, retire only owned OS grant receipts not referenced by these
+    /// durable requests. Unknown grants and original documents stay untouched.
+    fn reconcile_source_access(&self, retained_locators: Vec<String>);
     fn open_source(&self, locator: String) -> Result<OpenedSource, EngineError>;
     fn release_source(&self, lease_id: String);
     /// Reserve an unpublished destination. Repeated calls for a job must return

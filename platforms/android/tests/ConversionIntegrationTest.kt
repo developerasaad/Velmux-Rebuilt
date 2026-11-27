@@ -98,6 +98,7 @@ class ConversionIntegrationTest {
                 assertEquals("completed", completed.state)
                 val output = Uri.parse(requireNotNull(completed.outputLocator))
                 verifyVideo(output)
+                retainOutput("android-video-converted.mp4", output)
                 assertEquals(sourceHash, hash(uri))
                 awaitText("Completed", exact = true)
                 capture("ui-jobs.png")
@@ -152,7 +153,13 @@ class ConversionIntegrationTest {
                 val expectedMime = if (format == OutputFormat.M4A) "audio/mp4a-latm" else "audio/flac"
                 val formats = tracks(output)
                 assertEquals(1, formats.size)
-                assertEquals(expectedMime, formats.single().getString(MediaFormat.KEY_MIME))
+                val extractedMime = formats.single().getString(MediaFormat.KEY_MIME)
+                if (format == OutputFormat.FLAC) {
+                    verifyFlacRepresentation(output)
+                    // Android's FLAC extractor may decode during extraction and expose raw PCM.
+                    assertTrue("Unexpected native FLAC track representation: $extractedMime",
+                        extractedMime == "audio/flac" || extractedMime == "audio/raw")
+                } else assertEquals(expectedMime, extractedMime)
                 assertEquals(48_000, formats.single().getInteger(MediaFormat.KEY_SAMPLE_RATE))
                 assertEquals(2, formats.single().getInteger(MediaFormat.KEY_CHANNEL_COUNT))
                 assertDuration(formats.single())
@@ -162,6 +169,7 @@ class ConversionIntegrationTest {
                     val originalPcm = instrumentation.context.assets.open("stereo.wav").use { wavPcm(it.readBytes()) }
                     assertArrayEquals("Lossless conversion changed the known source PCM samples", originalPcm, decoded)
                 }
+                retainOutput(if (format == OutputFormat.FLAC) "android-audio.flac" else "android-audio.m4a", output)
                 assertEquals(1, media.jobsNative().count { it.id == accepted.id })
             }
             assertEquals(beforeHash, hash(uri))
@@ -169,6 +177,31 @@ class ConversionIntegrationTest {
             media.releaseNative(inspected.id)
             acceptedIds.forEach { cleanupJob(it) }
             revoke("stereo.wav")
+        }
+    }
+
+    @Test
+    fun coreInspectionReferencesOwnDurableAccessUntilLastRelease() {
+        media.beginNative()
+        val uri = grantTransient("video-large.mp4")
+        val original = hash(uri)
+        val first = media.inspectNative(uri.toString(), "video-large.mp4", true)
+        val second = media.inspectNative(uri.toString(), "video-large.mp4", true)
+        fun hasRead() = resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+        try {
+            assertTrue("The first core reference did not acquire durable access", hasRead())
+            media.releaseNative(first.id)
+            assertTrue("A remaining live inspection lost source access", hasRead())
+            assertEquals(original, hash(uri))
+            media.releaseNative(second.id)
+            waitUntil("The last released inspection retained its document permission", 5_000) { !hasRead() }
+            // The original still exists and can be granted again; cleanup changed only permission.
+            grantTransient("video-large.mp4")
+            assertEquals(original, hash(uri))
+        } finally {
+            runCatching { media.releaseNative(first.id) }
+            runCatching { media.releaseNative(second.id) }
+            revoke("video-large.mp4")
         }
     }
 
@@ -272,6 +305,28 @@ class ConversionIntegrationTest {
         verifyTones(decodeAudio(uri))
     }
 
+    private fun verifyFlacRepresentation(uri: Uri) {
+        val header = ByteArray(42)
+        resolver.openInputStream(uri)!!.use { input ->
+            var offset = 0
+            while (offset < header.size) {
+                val count = input.read(header, offset, header.size - offset)
+                assertTrue("The FLAC STREAMINFO header is truncated", count > 0)
+                offset += count
+            }
+        }
+        assertEquals("fLaC", String(header, 0, 4, Charsets.US_ASCII))
+        assertEquals("STREAMINFO must be the first FLAC metadata block", 0, header[4].toInt() and 0x7f)
+        val blockLength = ((header[5].toInt() and 0xff) shl 16) or
+            ((header[6].toInt() and 0xff) shl 8) or (header[7].toInt() and 0xff)
+        assertEquals(34, blockLength)
+        val stream = ByteBuffer.wrap(header, 18, 8).order(ByteOrder.BIG_ENDIAN).long
+        assertEquals(48_000L, (stream ushr 44) and 0xfffff)
+        assertEquals(2L, ((stream ushr 41) and 7) + 1)
+        assertEquals(16L, ((stream ushr 36) and 31) + 1)
+        assertEquals("Lossless output changed the independently known sample count", 96_000L, stream and 0xfffffffffL)
+    }
+
     private fun tracks(uri: Uri): List<MediaFormat> {
         val extractor = extractor(uri)
         try { return (0 until extractor.trackCount).map { extractor.getTrackFormat(it) } }
@@ -293,6 +348,28 @@ class ConversionIntegrationTest {
             val index = (0 until extractor.trackCount).first { extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true }
             val format = extractor.getTrackFormat(index)
             extractor.selectTrack(index)
+            if (format.getString(MediaFormat.KEY_MIME) == "audio/raw") {
+                assertEquals(48_000, format.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                assertEquals(2, format.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                if (format.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                    assertEquals(AudioFormat.ENCODING_PCM_16BIT, format.getInteger(MediaFormat.KEY_PCM_ENCODING))
+                }
+                val pcm = ByteArrayOutputStream()
+                val buffer = ByteBuffer.allocate(256 * 1024)
+                val deadline = SystemClock.elapsedRealtime() + 30_000
+                while (true) {
+                    assertTrue("Native FLAC extraction exceeded its deadline", SystemClock.elapsedRealtime() < deadline)
+                    buffer.clear()
+                    val count = extractor.readSampleData(buffer, 0)
+                    if (count < 0) break
+                    assertTrue("Native FLAC extraction exceeded its PCM budget", pcm.size() + count <= 1_000_000)
+                    val chunk = ByteArray(count)
+                    buffer.position(0); buffer.get(chunk)
+                    pcm.write(chunk)
+                    if (!extractor.advance()) break
+                }
+                return pcm.toByteArray()
+            }
             format.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
             val codec = MediaCodec.createDecoderByType(requireNotNull(format.getString(MediaFormat.KEY_MIME)))
             decoder = codec
@@ -385,11 +462,13 @@ class ConversionIntegrationTest {
             format.getLong(MediaFormat.KEY_DURATION) in 1_900_000..2_150_000)
     }
 
-    private fun grant(name: String): Uri {
+    private fun grantTransient(name: String): Uri {
         val result = resolver.call(provider, "grant-fixture", name, null)!!
-        val uri = Uri.parse(result.getString("uri")!!)
+        return Uri.parse(result.getString("uri")!!)
+    }
+
+    private fun grant(name: String): Uri = grantTransient(name).also { uri ->
         resolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        return uri
     }
 
     private fun revoke(name: String) {
@@ -462,11 +541,15 @@ class ConversionIntegrationTest {
             root = device.wait(Until.findObject(By.text("Velmux Test Sources")), 10_000)
         }
         requireNotNull(root) { "The read-only test document provider was not listed by DocumentsUI" }.click()
+        // Grid cards can intersect the viewport while their names remain below
+        // it; use DocumentsUI's own list control before locating the exact row.
+        device.findObject(By.desc("List view"))?.click()
+        device.waitForIdle(2_000)
         var document = device.wait(Until.findObject(By.text(name)), 3_000)
         if (document == null) {
             // DocumentsUI sorts these genuine source rows; the requested video
             // can be below the first screen when all fixture formats are listed.
-            val list = UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(10)
+            val list = UiScrollable(UiSelector().resourceIdMatches(".*:id/dir_list")).setAsVerticalList().setMaxSearchSwipes(12)
             runCatching { list.scrollIntoView(UiSelector().text(name)) }
             document = device.wait(Until.findObject(By.text(name)), 3_000)
         }
@@ -507,6 +590,21 @@ class ConversionIntegrationTest {
         val hierarchy = File(directory, name.removeSuffix(".png") + ".xml")
         device.dumpWindowHierarchy(hierarchy)
         retainEvidence(hierarchy.name, hierarchy.readBytes())
+    }
+
+    private fun retainOutput(name: String, uri: Uri) {
+        val bytes = resolver.openInputStream(uri)!!.use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                assertTrue("Verification output exceeded its bounded artifact size", output.size() + count <= 4 * 1024 * 1024)
+                output.write(buffer, 0, count)
+            }
+            output.toByteArray()
+        }
+        retainEvidence(name, bytes)
     }
 
     private fun retainText(name: String, text: String) = retainEvidence(name, text.take(100_000).toByteArray(Charsets.UTF_8))

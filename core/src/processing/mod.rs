@@ -445,17 +445,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 .audio
                 .as_ref()
                 .ok_or_else(|| invalid("Audio properties could not be inspected."))?;
-            let desired = if config.operation == Operation::VideoConverter {
-                "aac"
-            } else {
-                match config.format {
-                    OutputFormat::M4a => "aac",
-                    OutputFormat::Mp3 => "mp3",
-                    OutputFormat::Wav => "pcm_s16le",
-                    OutputFormat::Flac => "flac",
-                    _ => unreachable!(),
-                }
-            };
+            let desired = crate::configuration::audio_target(config.format);
             let encoder = if desired == "mp3" {
                 "libmp3lame"
             } else {
@@ -479,12 +469,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                     "The selected audio settings require encoding; choose a compatible encoder.",
                 ));
             }
-            let explicit_target = config.audio_codec != AudioCodec::Automatic
-                && config.audio_codec != AudioCodec::Copy;
-            let codec_change = stream.codec != desired
-                || (desired == "aac" && explicit_target && stream.profile.as_deref() != Some("LC"));
-            let encode = config.audio_codec != AudioCodec::Copy
-                && (transform || !compatible || (explicit_target && codec_change));
+            let encode = crate::configuration::audio_encoding_required(stream, config, compatible);
             if encode {
                 if !stream.decoder_available {
                     return Err(invalid(
@@ -519,6 +504,11 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                             .contains(&rate))
                 {
                     return Err(invalid("MP3 requires a supported sample rate and Mono or Stereo channels. Choose explicit conversion settings."));
+                }
+                if config.audio_bitrate.is_some_and(|bitrate| {
+                    !crate::configuration::audio_bitrate_supported(desired, rate, channels, bitrate)
+                }) {
+                    return Err(invalid("This audio bitrate cannot be encoded at the selected sample rate and channel count. Choose an applicable bitrate or Automatic."));
                 }
                 if desired == "flac" {
                     if audio.bit_depth.is_some_and(|depth| depth > 24) {

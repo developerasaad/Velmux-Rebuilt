@@ -32,13 +32,14 @@ class AndroidPlatformActions(private val activity: ComponentActivity) : Platform
                     if (intent.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) {
                         throw SecurityException("The provider did not grant read access.")
                     }
-                    activity.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    // The delivered transient grant supports metadata access.
+                    // Rust's first retained reference acquires lasting access.
                     val name = activity.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
                         if (it.moveToFirst()) it.getString(0)?.take(512) else null
                     } ?: "Selected media"
                     selected = SelectedSource(uri.toString(), name)
                 } catch (_: SecurityException) {
-                    failure = "This document provider did not grant lasting access. Select the file again from a provider that supports document access."
+                    failure = "This document provider did not grant readable access. Select the file again using the system document picker."
                 } catch (_: Exception) {
                     failure = "The selected document could not be read. Select it again."
                 }

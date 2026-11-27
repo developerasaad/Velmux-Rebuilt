@@ -218,6 +218,13 @@ class MediaSession(private val engine: Engine) {
     @Throws(EngineException::class, IllegalStateException::class)
     fun releaseNative(id: String) = ready { engine.releaseInspection(id) }
 
+    /** Survives composition disposal without running native grant I/O on main. */
+    fun releaseAfterDisposal(id: String) {
+        Dispatchers.Default.dispatch(kotlin.coroutines.EmptyCoroutineContext, Runnable {
+            runCatching { if (!closed.value) engine.releaseInspection(id) }
+        })
+    }
+
     @Throws(EngineException::class, IllegalStateException::class)
     suspend fun defaults(id: String, video: Boolean): ConversionConfig = withContext(Dispatchers.Default) {
         defaultsNative(id, video)
@@ -247,6 +254,9 @@ class MediaSession(private val engine: Engine) {
     }
     @Throws(EngineException::class, IllegalStateException::class)
     fun catalogForSource(id: String, video: Boolean): List<FormatOption> = ready { engine.mediaCatalogForSource(id, operation(video)) }
+
+    @Throws(EngineException::class, IllegalStateException::class)
+    fun configurationChoices(id: String, configuration: ConversionConfig) = ready { engine.configurationChoices(id, configuration) }
 
     @Throws(EngineException::class, IllegalStateException::class)
     suspend fun validate(id: String, configuration: ConversionConfig) = withContext(Dispatchers.Default) {
@@ -406,6 +416,9 @@ private fun Throwable.boundedMessage(fallback: String): String = message?.take(3
 private class NativeMediaAdapter(private val native: MediaServices) : MediaProvider {
     override fun cacheRoot() = native.cacheRoot()
     override fun outputLocation() = native.outputLocation()
+    override fun retainSourceAccess(locator: String) = sourceCall { native.retainSourceAccess(locator) }
+    override fun releaseSourceAccess(locator: String) { runCatching { native.releaseSourceAccess(locator) } }
+    override fun reconcileSourceAccess(retainedLocators: List<String>) { runCatching { native.reconcileSourceAccess(retainedLocators) } }
 
     override fun openSource(locator: String): OpenedSource = sourceCall {
         val source = native.openSource(locator)

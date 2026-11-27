@@ -29,6 +29,10 @@ class AndroidMediaServices(context: Context) : MediaServices {
     override fun cacheRoot(): String = context.cacheDir.absolutePath
     override fun outputLocation(): String = "${Environment.DIRECTORY_DOWNLOADS}/Velmux/"
 
+    override fun retainSourceAccess(locator: String) = AndroidDocumentGrants.retain(context, locator)
+    override fun releaseSourceAccess(locator: String) = AndroidDocumentGrants.release(context, locator)
+    override fun reconcileSourceAccess(retainedLocators: List<String>) = AndroidDocumentGrants.reconcile(context, retainedLocators)
+
     override fun openSource(locator: String): NativeSource = platformOperation("The selected file cannot be opened. Select it again if access was removed.") {
         val uri = Uri.parse(locator)
         require(uri.scheme == "content") { "Select a document using the system picker." }

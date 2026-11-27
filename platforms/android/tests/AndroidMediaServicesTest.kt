@@ -67,6 +67,41 @@ class AndroidMediaServicesTest {
     }
 
     @Test
+    fun onlyOwnedDurableReadGrantsAreReleasedAndReconciled() {
+        val resolver = context.contentResolver
+        val key = UUID.randomUUID().toString()
+        val uri = Uri.parse(resolver.call(fixtureAuthority, "create", key, null)!!.getString("uri")!!)
+        val services = AndroidMediaServices(context)
+        fun hasRead() = resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+        try {
+            assertFalse(hasRead())
+            services.retainSourceAccess(uri.toString())
+            assertTrue(hasRead())
+            AndroidMediaServices(context).reconcileSourceAccess(listOf(uri.toString()))
+            assertTrue("Rust-retained source access must survive reconciliation", hasRead())
+            val opened = services.openSource(uri.toString())
+            ParcelFileDescriptor.adoptFd(opened.fd).close()
+            services.releaseSource(opened.leaseId)
+            assertTrue("Closing a worker descriptor must not release a durable source reference", hasRead())
+            services.releaseSourceAccess(uri.toString())
+            assertFalse("Unused owned permission was retained", hasRead())
+            services.retainSourceAccess(uri.toString())
+            AndroidMediaServices(context).reconcileSourceAccess(emptyList())
+            assertFalse("Orphaned owned permission survived startup reconciliation", hasRead())
+            // An unrelated facility's pre-existing permission never becomes ours.
+            resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            services.retainSourceAccess(uri.toString())
+            services.releaseSourceAccess(uri.toString())
+            services.reconcileSourceAccess(emptyList())
+            assertTrue("Cleanup released an unowned persisted permission", hasRead())
+            resolver.openInputStream(uri)!!.use { assertTrue(it.read() >= 0) }
+        } finally {
+            runCatching { resolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            resolver.call(fixtureAuthority, "remove", key, null)
+        }
+    }
+
+    @Test
     fun reservationsAndPublicationAreDurableIdempotentAndProtectPublishedFiles() {
         val job = UUID.randomUUID().toString()
         val services = AndroidMediaServices(context)

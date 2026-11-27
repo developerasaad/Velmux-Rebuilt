@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::fd::IntoRawFd,
@@ -103,9 +103,11 @@ struct ProviderState {
     source_gate: Gate,
     publication_gate: Gate,
     preview_gate: Gate,
+    access_release_gate: Gate,
     block_source: AtomicBool,
     block_publication: AtomicBool,
     block_preview: AtomicBool,
+    block_access_release: AtomicBool,
     fail_publications: AtomicUsize,
     fail_after_publish: AtomicBool,
     open_calls: AtomicUsize,
@@ -113,6 +115,9 @@ struct ProviderState {
     maximum_worker_sources: AtomicUsize,
     publish_calls: AtomicUsize,
     leases: Mutex<HashMap<String, bool>>,
+    lease_locators: Mutex<HashMap<String, String>>,
+    retained_sources: Mutex<HashSet<String>>,
+    access_events: Mutex<Vec<(String, String)>>,
     publication_lock: Mutex<()>,
 }
 impl ProviderState {
@@ -122,9 +127,11 @@ impl ProviderState {
             source_gate: Gate::default(),
             publication_gate: Gate::default(),
             preview_gate: Gate::default(),
+            access_release_gate: Gate::default(),
             block_source: AtomicBool::new(false),
             block_publication: AtomicBool::new(false),
             block_preview: AtomicBool::new(false),
+            block_access_release: AtomicBool::new(false),
             fail_publications: AtomicUsize::new(0),
             fail_after_publish: AtomicBool::new(false),
             open_calls: AtomicUsize::new(0),
@@ -132,6 +139,9 @@ impl ProviderState {
             maximum_worker_sources: AtomicUsize::new(0),
             publish_calls: AtomicUsize::new(0),
             leases: Mutex::new(HashMap::new()),
+            lease_locators: Mutex::new(HashMap::new()),
+            retained_sources: Mutex::new(HashSet::new()),
+            access_events: Mutex::new(Vec::new()),
             publication_lock: Mutex::new(()),
         })
     }
@@ -181,6 +191,56 @@ impl MediaProvider for FilesystemProvider {
     fn output_location(&self) -> String {
         self.0.root.join("published").to_string_lossy().into_owned()
     }
+    fn retain_source_access(&self, locator: String) -> Result<(), EngineError> {
+        File::open(&locator).map_err(|error| EngineError::SourceAccess {
+            detail: error.to_string(),
+        })?;
+        self.0
+            .retained_sources
+            .lock()
+            .unwrap()
+            .insert(locator.clone());
+        self.0
+            .access_events
+            .lock()
+            .unwrap()
+            .push(("retain".into(), locator));
+        Ok(())
+    }
+    fn release_source_access(&self, locator: String) {
+        if self.0.block_access_release.load(Ordering::SeqCst) {
+            self.0.access_release_gate.enter();
+        }
+        assert!(
+            !self
+                .0
+                .lease_locators
+                .lock()
+                .unwrap()
+                .values()
+                .any(|value| value == &locator),
+            "Durable access was released before an opened descriptor lease returned"
+        );
+        self.0.retained_sources.lock().unwrap().remove(&locator);
+        self.0
+            .access_events
+            .lock()
+            .unwrap()
+            .push(("release".into(), locator));
+    }
+    fn reconcile_source_access(&self, retained_locators: Vec<String>) {
+        let retained: HashSet<_> = retained_locators.into_iter().collect();
+        self.0
+            .retained_sources
+            .lock()
+            .unwrap()
+            .retain(|locator| retained.contains(locator));
+        self.0
+            .access_events
+            .lock()
+            .unwrap()
+            .push(("reconcile".into(), String::new()));
+    }
     fn open_source(&self, locator: String) -> Result<OpenedSource, EngineError> {
         let file = File::open(&locator).map_err(|error| EngineError::SourceAccess {
             detail: error.to_string(),
@@ -203,6 +263,11 @@ impl MediaProvider for FilesystemProvider {
             }
         }
         let lease = uuid::Uuid::new_v4().to_string();
+        self.0
+            .lease_locators
+            .lock()
+            .unwrap()
+            .insert(lease.clone(), locator);
         self.0.leases.lock().unwrap().insert(lease.clone(), worker);
         Ok(OpenedSource {
             fd: file.into_raw_fd(),
@@ -212,6 +277,7 @@ impl MediaProvider for FilesystemProvider {
         })
     }
     fn release_source(&self, lease_id: String) {
+        self.0.lease_locators.lock().unwrap().remove(&lease_id);
         if self.0.leases.lock().unwrap().remove(&lease_id) == Some(true) {
             self.0.worker_sources.fetch_sub(1, Ordering::SeqCst);
         }
@@ -464,6 +530,7 @@ impl Drop for Harness {
         self.provider.source_gate.release();
         self.provider.publication_gate.release();
         self.provider.preview_gate.release();
+        self.provider.access_release_gate.release();
         self.close();
     }
 }
@@ -772,6 +839,8 @@ fn cancellation_waits_for_native_worker_before_owned_scratch_cleanup() {
         harness.defaults(&source, Operation::VideoConverter),
     );
     harness.provider.source_gate.wait_entered();
+    let locator = source.locator.clone();
+    harness.engine().release_inspection(source.id).unwrap();
     let scratch = harness.root.join("operational/jobs").join(&job.id);
     fs::create_dir_all(&scratch).unwrap();
     fs::write(scratch.join("in_use"), b"worker-owned marker").unwrap();
@@ -781,13 +850,36 @@ fn cancellation_waits_for_native_worker_before_owned_scratch_cleanup() {
         scratch.join("in_use").exists(),
         "Cancellation deleted resources before worker acknowledgement"
     );
+    assert!(
+        harness
+            .provider
+            .retained_sources
+            .lock()
+            .unwrap()
+            .contains(&locator),
+        "Cancellation revoked source access before the worker acknowledged termination"
+    );
     harness.provider.source_gate.release();
     assert_eq!(harness.finished(&job.id).state, JobState::Canceled);
     let deadline = Instant::now() + Duration::from_secs(2);
-    while scratch.exists() && Instant::now() < deadline {
+    while (scratch.exists()
+        || harness
+            .provider
+            .retained_sources
+            .lock()
+            .unwrap()
+            .contains(&locator))
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(!scratch.exists());
+    assert!(!harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
     assert_eq!(harness.provider.worker_sources.load(Ordering::SeqCst), 0);
     assert!(harness.provider.leases.lock().unwrap().is_empty());
     assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 0);
@@ -1191,6 +1283,249 @@ fn real_process_kill_restores_interrupted_and_queued_jobs() {
     ]);
 }
 
+#[test]
+fn durable_source_access_follows_workspace_and_unfinished_job_ownership() {
+    let mut harness = Harness::new("source-access-lifetime");
+    let locator = fixture("stereo.flac").to_string_lossy().into_owned();
+    let original_hash = digest(Path::new(&locator));
+    let first = harness.inspect("stereo.flac", Operation::AudioConverter);
+    let second = harness.inspect("stereo.flac", Operation::AudioConverter);
+    let retains = || {
+        harness
+            .provider
+            .access_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(event, value)| event == "retain" && value == &locator)
+            .count()
+    };
+    assert_eq!(
+        retains(),
+        1,
+        "Two workspaces must share one durable native acquisition"
+    );
+    harness.engine().release_inspection(first.id).unwrap();
+    assert!(harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+    harness.engine().release_inspection(second.id).unwrap();
+    assert!(!harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+
+    let canceled = CancellationToken::new();
+    canceled.cancel();
+    assert!(matches!(
+        harness.engine().inspect_source(
+            locator.clone(),
+            "stereo.flac".into(),
+            Operation::AudioConverter,
+            canceled
+        ),
+        Err(EngineError::Cancelled)
+    ));
+    assert!(!harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+    assert!(harness.provider.lease_locators.lock().unwrap().is_empty());
+
+    let source = harness.inspect("stereo.flac", Operation::AudioConverter);
+    harness
+        .provider
+        .fail_publications
+        .store(1, Ordering::SeqCst);
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.audio_codec = AudioCodec::Aac;
+    let accepted = harness.submit(&source, config);
+    harness.engine().release_inspection(source.id).unwrap();
+    let failed = harness.finished(&accepted.id);
+    assert_eq!(failed.state, JobState::Failed);
+    assert!(harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+    harness.close();
+    assert!(
+        harness
+            .provider
+            .retained_sources
+            .lock()
+            .unwrap()
+            .contains(&locator),
+        "Runtime shutdown revoked a durable unfinished job"
+    );
+    let orphan = fixture("video.mp4").to_string_lossy().into_owned();
+    harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .insert(orphan.clone());
+    harness.reopen();
+    assert!(harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+    assert!(
+        !harness
+            .provider
+            .retained_sources
+            .lock()
+            .unwrap()
+            .contains(&orphan),
+        "Startup did not reconcile an owned orphan access receipt"
+    );
+    harness.engine().clear_cache().unwrap();
+    assert!(harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+    harness.engine().restart_job(accepted.id.clone()).unwrap();
+    let completed = harness.complete(&accepted.id);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "Completed work retained unused native document access"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(harness.provider.lease_locators.lock().unwrap().is_empty());
+    assert_eq!(digest(Path::new(&locator)), original_hash);
+    let published = PathBuf::from(&completed.output.as_ref().unwrap().locator);
+    let output_hash = digest(&published);
+    harness.engine().dismiss_job(accepted.id).unwrap();
+    harness.close();
+    harness.reopen();
+    assert!(!harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+    assert_eq!(digest(&published), output_hash);
+    harness.expect(vec![expectation(&completed, "aac", 2, 48_000)]);
+}
+
+#[test]
+fn concurrent_source_access_release_protects_inflight_opens_and_other_locators() {
+    let harness = Harness::new("source-access-concurrent");
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let locator = fixture("video.mp4").to_string_lossy().into_owned();
+    harness.provider.block_preview.store(true, Ordering::SeqCst);
+    let engine = harness.engine().clone();
+    let id = source.id.clone();
+    let preview = thread::Builder::new()
+        .name("velmux-preview-test".into())
+        .spawn(move || engine.prepare_preview(id, 0, CancellationToken::new()))
+        .unwrap();
+    harness.provider.preview_gate.wait_entered();
+    harness.engine().release_inspection(source.id).unwrap();
+    assert!(
+        harness
+            .provider
+            .retained_sources
+            .lock()
+            .unwrap()
+            .contains(&locator),
+        "An in-flight descriptor open lost its source-access reference"
+    );
+    harness.provider.preview_gate.release();
+    assert!(matches!(
+        preview.join().unwrap(),
+        Err(EngineError::Cancelled)
+    ));
+    assert!(!harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&locator));
+
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    harness
+        .provider
+        .block_access_release
+        .store(true, Ordering::SeqCst);
+    let engine = harness.engine().clone();
+    let releasing = thread::spawn(move || engine.release_inspection(source.id));
+    harness.provider.access_release_gate.wait_entered();
+    let engine = harness.engine().clone();
+    let (same_sent, same_received) = std::sync::mpsc::channel();
+    let same = thread::spawn(move || {
+        let result = engine.inspect_source(
+            fixture("video.mp4").to_string_lossy().into_owned(),
+            "video.mp4".into(),
+            Operation::VideoConverter,
+            CancellationToken::new(),
+        );
+        same_sent.send(result).unwrap();
+    });
+    let waited_for_release = matches!(
+        same_received.recv_timeout(Duration::from_millis(50)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    );
+    let engine = harness.engine().clone();
+    let (sent, received) = std::sync::mpsc::channel();
+    let other = thread::spawn(move || {
+        let result = engine.inspect_source(
+            fixture("stereo.flac").to_string_lossy().into_owned(),
+            "stereo.flac".into(),
+            Operation::AudioConverter,
+            CancellationToken::new(),
+        );
+        sent.send(result).unwrap();
+    });
+    let independent = received.recv_timeout(Duration::from_secs(5));
+    // Release before asserting so an actual locking regression cannot orphan
+    // threads or leave Engine teardown waiting for our controlled native call.
+    harness.provider.access_release_gate.release();
+    releasing.join().unwrap().unwrap();
+    other.join().unwrap();
+    same.join().unwrap();
+    assert!(
+        waited_for_release,
+        "The same locator reopened before its previous native access release returned"
+    );
+    let same = same_received
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    let independent = independent
+        .expect("A slow release blocked unrelated source inspection")
+        .unwrap();
+    harness
+        .provider
+        .block_access_release
+        .store(false, Ordering::SeqCst);
+    harness.engine().release_inspection(independent.id).unwrap();
+    harness.engine().release_inspection(same.id).unwrap();
+    assert!(harness.provider.retained_sources.lock().unwrap().is_empty());
+    assert!(harness.provider.lease_locators.lock().unwrap().is_empty());
+}
+
 struct SourceMutation {
     engine: Weak<Engine>,
     path: PathBuf,
@@ -1531,4 +1866,72 @@ fn unmasked_stereo_pcm_encodes_aac_without_losing_channel_identity() {
     config.audio_codec = AudioCodec::Aac;
     let result = harness.complete(&harness.submit(&source, config).id);
     harness.expect(vec![expectation(&result, "aac", 2, 48_000)]);
+}
+
+#[test]
+fn configuration_choices_follow_real_sampling_and_encoding_limits() {
+    let harness = Harness::new("applicable-settings");
+    let high = harness.inspect("high-rate.flac", Operation::AudioConverter);
+    let mut config = harness.defaults(&high, Operation::AudioConverter);
+    assert_eq!(config.format, OutputFormat::Flac, "Default should retain a compatible representation instead of assuming AAC supports 192 kHz");
+    config.format = OutputFormat::M4a;
+    let options = harness
+        .engine()
+        .configuration_choices(high.id.clone(), config.clone())
+        .unwrap();
+    assert!(!options.sample_rates.contains(&0));
+    assert_eq!(options.sample_rates, vec![44100, 48000]);
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(high.id.clone(), config.clone()),
+        Err(EngineError::Configuration { .. })
+    ));
+    config.sample_rate = Some(48000);
+    let aac = harness.complete(&harness.submit(&high, config).id);
+
+    let surround = harness.inspect("surround.flac", Operation::AudioConverter);
+    let mut mp3 = harness.defaults(&surround, Operation::AudioConverter);
+    mp3.format = OutputFormat::Mp3;
+    let options = harness
+        .engine()
+        .configuration_choices(surround.id.clone(), mp3.clone())
+        .unwrap();
+    assert_eq!(options.channels, vec![1, 2]);
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(surround.id.clone(), mp3.clone()),
+        Err(EngineError::Configuration { .. })
+    ));
+    mp3.channels = Some(2);
+    harness
+        .engine()
+        .validate_configuration(surround.id, mp3)
+        .unwrap();
+
+    let low = harness.inspect("low-rate.flac", Operation::AudioConverter);
+    let mut config = harness.defaults(&low, Operation::AudioConverter);
+    config.format = OutputFormat::Mp3;
+    let options = harness
+        .engine()
+        .configuration_choices(low.id.clone(), config.clone())
+        .unwrap();
+    assert_eq!(
+        options.audio_bitrates,
+        vec![0],
+        "Explicit exposed bitrates exceed MPEG-2.5 support at 8 kHz"
+    );
+    config.audio_bitrate = Some(192000);
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(low.id.clone(), config.clone()),
+        Err(EngineError::Configuration { .. })
+    ));
+    config.audio_bitrate = None;
+    let mp3 = harness.complete(&harness.submit(&low, config).id);
+    let mut low_expected = expectation(&mp3, "mp3", 1, 8000);
+    low_expected["tone_frequencies"] = json!([440]);
+    harness.expect(vec![expectation(&aac, "aac", 2, 48000), low_expected]);
 }

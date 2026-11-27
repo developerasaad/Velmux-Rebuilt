@@ -17,6 +17,10 @@ interface MediaServices {
     fun cacheRoot(): String
     fun outputLocation(): String
     @Throws(PlatformFailure::class)
+    fun retainSourceAccess(locator: String)
+    fun releaseSourceAccess(locator: String)
+    fun reconcileSourceAccess(retainedLocators: List<String>)
+    @Throws(PlatformFailure::class)
     fun openSource(locator: String): NativeSource
     fun releaseSource(leaseId: String)
     @Throws(PlatformFailure::class)

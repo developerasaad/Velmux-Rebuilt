@@ -101,7 +101,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
         if(current != null) { delay(8_000); if(banner == current) banner = null }
     }
     DisposableEffect(media) {
-        onDispose { selectionGeneration += 1; preparation?.cancel(); source?.let { old -> try { media.releaseNative(old.id) } catch (_: Exception) { /* Engine shutdown already owns cleanup. */ } } }
+        onDispose { selectionGeneration += 1; preparation?.cancel(); source?.let { old -> media.releaseAfterDisposal(old.id) } }
     }
     HandleBack(destination != Destination.Home || preparing) { back() }
 

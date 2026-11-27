@@ -23,12 +23,16 @@ fun ConverterWorkspace(
 ) {
     val formats = remember(media, source.id, video) { media.catalogForSource(source.id, video) }
     val format = formats.firstOrNull { it.format == config.format }
+    val choices = remember(media, source.id, config.format, config.videoCodec, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate) {
+        media.configurationChoices(source.id, config)
+    }
     var sheet by remember { mutableStateOf<String?>(null) }
     var advancedAudio by remember { mutableStateOf(false) }
     var qualityText by remember(config.quality) { mutableStateOf(config.quality.toString()) }
     val qualityValid = qualityText.toIntOrNull()?.let { it in 18..28 } ?: false
     val lossless = config.format == OutputFormat.WAV || config.format == OutputFormat.FLAC
-    val lossyControls = !lossless && (video.not() || config.audioCodec == AudioCodec.AAC)
+    val lossyControls = choices.audioBitrates.isNotEmpty()
+    val qualityVisible = config.videoCodec == VideoCodec.H264 || config.videoCodec == VideoCodec.AUTOMATIC && config.quality != 23.toUByte()
 
     Column(modifier.fillMaxSize()) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -41,7 +45,7 @@ fun ConverterWorkspace(
                 Choice("Codec", videoCodec(config.videoCodec)) { sheet = "Codec" }
                 Choice("Resolution", when(config.videoSize) { VideoSize.ORIGINAL -> "Original"; VideoSize.HD720 -> "720p bounds"; VideoSize.SD480 -> "480p bounds" }) { sheet = "Resolution" }
                 Choice("Frame rate", if(config.frameRate == FrameRate.ORIGINAL) "Original timing" else "30 fps") { sheet = "Frame rate" }
-                if(config.videoCodec == VideoCodec.H264 || config.videoCodec == VideoCodec.AUTOMATIC && config.quality != 23.toUByte()) {
+                if(qualityVisible) {
                     Text("Encoding quality · ${config.quality}", style = MaterialTheme.typography.titleSmall)
                     Slider(value = config.quality.toFloat(), onValueChange = { onChange(config.copy(quality = it.toInt().toUByte())) }, valueRange = 18f..28f, steps = 9, enabled = !submitting)
                     OutlinedTextField(qualityText, onValueChange = { value ->
@@ -58,6 +62,20 @@ fun ConverterWorkspace(
                 Choice("Channels", when(config.channels) { 1u -> "Mono"; 2u -> "Stereo"; else -> "Original" }) { sheet = "Channels" }
                 if(lossyControls && config.audioCodec != AudioCodec.COPY) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic") { sheet = "Audio bitrate" }
                 if(lossless) Text("PCM and FLAC use their selected sample representation; a lossy bitrate does not apply.", style = MaterialTheme.typography.bodySmall)
+                if((config.sampleRate ?: 0u) !in choices.sampleRates) Text("The retained sample rate is unavailable for this route. Choose an applicable sample rate.", color = MaterialTheme.colorScheme.error)
+                if((config.channels ?: 0u) !in choices.channels) Text("The retained channel count is unavailable for this route. Choose Mono or Stereo.", color = MaterialTheme.colorScheme.error)
+                if(config.audioBitrate != null && config.audioBitrate !in choices.audioBitrates && !lossless && config.audioCodec != AudioCodec.COPY) {
+                    Text("The retained bitrate is unavailable at this sampling and channel count.", color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { onChange(config.copy(audioBitrate = null)) }) { Text("Use automatic bitrate") }
+                }
+            }
+            if(format != null && (video && config.videoCodec !in format.videoCodecs || source.info.streams.any { it.kind == StreamKind.AUDIO } && config.audioCodec !in format.audioCodecs)) {
+                Text("The retained codec is incompatible with this format.", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { onChange(config.copy(videoCodec = VideoCodec.AUTOMATIC, audioCodec = AudioCodec.AUTOMATIC)) }) { Text("Use automatic codecs") }
+            }
+            if(video && (config.videoSize !in choices.videoSizes || config.frameRate !in choices.frameRates)) {
+                Text("This route preserves original video geometry and timing.", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL)) }) { Text("Use original geometry and timing") }
             }
             if(lossless && config.audioBitrate != null || config.audioCodec == AudioCodec.COPY && (config.audioBitrate != null || config.sampleRate != null || config.channels != null)) {
                 Text("The retained audio settings conflict with this choice.", color = MaterialTheme.colorScheme.error)
@@ -73,7 +91,7 @@ fun ConverterWorkspace(
             Spacer(Modifier.height(12.dp))
         }
         Surface(shadowElevation = 3.dp) {
-            Button(onClick = onConvert, enabled = !submitting && config.fileName.isNotBlank() && (config.videoCodec != VideoCodec.H264 || qualityValid), modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
+            Button(onClick = onConvert, enabled = !submitting && config.fileName.isNotBlank() && (!qualityVisible || qualityValid), modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
                 if(submitting) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)) }
                 Text(if(submitting) "Validating request…" else "Convert")
             }
@@ -84,11 +102,11 @@ fun ConverterWorkspace(
             "Format" -> formats
             "Codec" -> format?.videoCodecs ?: emptyList<VideoCodec>()
             "Audio codec" -> format?.audioCodecs ?: emptyList<AudioCodec>()
-            "Resolution" -> VideoSize.entries
-            "Frame rate" -> FrameRate.entries
-            "Sample rate" -> listOf(0u, 44100u, 48000u)
-            "Channels" -> listOf(0u, 1u, 2u)
-            else -> listOf(0u, 128000u, 192000u, 256000u)
+            "Resolution" -> choices.videoSizes
+            "Frame rate" -> choices.frameRates
+            "Sample rate" -> choices.sampleRates
+            "Channels" -> choices.channels
+            else -> choices.audioBitrates
         }
         val labels = values.map { value -> when(value) {
             is FormatOption -> value.label

@@ -410,7 +410,13 @@ unsafe fn make_transform(
             den: (*enc).sample_rate,
         };
         if plan.expected_codec == "aac" || plan.expected_codec == "mp3" {
-            (*enc).bit_rate = i64::from(config.audio_bitrate.unwrap_or(192_000));
+            (*enc).bit_rate = i64::from(config.audio_bitrate.unwrap_or_else(|| {
+                crate::configuration::automatic_audio_bitrate(
+                    &plan.expected_codec,
+                    (*enc).sample_rate as u32,
+                    channels as u32,
+                )
+            }));
         }
     }
     let opened = sys::avcodec_open2(enc, encoder_codec, ptr::null_mut());

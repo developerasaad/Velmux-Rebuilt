@@ -148,6 +148,26 @@ final class IosMediaServices: NSObject, MediaServices {
         lease?.releaseAccess()
     }
 
+    func retainSourceAccess(locator: String) throws {
+        // Rust retains the inline bookmark bytes; iOS has no separate durable
+        // permission record to acquire here. openSource owns any live scope.
+    }
+
+    func releaseSourceAccess(locator: String) {
+        // iOS bookmarks are serialized inside the locator owned by Rust; there
+        // is no separate native bookmark file or persisted-grant registry to
+        // remove. Retiring the final Rust reference discards those bookmark
+        // bytes. In-flight descriptor leases independently own security scopes
+        // and file presenters until releaseSource(leaseId:), so never close them
+        // or delete the original document when a locator is retired.
+    }
+
+    func reconcileSourceAccess(retainedLocators: [String]) {
+        // There is no native bookmark database to reconcile on startup. Rust's
+        // retained locator records are authoritative; active scopes belong only
+        // to descriptor leases, including leases absent from this durable list.
+    }
+
     private struct Reservation: Codable {
         var requestedName: String
         var outputName: String

@@ -114,11 +114,152 @@ struct Control {
     wake: bool,
     active: Option<(String, Arc<CancellationToken>)>,
 }
+
+struct AccessEntry {
+    // Native calls serialize only against another acquisition/release of this
+    // locator; the registry lock never crosses an OS callback.
+    acquired: Mutex<bool>,
+}
+struct AccessCount {
+    entry: Arc<AccessEntry>,
+    references: usize,
+    preserve: bool,
+}
+struct SourceAccess {
+    provider: Arc<dyn MediaProvider>,
+    entries: Mutex<HashMap<String, AccessCount>>,
+}
+struct SourceAccessLease {
+    owner: Arc<SourceAccess>,
+    locator: String,
+    entry: Arc<AccessEntry>,
+    durable: bool,
+    retired: std::sync::atomic::AtomicBool,
+}
+impl SourceAccess {
+    fn claim(
+        self: &Arc<Self>,
+        locator: &str,
+        durable: bool,
+    ) -> Result<(Arc<SourceAccessLease>, Result<(), EngineError>), EngineError> {
+        let entry = {
+            let mut entries = self.entries.lock().map_err(internal)?;
+            let count = entries
+                .entry(locator.into())
+                .or_insert_with(|| AccessCount {
+                    entry: Arc::new(AccessEntry {
+                        acquired: Mutex::new(false),
+                    }),
+                    references: 0,
+                    preserve: false,
+                });
+            count.references += 1;
+            count.entry.clone()
+        };
+        let lease = Arc::new(SourceAccessLease {
+            owner: self.clone(),
+            locator: locator.into(),
+            entry: entry.clone(),
+            durable,
+            retired: std::sync::atomic::AtomicBool::new(false),
+        });
+        let result = {
+            let mut acquired = entry
+                .acquired
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if *acquired {
+                Ok(())
+            } else {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.provider.retain_source_access(locator.into())
+                }))
+                .unwrap_or_else(|_| {
+                    Err(internal(
+                        "The source provider could not retain document access.",
+                    ))
+                });
+                if result.is_ok() {
+                    *acquired = true;
+                }
+                result
+            }
+        };
+        Ok((lease, result))
+    }
+    fn retain(self: &Arc<Self>, locator: &str) -> Result<Arc<SourceAccessLease>, EngineError> {
+        let (lease, result) = self.claim(locator, false)?;
+        result?;
+        Ok(lease)
+    }
+}
+impl Drop for SourceAccessLease {
+    fn drop(&mut self) {
+        let mut acquired = self
+            .entry
+            .acquired
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let last = {
+            let mut entries = self
+                .owner
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(count) = entries.get_mut(&self.locator) else {
+                return;
+            };
+            count.references -= 1;
+            // Closing a runtime cannot revoke an unfinished durable request's
+            // access. Its next owner reconstructs references from SQLite.
+            count.preserve |=
+                self.durable && !self.retired.load(std::sync::atomic::Ordering::SeqCst);
+            if count.references != 0 {
+                return;
+            }
+            !count.preserve
+        };
+        if last {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.owner
+                    .provider
+                    .release_source_access(self.locator.clone());
+            }));
+            *acquired = false;
+        }
+        let mut entries = self
+            .owner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // A new claimant can register while native release runs, then waits on
+        // this entry and re-acquires access before opening its descriptor.
+        if entries
+            .get(&self.locator)
+            .is_some_and(|count| count.references == 0)
+        {
+            entries.remove(&self.locator);
+        }
+    }
+}
+#[derive(Clone)]
+struct SourceAsset {
+    source: InspectedSource,
+    _access: Arc<SourceAccessLease>,
+}
+impl std::ops::Deref for SourceAsset {
+    type Target = InspectedSource;
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
+}
 pub(crate) struct Runtime {
     root: PathBuf,
     pub provider: Arc<dyn MediaProvider>,
     store: Store,
-    assets: Mutex<HashMap<String, InspectedSource>>,
+    source_access: Arc<SourceAccess>,
+    job_access: Mutex<HashMap<String, Arc<SourceAccessLease>>>,
+    assets: Mutex<HashMap<String, SourceAsset>>,
     control: Mutex<Control>,
     changed: Condvar,
     observer: Mutex<Option<Arc<dyn JobObserver>>>,
@@ -171,10 +312,16 @@ impl Runtime {
         }
         fs::create_dir_all(&root).map_err(storage)?;
         let root = root.canonicalize().map_err(storage)?;
+        let provider: Arc<dyn MediaProvider> = Arc::from(provider);
         let runtime = Arc::new(Self {
             store: Store::open(&root)?,
             root,
-            provider: Arc::from(provider),
+            source_access: Arc::new(SourceAccess {
+                provider: provider.clone(),
+                entries: Mutex::new(HashMap::new()),
+            }),
+            provider,
+            job_access: Mutex::new(HashMap::new()),
             assets: Mutex::new(HashMap::new()),
             control: Mutex::new(Control {
                 stop: false,
@@ -189,6 +336,7 @@ impl Runtime {
             previews: Mutex::new(HashMap::new()),
             preview_slot: Mutex::new(()),
         });
+        runtime.restore_source_access()?;
         runtime.restore()?;
         // Cache cleanup is best effort at startup. Explicit Clear Cache reports
         // storage errors; inability to remove disposable files must not disable
@@ -219,6 +367,56 @@ impl Runtime {
             if let Some(worker) = worker.take() {
                 let _ = worker.join();
             }
+        }
+        // Drop outside collection locks: the final reference may call an OS
+        // provider. Unretired durable leases deliberately preserve their grants.
+        let assets = self
+            .assets
+            .lock()
+            .map(|mut assets| std::mem::take(&mut *assets))
+            .unwrap_or_default();
+        drop(assets);
+        let jobs = self
+            .job_access
+            .lock()
+            .map(|mut jobs| std::mem::take(&mut *jobs))
+            .unwrap_or_default();
+        drop(jobs);
+    }
+
+    fn restore_source_access(&self) -> Result<(), EngineError> {
+        let mut retained = Vec::new();
+        for record in self.store.list()? {
+            if matches!(record.state, JobState::Completed | JobState::Canceled) {
+                continue;
+            }
+            let request = self.store.request(&record.id)?;
+            let (access, _availability) =
+                self.source_access.claim(&request.source.locator, true)?;
+            // A revoked grant must fail the affected operation, not hide Jobs
+            // or prevent unrelated requests from being restored.
+            retained.push(request.source.locator);
+            self.job_access
+                .lock()
+                .map_err(internal)?
+                .insert(record.id, access);
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.provider.reconcile_source_access(retained);
+        }));
+        Ok(())
+    }
+    fn release_job_access(&self, id: &str) {
+        let access = self
+            .job_access
+            .lock()
+            .ok()
+            .and_then(|mut jobs| jobs.remove(id));
+        if let Some(access) = access {
+            access
+                .retired
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            drop(access);
         }
     }
     pub fn observe(&self, observer: Box<dyn JobObserver>) {
@@ -290,6 +488,7 @@ impl Runtime {
                 "The selected source identifier is invalid.",
             ));
         }
+        let access = self.source_access.retain(&locator)?;
         let opened = self.provider.open_source(locator.clone())?;
         let info = media::inspect(opened, self.provider.clone(), token)?;
         processing::validate_operation(&info, operation)?;
@@ -308,16 +507,25 @@ impl Runtime {
                 detail: "Close an unused media workspace before opening another source.".into(),
             });
         }
-        assets.insert(source.id.clone(), source.clone());
+        assets.insert(
+            source.id.clone(),
+            SourceAsset {
+                source: source.clone(),
+                _access: access,
+            },
+        );
         Ok(source)
     }
     pub fn release(&self, id: &str) {
-        if let Ok(mut assets) = self.assets.lock() {
-            assets.remove(id);
-        }
+        let removed = self
+            .assets
+            .lock()
+            .ok()
+            .and_then(|mut assets| assets.remove(id));
         self.release_preview(id);
+        drop(removed);
     }
-    fn asset(&self, id: &str) -> Result<InspectedSource, EngineError> {
+    fn asset(&self, id: &str) -> Result<SourceAsset, EngineError> {
         self.assets
             .lock()
             .map_err(internal)?
@@ -349,6 +557,13 @@ impl Runtime {
     }
     pub fn assess(&self, id: &str, config: &ConversionConfig) -> Result<(), EngineError> {
         processing::plan(&self.asset(id)?.info, config).map(|_| ())
+    }
+    pub fn choices(
+        &self,
+        id: &str,
+        config: &ConversionConfig,
+    ) -> Result<crate::ConfigurationChoices, EngineError> {
+        Ok(configuration::choices(&self.asset(id)?.info, config))
     }
     pub fn submit(
         &self,
@@ -409,14 +624,36 @@ impl Runtime {
             reservation: None,
             output: None,
         };
-        self.store.insert(
+        let (access, availability) = self.source_access.claim(&source.locator, true)?;
+        if let Err(error) = availability {
+            access
+                .retired
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(error);
+        }
+        match self.job_access.lock() {
+            Ok(mut jobs) => {
+                jobs.insert(record.id.clone(), access);
+            }
+            Err(error) => {
+                access
+                    .retired
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(internal(error));
+            }
+        }
+        let insertion = self.store.insert(
             &record,
             &AcceptedRequest {
                 submission_key: key,
-                source,
+                source: source.source.clone(),
                 plan,
             },
-        )?;
+        );
+        if let Err(error) = insertion {
+            self.release_job_access(&record.id);
+            return Err(error);
+        }
         self.notify();
         self.wake();
         Ok(record)
@@ -445,6 +682,7 @@ impl Runtime {
         self.store.update(&record)?;
         drop(control);
         self.cleanup(&record);
+        self.release_job_access(id);
         self.notify();
         Ok(())
     }
@@ -474,6 +712,7 @@ impl Runtime {
         if record.verified && self.reconcile_publication(&mut record)? {
             self.store.update(&record)?;
             drop(control);
+            self.release_job_access(id);
             self.notify();
             return Ok(());
         }
@@ -520,6 +759,7 @@ impl Runtime {
         self.cleanup(&record);
         self.store.remove(id)?;
         drop(control);
+        self.release_job_access(id);
         self.notify();
         Ok(())
     }
@@ -600,6 +840,7 @@ impl Runtime {
                     Ok(true) => {
                         self.store.update(&record)?;
                         self.cleanup(&record);
+                        self.release_job_access(&record.id);
                         continue;
                     }
                     Ok(false) => {}
@@ -618,6 +859,7 @@ impl Runtime {
                 record.finished_ms = Some(now_ms());
                 self.store.update(&record)?;
                 self.cleanup(&record);
+                self.release_job_access(&record.id);
                 continue;
             }
             if record.state.active() {
@@ -640,6 +882,7 @@ impl Runtime {
             }) {
                 self.cleanup(&record);
                 self.store.remove(&record.id)?;
+                self.release_job_access(&record.id);
             }
         }
         Ok(())
@@ -726,6 +969,11 @@ impl Runtime {
             }
             control.active = None;
             drop(control);
+            if self.store.get(&id).is_ok_and(|record| {
+                matches!(record.state, JobState::Completed | JobState::Canceled)
+            }) {
+                self.release_job_access(&id);
+            }
             self.notify();
             if let Some(error) = persistence_error {
                 self.fail_runtime(&error);

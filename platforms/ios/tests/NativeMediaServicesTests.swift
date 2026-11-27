@@ -57,6 +57,33 @@ final class NativeMediaServicesTests: XCTestCase {
         restarted.releaseSource(leaseId: reopened.leaseId)
     }
 
+    func testRetiringInlineBookmarkDoesNotDeleteOriginalOrReleaseAnActiveLease() throws {
+        let bytes = Data("independently owned active document bytes".utf8)
+        let source = root.appendingPathComponent("still-owned-original.dat")
+        try bytes.write(to: source, options: .withoutOverwriting)
+        let selected = try IosMediaServices.selectedSource(url: source)
+        try services.retainSourceAccess(locator: selected.locator)
+        let opened = try services.openSource(locator: selected.locator)
+        defer {
+            Darwin.close(opened.fd)
+            services.releaseSource(leaseId: opened.leaseId)
+        }
+        services.releaseSourceAccess(locator: selected.locator)
+        services.releaseSourceAccess(locator: selected.locator)
+        services.reconcileSourceAccess(retainedLocators: [selected.locator])
+        services.reconcileSourceAccess(retainedLocators: [])
+        // Unknown or plain-file locators cannot become deletion instructions.
+        services.releaseSourceAccess(locator: source.absoluteString)
+        services.releaseSourceAccess(locator: "bookmark:invalid")
+        var actual = [UInt8](repeating: 0, count: bytes.count)
+        let count = actual.count
+        XCTAssertEqual(Darwin.read(opened.fd, &actual, count), count)
+        XCTAssertEqual(Data(actual), bytes)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: services.operationalRoot.path), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: services.cacheDirectory.path))
+    }
+
     func testPublicationSurvivesInterruptedCommitAndNeverDeletesUserOutput() throws {
         let working = try workingFile()
         let bytes = try Data(contentsOf: working)

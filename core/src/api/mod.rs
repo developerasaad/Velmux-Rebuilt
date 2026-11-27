@@ -183,6 +183,13 @@ impl Engine {
     ) -> Result<(), EngineError> {
         self.media_runtime()?.assess(&id, &configuration)
     }
+    pub fn configuration_choices(
+        &self,
+        id: String,
+        configuration: crate::ConversionConfig,
+    ) -> Result<crate::ConfigurationChoices, EngineError> {
+        self.media_runtime()?.choices(&id, &configuration)
+    }
     pub fn submit_conversion(
         &self,
         id: String,
