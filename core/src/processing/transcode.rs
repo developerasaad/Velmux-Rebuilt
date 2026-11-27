@@ -21,7 +21,7 @@ fn text(value: &str) -> Result<CString, EngineError> {
     })
 }
 fn failure(code: i32, stage: &str) -> EngineError {
-    let mut buffer = [0i8; 192];
+    let mut buffer = [0 as std::ffi::c_char; 192];
     unsafe {
         sys::av_strerror(code, buffer.as_mut_ptr(), buffer.len());
     }
@@ -429,8 +429,8 @@ unsafe fn make_transform(
             ),
         )
     } else {
-        let mut in_layout = [0i8; 128];
-        let mut out_layout = [0i8; 128];
+        let mut in_layout = [0 as std::ffi::c_char; 128];
+        let mut out_layout = [0 as std::ffi::c_char; 128];
         check(
             sys::av_channel_layout_describe(
                 &(*dec).ch_layout,
@@ -690,7 +690,7 @@ pub(crate) fn convert(
     plan: &Plan,
     path: &Path,
     token: Arc<CancellationToken>,
-    mut progress: impl FnMut(i64),
+    mut progress: impl FnMut(super::ProcessingProgress) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
     let deadline = plan
         .preview_range
@@ -934,7 +934,7 @@ pub(crate) fn convert(
                     },
                 );
                 furthest = furthest.max(timestamp.saturating_sub(first));
-                progress(furthest);
+                progress(super::ProcessingProgress::Timestamp(furthest))?;
             }
             if let Some(transform) = &mut transforms[output_index] {
                 let result = sys::avcodec_send_packet(transform.decoder, packet.0);
@@ -1006,6 +1006,7 @@ pub(crate) fn convert(
                     .into(),
             });
         }
+        progress(super::ProcessingProgress::Finalizing)?;
         check(sys::av_write_trailer(out), "Mux")?;
         sys::avio_flush((*out).pb);
         check((*(*out).pb).error, "Mux")?;

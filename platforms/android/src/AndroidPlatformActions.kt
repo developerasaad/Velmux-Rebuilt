@@ -10,7 +10,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import com.velmux.ui.app.PlatformActions
-import com.velmux.ui.app.PlatformFailure
 import com.velmux.ui.app.SelectedSource
 
 /** Construct during Activity.onCreate, before the activity reaches STARTED. */
@@ -73,18 +72,19 @@ class AndroidPlatformActions(private val activity: ComponentActivity) : Platform
         }
     }
 
-    override fun openOutput(locator: String) {
-        launchOutput(locator, share = false)
+    override fun openOutput(locator: String, completion: (String?) -> Unit) {
+        launchOutput(locator, share = false, completion = completion)
     }
 
-    override fun shareOutput(locator: String) {
-        launchOutput(locator, share = true)
+    override fun shareOutput(locator: String, completion: (String?) -> Unit) {
+        launchOutput(locator, share = true, completion = completion)
     }
 
-    private fun launchOutput(locator: String, share: Boolean) {
+    private fun launchOutput(locator: String, share: Boolean, completion: (String?) -> Unit) {
         try {
             val uri = Uri.parse(locator)
             require(uri.scheme == "content")
+            activity.contentResolver.openFileDescriptor(uri, "r")?.use { } ?: throw IllegalStateException("The saved result is no longer accessible.")
             val type = activity.contentResolver.getType(uri) ?: "application/octet-stream"
             val intent = Intent(if (share) Intent.ACTION_SEND else Intent.ACTION_VIEW).apply {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -98,8 +98,10 @@ class AndroidPlatformActions(private val activity: ComponentActivity) : Platform
             }
             activity.startActivity(Intent.createChooser(intent, if (share) "Share result" else "Open result"))
         } catch (_: Exception) {
-            throw PlatformFailure("No installed application could open this result.")
+            completion("The saved result is unavailable or no installed application can open it.")
+            return
         }
+        completion(null)
     }
 
     companion object {

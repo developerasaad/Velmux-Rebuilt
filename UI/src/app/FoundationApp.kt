@@ -62,7 +62,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
         if (old != null) scope.launch { try { media.release(old.id) } catch (_: Exception) { /* Closed session has already released its resources. */ } }
     }
     fun back() {
-        if (preparing || submitting) { preparation?.cancel(); return }
+        if (preparing || submitting) { selectionGeneration += 1; preparation?.cancel(); return }
         if (destination == Destination.Workspace && config != originalConfig) {
             alert = Alert("Discard these changes?", "The unsubmitted configuration will be discarded. Accepted jobs continue independently.", "Discard", "Keep editing") {
                 leaveWorkspace(); destination = Destination.Home
@@ -82,6 +82,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
             appearance = media.appearance()
             outputLocation = media.outputLocation()
             jobs = media.jobs()
+            media.runtimeError()?.let { banner = it }
             cacheBytes = media.cacheBytes()
             ready = true
         } catch (error: Exception) { showFailure(error, "Media engine unavailable") }
@@ -145,7 +146,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
                     if (destination == Destination.Home) {
                         val active = jobs.count { it.state !in setOf(JobState.COMPLETED, JobState.FAILED, JobState.CANCELED) }
                         TextButton(onClick = { destination = Destination.Jobs }) { Text(if(active > 0) "Jobs ($active)" else "Jobs") }
-                        TextButton(onClick = { destination = Destination.Settings; scope.launch { if(ready) cacheBytes = media.cacheBytes() } }) { Text("Settings") }
+                        TextButton(onClick = { destination = Destination.Settings; scope.launch { try { if(ready) cacheBytes = media.cacheBytes() } catch(error: Exception) { showFailure(error, "Cache unavailable") } } }) { Text("Settings") }
                     }
                 }
                 banner?.let { message ->

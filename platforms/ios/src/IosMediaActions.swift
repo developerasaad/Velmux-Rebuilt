@@ -82,23 +82,35 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
         }
     }
 
-    func openOutput(locator: String) {
+    func openOutput(locator: String, completion: @escaping (String?) -> KotlinUnit) {
         DispatchQueue.main.async {
             guard let url = URL(string: locator), url.isFileURL,
-                  let presenter = self.presenter() else { return }
+                  FileManager.default.isReadableFile(atPath: url.path),
+                  let presenter = self.presenter() else {
+                _ = completion("The saved result is no longer accessible. Locate it in Files if it was moved.")
+                return
+            }
             let document = UIDocumentInteractionController(url: url)
             document.delegate = self
             self.documentInteraction = document
             if !document.presentPreview(animated: true) {
-                _ = document.presentOptionsMenu(from: presenter.view.bounds, in: presenter.view, animated: true)
+                guard document.presentOptionsMenu(from: presenter.view.bounds, in: presenter.view, animated: true) else {
+                    _ = completion("No installed application can open this result.")
+                    return
+                }
             }
+            _ = completion(nil)
         }
     }
 
-    func shareOutput(locator: String) {
+    func shareOutput(locator: String, completion: @escaping (String?) -> KotlinUnit) {
         DispatchQueue.main.async {
             guard let url = URL(string: locator), url.isFileURL,
-                  let presenter = self.presenter() else { return }
+                  FileManager.default.isReadableFile(atPath: url.path),
+                  let presenter = self.presenter() else {
+                _ = completion("The saved result is no longer accessible. Locate it in Files if it was moved.")
+                return
+            }
             let share = UIActivityViewController(activityItems: [url], applicationActivities: nil)
             if let popover = share.popoverPresentationController {
                 popover.sourceView = presenter.view
@@ -106,6 +118,7 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
                 popover.permittedArrowDirections = []
             }
             presenter.present(share, animated: true)
+            _ = completion(nil)
         }
     }
 

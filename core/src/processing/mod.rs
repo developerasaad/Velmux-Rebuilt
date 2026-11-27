@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 
 pub(crate) use transcode::convert;
+pub(crate) enum ProcessingProgress {
+    Timestamp(i64),
+    Finalizing,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct StreamPlan {

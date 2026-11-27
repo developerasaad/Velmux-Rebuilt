@@ -26,6 +26,7 @@ android {
         getByName("androidTest") {
             java.setSrcDirs(listOf("tests"))
             manifest.srcFile("tests/AndroidManifest.xml")
+            assets.srcDir(rootProject.layout.buildDirectory.dir("media-fixtures"))
         }
     }
     buildFeatures { compose = true }
@@ -43,4 +44,7 @@ dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    androidTestImplementation("androidx.media3:media3-exoplayer:1.8.1")
+    androidTestImplementation("androidx.media3:media3-ui:1.8.1")
 }

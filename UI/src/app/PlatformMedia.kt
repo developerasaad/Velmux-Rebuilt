@@ -29,8 +29,8 @@ interface MediaServices {
 /** Picker cancellation returns null; failures are scoped to the current action. */
 interface PlatformActions {
     fun selectSource(video: Boolean, completion: (SelectedSource?, String?) -> Unit)
-    fun openOutput(locator: String)
-    fun shareOutput(locator: String)
+    fun openOutput(locator: String, completion: (String?) -> Unit)
+    fun shareOutput(locator: String, completion: (String?) -> Unit)
 }
 
 /** Platform players report unsupported playback so the workspace can request a lazy fallback. */

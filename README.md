@@ -1,6 +1,6 @@
 # Velmux
 
-An offline Android and iOS media utility under greenfield development. Milestone 1, the engineering foundation, is verified; no conversion workflows are available yet. Further implementation requires explicit authorization.
+An offline Android and iOS media utility under greenfield development. Milestone 1 is verified. Milestone 2 converter workflows, previews and persistent jobs are implemented and undergoing runtime verification; see PROGRESS.md for the actual acceptance state. Milestone 3 is not authorized.
 
 Rust owns the engine, Compose Multiplatform shares the UI, and Kotlin/Swift hosts provide operating-system facilities. See REQUIREMENTS.md for the complete product scope, IMPLEMENTATION.md for decisions, and PROGRESS.md for actual verification evidence.
 

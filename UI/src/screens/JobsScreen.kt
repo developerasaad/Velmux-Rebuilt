@@ -109,11 +109,11 @@ fun JobsScreen(
                         if (job.state == JobState.COMPLETED) {
                             job.output?.let { output ->
                                 Button(onClick = {
-                                    try { actions.openOutput(output.locator) }
+                                    try { actions.openOutput(output.locator) { actionFailure = it } }
                                     catch (error: Exception) { actionFailure = error.message?.take(300) ?: "The result could not be opened." }
                                 }) { Text("Open") }
                                 OutlinedButton(onClick = {
-                                    try { actions.shareOutput(output.locator) }
+                                    try { actions.shareOutput(output.locator) { actionFailure = it } }
                                     catch (error: Exception) { actionFailure = error.message?.take(300) ?: "The result could not be shared." }
                                 }) { Text("Share") }
                             }

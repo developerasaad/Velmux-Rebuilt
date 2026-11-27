@@ -34,7 +34,7 @@ def assert_close(actual, expected, tolerance, detail):
     assert math.isfinite(actual) and abs(actual - expected) <= tolerance, f"{detail}: {actual} != {expected} ± {tolerance}"
 
 
-def check_tones(path, expected_channels):
+def check_tones(path, expected_channels, expected_frequencies=None):
     raw = run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0",
                "-ar", "48000", "-ac", str(expected_channels), "-f", "f32le", "-acodec", "pcm_f32le", "-"])
     samples = array.array("f")
@@ -48,12 +48,31 @@ def check_tones(path, expected_channels):
         values = samples[begin * expected_channels + channel:(begin + count) * expected_channels:expected_channels]
         rms = math.sqrt(sum(value * value for value in values) / len(values))
         assert 0.02 < rms < 0.3, f"{path}: silent/clipped tone channel {channel}: RMS {rms}"
-        frequencies = [440, 660] if expected_channels == 1 else [[440], [660]][channel]
+        if expected_frequencies is not None:
+            frequencies = expected_frequencies if expected_channels == 1 else [expected_frequencies[channel]]
+        else:
+            frequencies = [440, 660] if expected_channels == 1 else [[440], [660]][channel]
         for frequency in frequencies:
             cosine = sum(value * math.cos(2 * math.pi * frequency * i / 48000) for i, value in enumerate(values))
             sine = sum(value * math.sin(2 * math.pi * frequency * i / 48000) for i, value in enumerate(values))
             amplitude = 2 * math.hypot(cosine, sine) / len(values)
             assert amplitude > 0.02, f"{path}: expected {frequency} Hz missing in channel {channel}"
+
+
+def first_rgb(path, width, height, start=0, tone_map=False):
+    filters = []
+    if tone_map:
+        filters += ["zscale=t=linear:npl=100", "format=gbrpf32le", "zscale=p=bt709",
+                    "tonemap=tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:r=limited", "format=yuv420p"]
+    filters.append(f"scale={width}:{height}:flags=bicubic")
+    return run(["ffmpeg", "-v", "error", "-nostdin", "-threads", "1", "-ss", str(start),
+                "-i", str(path), "-map", "0:v:0", "-vf", ",".join(filters),
+                "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+
+
+def rgb_error(actual, expected):
+    assert len(actual) == len(expected) and actual, "A selected preview frame was not decoded"
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(actual, expected)) / len(actual))
 
 
 def check_case(case):
@@ -78,10 +97,15 @@ def check_case(case):
         assert stream["channels"] == case["channels"], path
     if "duration" in case:
         assert_close(float(info["format"]["duration"]), case["duration"], case.get("duration_tolerance", 0.15), str(path))
+    if "duration_range" in case:
+        lower, upper = case["duration_range"]
+        assert lower <= float(info["format"]["duration"]) <= upper, f"{path}: preview is not bounded to its selected interval"
+    if "reported_preview_duration_us" in case:
+        assert_close(float(info["format"]["duration"]), case["reported_preview_duration_us"] / 1_000_000, 0.15, f"{path}: reported preview duration")
     run(["ffmpeg", "-v", "error", "-xerror", "-err_detect", "explode", "-nostdin", "-threads", "1",
          "-i", str(path), "-map", "0:v?", "-map", "0:a?", "-f", "null", "-"])
     if case.get("tones"):
-        check_tones(path, case["channels"])
+        check_tones(path, case["channels"], case.get("tone_frequencies"))
     if case.get("source"):
         source = probe(FIXTURES / case["source"], packets=True)
         if case.get("preserve_video_packets"):
@@ -104,6 +128,24 @@ def check_case(case):
             def offset(document):
                 return min(float(packet["pts_time"]) for packet in media_packets(document, "audio")) - min(float(packet["pts_time"]) for packet in media_packets(document, "video"))
             assert_close(offset(info), offset(source), 0.05, f"{path}: audio/video offset")
+        if "preview_source_seek" in case:
+            actual = first_rgb(path, case["width"], case["height"])
+            reference = first_rgb(FIXTURES / case["source"], case["width"], case["height"], case["preview_source_seek"])
+            assert rgb_error(actual, reference) < 15, f"{path}: preview begins with the wrong source frame"
+        if case.get("sdr_tone_map"):
+            assert video[0].get("color_primaries") == "bt709", f"{path}: preview primaries remain HDR"
+            assert video[0].get("color_transfer") == "bt709", f"{path}: preview transfer remains HDR"
+            assert video[0].get("color_space") == "bt709", f"{path}: preview matrix remains HDR"
+            assert video[0].get("pix_fmt") == "yuv420p", f"{path}: preview is not compatible 8-bit SDR"
+            frames = json.loads(run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-of", "json", str(path)]))
+            sides = [entry.get("side_data_type", "") for frame in frames["frames"] for entry in frame.get("side_data_list", [])]
+            assert not any("mastering" in side.lower() or "content light" in side.lower() for side in sides), f"{path}: stale HDR mastering information"
+            actual = first_rgb(path, case["width"], case["height"])
+            reference = first_rgb(FIXTURES / case["source"], case["width"], case["height"], tone_map=True)
+            unconverted = first_rgb(FIXTURES / case["source"], case["width"], case["height"])
+            error = rgb_error(actual, reference)
+            assert error < 15, f"{path}: SDR pixels differ from independent tone-map reference: {error}"
+            assert error < rgb_error(actual, unconverted) * 0.75, f"{path}: HDR was only relabeled instead of tone mapped"
     return str(path.relative_to(OUTPUTS))
 
 

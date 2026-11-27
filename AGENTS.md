@@ -12,3 +12,5 @@ Milestone 2 is explicitly authorized. Milestone 1 is verified; Milestones 3–7 
 - Require actual evidence: compilation alone is not media correctness; manifest flags are not runtime capabilities; restart is not resume; file existence is not a valid checkpoint. Never expose placeholder functionality as complete.
 - Distinguish pending, in-progress, implemented/unverified, verified and blocked. Inspect actual workflow results tied to commits. Record limitations precisely. Never weaken gates for a green build.
 - English only for communication, code comments, documentation and commits. Keep docs practical and complementary. Retrieve relevant context instead of repeatedly loading the entire specification.
+
+The current workstation has an incomplete repository-specific Rust override. Do not invoke local rustup proxies or trigger automatic repair. Use CI for compilation; local formatting requires an explicitly verified installed formatter and toolchain. Do not change global tool installations.

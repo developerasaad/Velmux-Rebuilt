@@ -137,6 +137,7 @@ pub(crate) struct Input {
     format: *mut sys::AVFormatContext,
     io: *mut sys::AVIOContext,
     reader: Box<Reader>,
+    header_duration_us: Option<i64>,
 }
 
 impl Input {
@@ -247,6 +248,7 @@ impl Input {
             format: ptr::null_mut(),
             io: ptr::null_mut(),
             reader,
+            header_duration_us: None,
         };
         unsafe {
             let buffer = sys::av_malloc(BUFFER_SIZE) as *mut u8;
@@ -289,6 +291,10 @@ impl Input {
                 ptr::null_mut(),
             );
             input.check_result(result, "Unable to identify this media")?;
+            // Preserve the demuxer's header value before find_stream_info can
+            // synthesize an elapsed duration from stream timestamps/bit rate.
+            input.header_duration_us =
+                ((*input.format).duration >= 0).then_some((*input.format).duration);
             if (*input.format).nb_streams as usize > MAX_STREAMS {
                 return Err(EngineError::InvalidMedia {
                     detail: "The source contains too many streams".into(),
@@ -335,6 +341,10 @@ impl Input {
         self.format
     }
 
+    pub(crate) fn header_duration_us(&self) -> Option<i64> {
+        self.header_duration_us
+    }
+
     pub(crate) fn byte_size(&self) -> Option<u64> {
         self.reader.length
     }
@@ -357,7 +367,7 @@ impl Input {
         if result >= 0 {
             return Ok(());
         }
-        let mut text = [0i8; 192];
+        let mut text = [0 as std::ffi::c_char; 192];
         unsafe {
             sys::av_strerror(result, text.as_mut_ptr(), text.len());
         }

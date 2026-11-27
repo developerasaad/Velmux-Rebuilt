@@ -25,6 +25,10 @@ run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=480
 run_ffmpeg -i "$fixtures/stereo.wav" -c:a flac -compression_level 5 "$fixtures/stereo.flac"
 run_ffmpeg -f lavfi -i 'testsrc2=size=960x540:rate=24:duration=1' -c:v libx264 \
   -preset ultrafast -threads:v 1 -pix_fmt yuv420p "$fixtures/video-large.mp4"
+run_ffmpeg -f lavfi -i 'testsrc2=size=160x90:rate=12:duration=40' \
+  -f lavfi -i 'aevalsrc=0.12*sin(2*PI*if(lt(t\,20)\,440\,880)*t)|0.12*sin(2*PI*if(lt(t\,20)\,660\,990)*t):s=48000:d=40' \
+  -map 0:v -map 1:a -c:v libx264 -preset ultrafast -crf 28 -threads:v 1 \
+  -pix_fmt yuv420p -c:a aac -b:a 96k "$fixtures/long-preview.mp4"
 run_ffmpeg -itsoffset 5 -i "$fixtures/video.mp4" -itsoffset 5.25 -i "$fixtures/video.mp4" \
   -map 0:v -map 1:a -c copy -copyts -avoid_negative_ts disabled "$fixtures/positive-origin.mkv"
 run_ffmpeg -f lavfi -i 'testsrc2=size=320x180:rate=30:duration=3' \
@@ -52,6 +56,13 @@ import hashlib, json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 (root / 'invalid.bin').write_bytes(b'not a media file\x00' * 80)
 (root / 'truncated.mp4').write_bytes((root / 'video.mp4').read_bytes()[:256])
+probes = {}
+for path in root.iterdir():
+    if path.suffix in {'.mp4', '.mkv', '.wav', '.flac'} and path.name != 'truncated.mp4':
+        probes[path.name] = json.loads(subprocess.check_output(
+            ['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-show_chapters', '-of', 'json', str(path)], text=True, timeout=15))
+(root / 'probes.json').write_text(json.dumps(probes, indent=2) + '\n')
+print('Independent rotation facts:', probes['rotated-sar.mp4']['streams'][0].get('side_data_list'))
 files = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
          for path in root.iterdir() if path.name != 'fixtures.json' and path.is_file()}
 manifest = {'files': files, 'ffmpeg_version': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0]}

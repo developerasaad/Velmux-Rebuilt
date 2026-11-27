@@ -46,7 +46,7 @@ jobs:
         with:
           name: host-media-evidence
           path: |
-            build/media-fixtures/fixtures.json
+            build/media-fixtures
             build/media-test-output
           retention-days: 7
   android:

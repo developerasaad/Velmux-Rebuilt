@@ -752,24 +752,28 @@ impl Runtime {
                 &request.plan,
                 &path,
                 token.clone(),
-                |position| {
-                    if reported.elapsed() >= Duration::from_millis(250) {
-                        if let Ok(mut latest) = self.store.get(id) {
-                            if latest.state == JobState::Processing {
-                                latest.processed_us = position;
-                                let _ = self.update(&latest);
+                |event| {
+                    let finalizing = matches!(event, processing::ProcessingProgress::Finalizing);
+                    if finalizing || reported.elapsed() >= Duration::from_millis(250) {
+                        let mut latest = self.store.get(id)?;
+                        match event {
+                            processing::ProcessingProgress::Timestamp(position) => {
+                                latest.processed_us = position
+                            }
+                            processing::ProcessingProgress::Finalizing => {
+                                latest.state = JobState::Finalizing
                             }
                         }
+                        self.update(&latest)?;
                         reported = Instant::now();
                     }
+                    Ok(())
                 },
             )?;
             if token.is_cancelled() {
                 return Err(EngineError::Cancelled);
             }
             record = self.store.get(id)?;
-            record.state = JobState::Finalizing;
-            self.update(&record)?;
             record.state = JobState::Validating;
             self.update(&record)?;
             let output = media::inspect_file(&path, token.clone())?;

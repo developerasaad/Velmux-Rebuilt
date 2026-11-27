@@ -89,14 +89,20 @@ impl Runtime {
                         .into(),
                 });
             }
-            processing::convert(input, &source.info, &plan, &path, token.clone(), |_| {})?;
+            processing::convert(input, &source.info, &plan, &path, token.clone(), |_| Ok(()))?;
             let output = media::inspect_file(&path, token.clone())?;
             if output.byte_size == Some(0) || output.streams.is_empty() {
                 return Err(EngineError::InvalidMedia {
                     detail: "The preview contains no playable media.".into(),
                 });
             }
-            Ok(())
+            processing::verify_output(&output, &source.info, &plan)?;
+            output
+                .duration_us
+                .filter(|duration| *duration > 0)
+                .ok_or_else(|| EngineError::InvalidMedia {
+                    detail: "The finalized preview duration is unknown.".into(),
+                })
         })();
         let mut previews = self.previews.lock().map_err(internal)?;
         let current = previews.contains_key(&generation);
@@ -113,11 +119,12 @@ impl Runtime {
             result?;
             return Err(EngineError::Cancelled);
         }
+        let actual_duration = result?;
         previews.get_mut(&generation).unwrap().ready = true;
         Ok(PreviewResult {
             locator: format!("file://{}", path.to_string_lossy()),
             start_us: range.start_us,
-            duration_us: range.duration_us,
+            duration_us: actual_duration,
         })
     }
     pub(super) fn release_preview(&self, id: &str) {

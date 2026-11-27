@@ -79,13 +79,27 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
                 metadata: metadata(chapter.metadata),
             });
         }
+        let container = text(descriptor.name).unwrap_or_else(|| "unknown".into());
+        let start_time_us = (format.start_time != i64::MIN)
+            .then_some(format.start_time)
+            .or_else(|| {
+                streams
+                    .iter()
+                    .filter_map(|stream| stream.start_time_us)
+                    .min()
+            });
         Ok(MediaInfo {
             source_identity: identity,
             byte_size: input.byte_size(),
-            container: text(descriptor.name).unwrap_or_else(|| "unknown".into()),
+            duration_us: content_duration(
+                &container,
+                input.header_duration_us(),
+                (format.duration >= 0).then_some(format.duration),
+                start_time_us,
+            ),
+            container,
             container_long_name: text(descriptor.long_name),
-            duration_us: (format.duration >= 0).then_some(format.duration),
-            start_time_us: (format.start_time != i64::MIN).then_some(format.start_time),
+            start_time_us,
             bit_rate: positive_i64(format.bit_rate),
             streams,
             metadata: metadata(format.metadata),
@@ -93,6 +107,30 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
             staged: input.was_staged(),
         })
     }
+}
+
+fn content_duration(
+    container: &str,
+    header_duration_us: Option<i64>,
+    duration_us: Option<i64>,
+    start_time_us: Option<i64>,
+) -> Option<i64> {
+    // Matroska SegmentInfo.Duration is the segment timeline endpoint, copied
+    // unchanged by matroskadec. matroskaenc records max(packet PTS + duration),
+    // including an initial timestamp offset. Our logical content timeline starts
+    // at the same common origin used by conversion and preview. Other demuxers
+    // (and FFmpeg's generic timing estimates) already report elapsed duration.
+    if container
+        .split(',')
+        .any(|name| matches!(name, "matroska" | "webm"))
+    {
+        if let Some(endpoint) = header_duration_us {
+            return endpoint
+                .checked_sub(start_time_us?)
+                .filter(|duration| *duration >= 0);
+        }
+    }
+    duration_us
 }
 
 unsafe fn stream_info(stream: &sys::AVStream, index: usize, identity: &str) -> StreamInfo {
@@ -283,7 +321,7 @@ unsafe fn video_info(stream: &sys::AVStream, parameters: &sys::AVCodecParameters
 }
 
 unsafe fn audio_info(parameters: &sys::AVCodecParameters) -> AudioInfo {
-    let mut layout = [0i8; 256];
+    let mut layout = [0 as std::ffi::c_char; 256];
     let result =
         sys::av_channel_layout_describe(&parameters.ch_layout, layout.as_mut_ptr(), layout.len());
     AudioInfo {
@@ -413,5 +451,54 @@ fn display_aspect(width: i32, height: i32, sar: &Rational) -> Option<Rational> {
 fn invalid(detail: &str) -> EngineError {
     EngineError::InvalidMedia {
         detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::content_duration;
+
+    #[test]
+    fn matroska_header_endpoint_uses_the_shared_content_origin() {
+        assert_eq!(
+            content_duration(
+                "matroska,webm",
+                Some(7_250_000),
+                Some(7_250_000),
+                Some(5_000_000)
+            ),
+            Some(2_250_000)
+        );
+        assert_eq!(
+            content_duration(
+                "matroska,webm",
+                Some(2_000_000),
+                Some(2_000_000),
+                Some(-7_000)
+            ),
+            Some(2_007_000)
+        );
+        assert_eq!(
+            content_duration("matroska,webm", Some(2_000_000), Some(2_000_000), None),
+            None
+        );
+        assert_eq!(
+            content_duration("matroska,webm", Some(2), Some(2), Some(3)),
+            None
+        );
+    }
+
+    #[test]
+    fn elapsed_durations_are_not_shifted_again() {
+        for (container, header) in [
+            ("matroska,webm", None),
+            ("mov,mp4,m4a,3gp,3g2,mj2", Some(2_250_000)),
+            ("mpegts", Some(2_250_000)),
+        ] {
+            assert_eq!(
+                content_duration(container, header, Some(2_250_000), Some(5_000_000)),
+                Some(2_250_000)
+            );
+        }
     }
 }

@@ -102,8 +102,10 @@ struct ProviderState {
     root: PathBuf,
     source_gate: Gate,
     publication_gate: Gate,
+    preview_gate: Gate,
     block_source: AtomicBool,
     block_publication: AtomicBool,
+    block_preview: AtomicBool,
     fail_publications: AtomicUsize,
     fail_after_publish: AtomicBool,
     open_calls: AtomicUsize,
@@ -119,8 +121,10 @@ impl ProviderState {
             root,
             source_gate: Gate::default(),
             publication_gate: Gate::default(),
+            preview_gate: Gate::default(),
             block_source: AtomicBool::new(false),
             block_publication: AtomicBool::new(false),
+            block_preview: AtomicBool::new(false),
             fail_publications: AtomicUsize::new(0),
             fail_after_publish: AtomicBool::new(false),
             open_calls: AtomicUsize::new(0),
@@ -184,6 +188,11 @@ impl MediaProvider for FilesystemProvider {
         let length = file.metadata().map_err(storage)?.len();
         self.0.open_calls.fetch_add(1, Ordering::SeqCst);
         let worker = thread::current().name() == Some("velmux-media-worker");
+        if thread::current().name() == Some("velmux-preview-test")
+            && self.0.block_preview.load(Ordering::SeqCst)
+        {
+            self.0.preview_gate.enter();
+        }
         if worker {
             let active = self.0.worker_sources.fetch_add(1, Ordering::SeqCst) + 1;
             self.0
@@ -245,7 +254,7 @@ impl MediaProvider for FilesystemProvider {
         if self
             .0
             .fail_publications
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
                 count.checked_sub(1)
             })
             .is_ok()
@@ -454,6 +463,7 @@ impl Drop for Harness {
     fn drop(&mut self) {
         self.provider.source_gate.release();
         self.provider.publication_gate.release();
+        self.provider.preview_gate.release();
         self.close();
     }
 }
@@ -604,7 +614,7 @@ fn real_inspection_and_invalid_direct_core_requests() {
     assert_eq!(
         video
             .rotation_degrees_counter_clockwise
-            .unwrap()
+            .unwrap_or_else(|| panic!("Missing rotation; inspected video facts: {video:?}"))
             .abs()
             .round(),
         90.0
@@ -1019,4 +1029,196 @@ fn moved_published_file_does_not_block_other_jobs_or_delete_user_content() {
         .streams
         .is_empty());
     assert_eq!(digest(&moved), hash);
+}
+
+fn cached_preview_path(locator: &str, harness: &Harness) -> PathBuf {
+    let path = PathBuf::from(
+        locator
+            .strip_prefix("file://")
+            .expect("Preview must use an actual native file locator"),
+    );
+    assert!(
+        path.starts_with(harness.root.join("cache/previews")),
+        "A preview escaped its owned cache"
+    );
+    assert!(path.is_file());
+    path
+}
+
+#[test]
+fn actual_previews_seek_bound_duration_and_preserve_cache_ownership() {
+    let harness = Harness::new("previews");
+    let mut cases = Vec::new();
+    for (name, operation, start_us, duration, video_size, audio_codec) in [
+        (
+            "video.mp4",
+            Operation::VideoConverter,
+            500_000,
+            1.5,
+            Some((320, 180)),
+            Some("aac"),
+        ),
+        (
+            "hdr.mkv",
+            Operation::VideoConverter,
+            0,
+            1.0,
+            Some((160, 90)),
+            None,
+        ),
+        (
+            "stereo.flac",
+            Operation::AudioConverter,
+            500_000,
+            1.5,
+            None,
+            Some("pcm_s16le"),
+        ),
+        (
+            "positive-origin.mkv",
+            Operation::VideoConverter,
+            500_000,
+            1.75,
+            Some((320, 180)),
+            Some("aac"),
+        ),
+        (
+            "long-preview.mp4",
+            Operation::VideoConverter,
+            20_000_000,
+            15.0,
+            Some((160, 90)),
+            Some("aac"),
+        ),
+    ] {
+        let before = digest(&fixture(name));
+        let source = harness.inspect(name, operation);
+        let preview = harness
+            .engine()
+            .prepare_preview(source.id.clone(), start_us, CancellationToken::new())
+            .unwrap();
+        assert_eq!(preview.start_us, start_us);
+        assert!((1..=15_000_000).contains(&preview.duration_us));
+        let path = cached_preview_path(&preview.locator, &harness);
+        let cache_size = fs::metadata(&path).unwrap().len();
+        let preview_hash = digest(&path);
+        assert_eq!(harness.engine().cache_bytes().unwrap(), cache_size);
+        harness.engine().clear_cache().unwrap();
+        assert_eq!(
+            digest(&path),
+            preview_hash,
+            "Clear Cache removed a preview still referenced by a workspace"
+        );
+
+        // Preserve exact prepared bytes for independent post-test inspection;
+        // production cache ownership still ends with the workspace below.
+        let evidence = harness.root.join(format!(
+            "{}_preview.{}",
+            Path::new(name).file_stem().unwrap().to_str().unwrap(),
+            path.extension().unwrap().to_str().unwrap()
+        ));
+        fs::copy(&path, &evidence).unwrap();
+        assert_eq!(digest(&evidence), preview_hash);
+        let mut expected = json!({
+            "path":evidence,"source":name,"duration":duration,"duration_tolerance":0.15,
+            "reported_preview_duration_us":preview.duration_us,"audio_codecs":audio_codec.into_iter().collect::<Vec<_>>(),
+            "sample_rate":48000,"channels":2,"tones":audio_codec.is_some(),
+        });
+        if let Some((width, height)) = video_size {
+            expected["video_codec"] = json!("h264");
+            expected["width"] = json!(width);
+            expected["height"] = json!(height);
+            expected["frame_rate"] = json!(30);
+            if name == "hdr.mkv" {
+                expected["sdr_tone_map"] = json!(true);
+            } else {
+                expected["preview_source_seek"] = json!(start_us as f64 / 1_000_000.0);
+            }
+        }
+        if name == "long-preview.mp4" {
+            expected["duration_range"] = json!([14.85, 15.15]);
+            expected["tone_frequencies"] = json!([880, 990]);
+        }
+        cases.push(expected);
+        harness.engine().release_inspection(source.id).unwrap();
+        assert!(
+            !path.exists(),
+            "Closing a workspace retained its obsolete prepared preview"
+        );
+        assert_eq!(harness.engine().cache_bytes().unwrap(), 0);
+        assert_eq!(
+            digest(&fixture(name)),
+            before,
+            "Preview preparation modified the original source"
+        );
+    }
+    assert!(
+        harness.engine().jobs().unwrap().is_empty(),
+        "Preview preparation created persistent processing jobs"
+    );
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 0);
+    harness.expect(cases);
+}
+
+#[test]
+fn canceled_and_obsolete_preview_requests_release_native_sources_and_scratch() {
+    let harness = Harness::new("preview-cancellation");
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let canceled = CancellationToken::new();
+    canceled.cancel();
+    assert!(matches!(
+        harness
+            .engine()
+            .prepare_preview(source.id.clone(), 0, canceled),
+        Err(EngineError::Cancelled)
+    ));
+    assert_eq!(harness.engine().cache_bytes().unwrap(), 0);
+    assert!(harness.provider.leases.lock().unwrap().is_empty());
+
+    harness.provider.block_preview.store(true, Ordering::SeqCst);
+    let engine = harness.engine().clone();
+    let source_id = source.id.clone();
+    let obsolete = CancellationToken::new();
+    let worker_token = obsolete.clone();
+    let preparation = thread::Builder::new()
+        .name("velmux-preview-test".into())
+        .spawn(move || engine.prepare_preview(source_id, 0, worker_token))
+        .unwrap();
+    harness.provider.preview_gate.wait_entered();
+    let replacement_token = CancellationToken::new();
+    let replacement = harness
+        .engine()
+        .prepare_preview(source.id.clone(), 500_000, replacement_token.clone())
+        .unwrap();
+    assert!(
+        obsolete.is_cancelled(),
+        "A superseded preview continued without cancellation"
+    );
+    let replacement_path = cached_preview_path(&replacement.locator, &harness);
+    let orphan = replacement_path
+        .parent()
+        .unwrap()
+        .join(format!("{}.mp4", uuid::Uuid::new_v4()));
+    fs::write(&orphan, b"obsolete disposable cache bytes").unwrap();
+    let unidentified = replacement_path.parent().unwrap().join("unidentified-file");
+    fs::write(&unidentified, b"preserve unidentified data").unwrap();
+    harness.engine().clear_cache().unwrap();
+    assert!(!orphan.exists());
+    assert!(unidentified.exists());
+    assert!(replacement_path.exists());
+    harness.engine().release_inspection(source.id).unwrap();
+    assert!(replacement_token.is_cancelled());
+    assert!(!replacement_path.exists());
+    harness.provider.preview_gate.release();
+    assert!(matches!(
+        preparation.join().unwrap(),
+        Err(EngineError::Cancelled)
+    ));
+    assert!(harness.provider.leases.lock().unwrap().is_empty());
+    let remaining: Vec<_> = fs::read_dir(replacement_path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(remaining, vec![unidentified]);
+    assert!(harness.engine().jobs().unwrap().is_empty());
 }

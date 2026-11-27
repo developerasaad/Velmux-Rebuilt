@@ -48,3 +48,13 @@ Product catalogs, SQLite operational state and actual media workflows belong to 
 Authorization is limited to Milestone 2. Implementing: descriptor-backed media access and inspection, Rust catalog/configuration, direct library conversion, SQLite jobs, native publication and playback adapters. These new paths are not yet verified. Existing Milestone 1 tests remain enabled.
 
 The first integrated unit introduces source/OS contracts and a real processing/store implementation. Focused host compilation/tests precede application wiring. Android and iOS adapters have source checks only; native picker interaction, player behavior and publication still require runtime evidence. Remaining M2 work includes shared application/workspaces/Jobs/Settings, preview fallback, independent media verification, cancellation/lifecycle/restart failure coverage and complete cross-platform acceptance. No Milestone 3 functionality is authorized.
+
+### Current Milestone 2 verification
+
+- `38296d0` introduced descriptor leases, inspection, SQLite scheduling and native adapters. Its first host build found an explicit raw-pointer reference requirement; corrected in `c823fbe`.
+- `c823fbe` connected Home/converters/Jobs/Settings and lazy preview processing. [Source checks 45957182516](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45957182516) passed on attempt 2 after a transient plugin-repository resolution failure.
+- Host job in [45957183609](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45957183609) passed nine internal tests and 12 of 14 new real-media Engine cases. Remaining failures concern rotation inspection and positive-start Matroska duration. The latter is corrected using actual demuxer header timing semantics; execution proof is pending. No failing assertion was removed.
+- Android in that run failed expanded FFmpeg binding compilation on target-specific C character signedness; buffers now use the target C character type. Apple verification is still running. No mobile Milestone 2 runtime acceptance is claimed.
+- Additional native converter/picker/playback tests and independent preview verification are implemented but pending execution. Generated fixture binaries and independent probe facts are retained as CI evidence. The local repository-specific Rust override remains incomplete; no local mobile/native build is used as acceptance evidence.
+
+Still required: correct observed failures, obtain independent full media verification, execute both mobile converter integrations and native UI/picker/player tests, inspect real screen captures, and review every Milestone 2 acceptance item. Milestone 2 is not complete.
