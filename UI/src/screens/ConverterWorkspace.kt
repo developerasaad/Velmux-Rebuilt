@@ -41,7 +41,7 @@ fun ConverterWorkspace(
                 Choice("Codec", videoCodec(config.videoCodec)) { sheet = "Codec" }
                 Choice("Resolution", when(config.videoSize) { VideoSize.ORIGINAL -> "Original"; VideoSize.HD720 -> "720p bounds"; VideoSize.SD480 -> "480p bounds" }) { sheet = "Resolution" }
                 Choice("Frame rate", if(config.frameRate == FrameRate.ORIGINAL) "Original timing" else "30 fps") { sheet = "Frame rate" }
-                if(config.videoCodec == VideoCodec.H264) {
+                if(config.videoCodec == VideoCodec.H264 || config.videoCodec == VideoCodec.AUTOMATIC && config.quality != 23.toUByte()) {
                     Text("Encoding quality · ${config.quality}", style = MaterialTheme.typography.titleSmall)
                     Slider(value = config.quality.toFloat(), onValueChange = { onChange(config.copy(quality = it.toInt().toUByte())) }, valueRange = 18f..28f, steps = 9, enabled = !submitting)
                     OutlinedTextField(qualityText, onValueChange = { value ->
@@ -63,7 +63,7 @@ fun ConverterWorkspace(
                 Text("The retained audio settings conflict with this choice.", color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = { onChange(config.copy(audioBitrate = null, sampleRate = null, channels = null)) }) { Text("Use original audio settings") }
             }
-            if(config.videoCodec == VideoCodec.COPY && (config.videoSize != VideoSize.ORIGINAL || config.frameRate != FrameRate.ORIGINAL || config.quality != 23.toUByte())) {
+            if(config.videoCodec == VideoCodec.COPY && (config.frameRate != FrameRate.ORIGINAL || config.quality != 23.toUByte())) {
                 Text("Copying requires original video settings.", color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL, quality = 23u)) }) { Text("Use original video settings") }
             }

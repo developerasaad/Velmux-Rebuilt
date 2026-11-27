@@ -298,13 +298,73 @@ pub(crate) fn catalog(operation: Operation) -> Vec<FormatOption> {
 
 pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<FormatOption> {
     use crate::{ffmpeg::sys, StreamKind};
-    catalog(operation).into_iter().filter_map(|mut option|{
-        let name=std::ffi::CString::new(option.format.muxer()).unwrap();
-        let muxer=unsafe{sys::av_guess_format(name.as_ptr(),std::ptr::null(),std::ptr::null())};
-        if muxer.is_null(){return None;}
-        let compatible=|kind:StreamKind| info.streams.iter().filter(|stream|stream.kind==kind).all(|stream|unsafe{sys::avformat_query_codec(muxer,stream.codec_id as _,0)}>0);
-        if !compatible(StreamKind::Video){option.video_codecs.retain(|codec|*codec!=VideoCodec::Copy);}
-        if !compatible(StreamKind::Audio){option.audio_codecs.retain(|codec|*codec!=AudioCodec::Copy);}
-        Some(option)
-    }).collect()
+    catalog(operation)
+        .into_iter()
+        .filter_map(|mut option| {
+            let name = std::ffi::CString::new(option.format.muxer()).unwrap();
+            let muxer =
+                unsafe { sys::av_guess_format(name.as_ptr(), std::ptr::null(), std::ptr::null()) };
+            if muxer.is_null() {
+                return None;
+            }
+            if info
+                .streams
+                .iter()
+                .filter(|stream| !matches!(stream.kind, StreamKind::Video | StreamKind::Audio))
+                .any(|stream| {
+                    (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }) <= 0
+                })
+            {
+                return None;
+            }
+            if info
+                .streams
+                .iter()
+                .filter_map(|stream| stream.video.as_ref())
+                .filter(|video| !video.attached_picture)
+                .any(|video| {
+                    video.bit_depth.is_some_and(|depth| depth > 8)
+                        || video.mastering_display.is_some()
+                        || video.content_light.is_some()
+                        || video
+                            .color_transfer
+                            .as_deref()
+                            .is_some_and(|value| matches!(value, "smpte2084" | "arib-std-b67"))
+                })
+            {
+                option
+                    .video_codecs
+                    .retain(|codec| *codec != VideoCodec::H264);
+                if info
+                    .streams
+                    .iter()
+                    .filter(|stream| stream.kind == StreamKind::Video)
+                    .any(|stream| {
+                        (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }) <= 0
+                    })
+                {
+                    return None;
+                }
+            }
+            let compatible = |kind: StreamKind| {
+                info.streams
+                    .iter()
+                    .filter(|stream| stream.kind == kind)
+                    .all(|stream| {
+                        (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }) > 0
+                    })
+            };
+            if !compatible(StreamKind::Video) {
+                option
+                    .video_codecs
+                    .retain(|codec| *codec != VideoCodec::Copy);
+            }
+            if !compatible(StreamKind::Audio) {
+                option
+                    .audio_codecs
+                    .retain(|codec| *codec != AudioCodec::Copy);
+            }
+            Some(option)
+        })
+        .collect()
 }

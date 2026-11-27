@@ -279,6 +279,7 @@ unsafe fn make_transform(
         && is_video
         && [sys::AVCOL_TRC_SMPTE2084, sys::AVCOL_TRC_ARIB_STD_B67].contains(&(*dec).color_trc);
     if is_video {
+        (*enc).flags |= sys::AV_CODEC_FLAG_FRAME_DURATION as i32;
         (*enc).width = plan.width.unwrap() as i32;
         (*enc).height = plan.height.unwrap() as i32;
         (*enc).pix_fmt = sys::AV_PIX_FMT_YUV420P;
