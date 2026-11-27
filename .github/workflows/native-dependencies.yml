@@ -1,0 +1,63 @@
+name: Native dependencies
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-dependencies-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native:
+    name: ${{ matrix.target }} ${{ matrix.abi }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: host, abi: host, runner: ubuntu-24.04}
+          - {target: android, abi: arm64-v8a, runner: ubuntu-24.04}
+          - {target: android, abi: x86_64, runner: ubuntu-24.04}
+          - {target: ios, abi: arm64, runner: macos-15}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        if: matrix.target == 'android'
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Select Xcode
+        if: matrix.target == 'ios'
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      - name: Prepare native tools
+        run: bash scripts/ci/setup-native.sh
+      - name: Resolve full identity
+        id: identity
+        run: bash scripts/ci/native-key.sh ${{ matrix.target }} ${{ matrix.abi }}
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-${{ matrix.target }}-${{ matrix.abi }}-${{ steps.identity.outputs.key }}
+      - uses: actions/cache@v4
+        with:
+          path: scripts/ffmpeg-builder/downloads
+          key: sources-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg-builder/versions.json') }}
+      - name: Construct and validate
+        env:
+          VELMUX_FFMPEG_JOBS: '4'
+        run: bash scripts/ffmpeg/fetch.sh ${{ matrix.target }} ${{ matrix.abi }}
+      - uses: actions/cache/save@v4
+        if: success() && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-${{ matrix.target }}-${{ matrix.abi }}-${{ steps.identity.outputs.key }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-evidence-${{ matrix.target }}-${{ matrix.abi }}
+          path: |
+            scripts/ffmpeg-builder/out/**/BUILD-IDENTITY
+            scripts/ffmpeg-builder/out/**/ffmpeg-capabilities.json
+            scripts/ffmpeg-builder/src/**/config.log
+          retention-days: 7

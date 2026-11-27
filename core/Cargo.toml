@@ -1,0 +1,20 @@
+[package]
+name = "velmux_core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+uniffi = "=0.29.4"
+thiserror = "=2.0.17"
+
+[build-dependencies]
+bindgen = "=0.71.1"
+pkg-config = "=0.3.32"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

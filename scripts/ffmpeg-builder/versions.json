@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "notes": "Pinned upstream sources for the Velmux feature-selected FFmpeg backend. SHA-256 values were recorded at first fetch (TOFU) from the canonical URLs below; maintainers should cross-check against upstream signatures before signing releases. SourceForge and code.videolan.org block/serve-unstable content to cloud IPs (CI), so primary URLs use automation-friendly mirrors verified to carry pristine upstream bytes: deb.debian.org (pristine orig tarballs), savannah mirrors, GitHub per-commit/per-tag codeload archives (deterministic). libavdevice is intentionally excluded from the FFmpeg configuration.",
+  "ffmpeg": {
+    "version": "7.1.5",
+    "url": "https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz",
+    "mirrors": [
+      "https://www.ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz"
+    ],
+    "sha256": "de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f"
+  },
+  "dependencies": {
+    "nasm": {
+      "version": "2.16.03",
+      "url": "https://ftp2.osuosl.org/pub/blfs/conglomeration/nasm/nasm-2.16.03.tar.xz",
+      "mirrors": [
+        "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.xz"
+      ],
+      "sha256": "1412a1c760bbd05db026b6c0d1657affd6631cd0a63cddb6f73cc6d4aa616148",
+      "host_only": true,
+      "note": "nasm.us stalls from cloud CI networks (the original primary); the OSUOSL BLFS mirror carries the pristine upstream tarball. The GitHub tag archive is NOT byte-identical to the release tarball and can never match the checksum."
+    },
+    "zlib": {
+      "version": "1.3.1",
+      "url": "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz",
+      "mirrors": [
+        "https://zlib.net/zlib-1.3.1.tar.gz"
+      ],
+      "sha256": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+    },
+    "x264": {
+      "version": "31e19f92f00c7003fa115047ce50978bc98c3a0d",
+      "url": "https://codeload.github.com/mirror/x264/tar.gz/31e19f92f00c7003fa115047ce50978bc98c3a0d",
+      "file": "x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz",
+      "mirrors": [
+        "https://github.com/mirror/x264/archive/31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz"
+      ],
+      "sha256": "d053c9d86988d6bc78237ca5205865c5ddf99c98ef4cd9927eec8f6d388f6dd9",
+      "note": "code.videolan.org git-archive tarballs are regenerated per request (byte-unstable); the GitHub mirror's per-commit codeload archives are deterministic and verified to match this checksum."
+    },
+    "x265": {
+      "version": "3.6",
+      "url": "https://distfiles.macports.org/x265/x265_3.6.tar.gz",
+      "file": "x265_3.6.tar.gz",
+      "mirrors": [
+        "https://bitbucket.org/multicoreware/x265_git/downloads/x265_3.6.tar.gz",
+        "https://deb.debian.org/debian/pool/main/x/x265/x265_3.6.orig.tar.gz"
+      ],
+      "sha256": "663531f341c5389f460d730e62e10a4fcca3428ca2ca109693867bc5fe2e2807",
+      "note": "HEVC software encode for the FFmpeg backend (feature matrix: HEVC D+E+C). bitbucket (the canonical host) is unreliable from cloud CI networks; the MacPorts distfiles mirror carries the pristine upstream tarball."
+    },
+    "lame": {
+      "version": "3.100",
+      "url": "https://deb.debian.org/debian/pool/main/l/lame/lame_3.100.orig.tar.gz",
+      "mirrors": [
+        "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz"
+      ],
+      "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "file": "lame-3.100.tar.gz",
+      "note": "Debian pool carries the pristine upstream tarball (checksum-verified); SourceForge 403s cloud/CI networks."
+    },
+    "opus": {
+      "version": "1.5.2",
+      "url": "https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz",
+      "mirrors": [
+        "https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz"
+      ],
+      "sha256": "65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1"
+    },
+    "libogg": {
+      "version": "1.3.5",
+      "url": "https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz",
+      "mirrors": [
+        "https://github.com/xiph/ogg/releases/download/v1.3.5/libogg-1.3.5.tar.gz"
+      ],
+      "sha256": "0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664"
+    },
+    "libvorbis": {
+      "version": "1.3.7",
+      "url": "https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz",
+      "mirrors": [
+        "https://github.com/xiph/vorbis/releases/download/v1.3.7/libvorbis-1.3.7.tar.gz"
+      ],
+      "sha256": "0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab"
+    },
+    "libvpx": {
+      "version": "1.15.0",
+      "url": "https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.0.tar.gz",
+      "mirrors": [],
+      "sha256": "e935eded7d81631a538bfae703fd1e293aad1c7fd3407ba00440c95105d2011e",
+      "file": "libvpx-1.15.0.tar.gz"
+    },
+    "dav1d": {
+      "version": "1.5.1",
+      "url": "https://github.com/videolan/dav1d/archive/refs/tags/1.5.1.tar.gz",
+      "mirrors": [],
+      "sha256": "fa635e2bdb25147b1384007c83e15de44c589582bb3b9a53fc1579cb9d74b695",
+      "file": "dav1d-1.5.1.tar.gz"
+    },
+    "svt-av1": {
+      "version": "2.3.0",
+      "url": "https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v2.3.0/SVT-AV1-v2.3.0.tar.gz",
+      "mirrors": [],
+      "sha256": "ebb0b484ef4a0dc281e94342a9f73ad458496f5d3457eca7465bec943910c6c3",
+      "note": "Canonical GitLab archive (the OpenVisualCloud GitHub repo is gone). The Fedora lookaside tarball is a different byte stream (different archive generation) and can never match the pinned sha256, so it is not listed as a mirror; fetch retries transient GitLab stalls."
+    },
+    "freetype": {
+      "version": "2.13.3",
+      "url": "https://mirror.netcologne.de/savannah/freetype/freetype-2.13.3.tar.xz",
+      "mirrors": [
+        "https://ftp.acc.umu.se/mirror/gnu.org/savannah/freetype/freetype-2.13.3.tar.xz",
+        "https://downloads.sourceforge.net/project/freetype/freetype2/2.13.3/freetype-2.13.3.tar.xz"
+      ],
+      "sha256": "0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289",
+      "file": "freetype-2.13.3.tar.xz",
+      "note": "Savannah mirrors carry pristine upstream tarballs (checksum-verified)."
+    },
+    "libpng": {
+      "version": "1.6.46",
+      "url": "https://codeload.github.com/pnggroup/libpng/tar.gz/v1.6.46",
+      "mirrors": [
+        "https://github.com/pnggroup/libpng/archive/v1.6.46.tar.gz"
+      ],
+      "sha256": "767b01936f9620d4ab4cdf6ec348f6526f861f825648b610b1d604167dc738d2",
+      "file": "libpng-1.6.46.tar.gz",
+      "note": "GitHub per-tag codeload archive (deterministic, verified). Equivalent source tree to the SourceForge release tarball; the cmake build path does not need the autotools-dist layout."
+    },
+    "harfbuzz": {
+      "version": "10.2.0",
+      "url": "https://github.com/harfbuzz/harfbuzz/releases/download/10.2.0/harfbuzz-10.2.0.tar.xz",
+      "mirrors": [
+        "https://distfiles.macports.org/harfbuzz/harfbuzz-10.2.0.tar.xz"
+      ],
+      "sha256": "620e3468faec2ea8685d32c46a58469b850ef63040b3565cde05959825b48227"
+    },
+    "fribidi": {
+      "version": "1.0.16",
+      "url": "https://github.com/fribidi/fribidi/releases/download/v1.0.16/fribidi-1.0.16.tar.xz",
+      "mirrors": [],
+      "sha256": "1b1cde5b235d40479e91be2f0e88a309e3214c8ab470ec8a2744d82a5a9ea05c"
+    },
+    "libass": {
+      "version": "0.17.3",
+      "url": "https://github.com/libass/libass/releases/download/0.17.3/libass-0.17.3.tar.xz",
+      "mirrors": [],
+      "sha256": "eae425da50f0015c21f7b3a9c7262a910f0218af469e22e2931462fed3c50959"
+    },
+    "libtool": {
+      "version": "2.5.4",
+      "url": "https://mirror.netcologne.de/gnu/libtool/libtool-2.5.4.tar.gz",
+      "mirrors": [
+        "https://ftp.acc.umu.se/mirror/gnu.org/libtool/libtool-2.5.4.tar.gz",
+        "https://ftp.gnu.org/gnu/libtool/libtool-2.5.4.tar.gz"
+      ],
+      "sha256": "da8ebb2ce4dcf46b90098daf962cffa68f4b4f62ea60f798d0ef12929ede6adf",
+      "file": "libtool-2.5.4.tar.gz",
+      "note": "Build-time dependency for zimg's autogen (libtoolize + m4 macros); built into the prefix only when the host has none. CI images ship libtool, so this is the offline/fallback path."
+    },
+    "zimg": {
+      "version": "3.0.5",
+      "url": "https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.5.tar.gz",
+      "mirrors": [],
+      "sha256": "a9a0226bf85e0d83c41a8ebe4e3e690e1348682f6a2a7838f1b8cbff1b799bcf",
+      "file": "zimg-release-3.0.5.tar.gz",
+      "note": "Colors-space conversion + tone mapping (zscale filter) \u2014 required for genuine HDR-to-SDR (mandate 17.2/25). 3.0.6 was skipped: its tarball ships a configure with unexpanded libtool macros."
+    },
+    "libwebp": {
+      "version": "1.5.0",
+      "url": "https://github.com/webmproject/libwebp/archive/refs/tags/v1.5.0.tar.gz",
+      "mirrors": [],
+      "sha256": "668c9aba45565e24c27e17f7aaf7060a399f7f31dba6c97a044e1feacb930f37",
+      "file": "libwebp-1.5.0.tar.gz",
+      "note": "Still WebP image output for frame extraction (mandate 29.3). Encoding only; animated output stays deferred to V2."
+    }
+  }
+}

@@ -1,0 +1,12 @@
+.DS_Store
+.reference/
+.gradle/
+.kotlin/
+**/build/
+**/target/
+local.properties
+scripts/ffmpeg-builder/downloads/
+scripts/ffmpeg-builder/src/
+scripts/ffmpeg-builder/out/
+*.xcuserstate
+xcuserdata/
