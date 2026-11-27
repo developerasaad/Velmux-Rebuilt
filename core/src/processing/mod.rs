@@ -328,33 +328,9 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 .video
                 .as_ref()
                 .ok_or_else(|| invalid("Video geometry could not be inspected."))?;
-            let size_change = match config.video_size {
-                VideoSize::Original => false,
-                size => {
-                    let width = video
-                        .width
-                        .ok_or_else(|| invalid("The source width is unknown."))?;
-                    let height = video
-                        .height
-                        .ok_or_else(|| invalid("The source height is unknown."))?;
-                    let sar = video
-                        .sample_aspect_ratio
-                        .as_ref()
-                        .map_or(1.0, |r| f64::from(r.numerator) / f64::from(r.denominator));
-                    if !sar.is_finite() || sar <= 0.0 {
-                        return Err(invalid("The source pixel aspect ratio is invalid."));
-                    }
-                    let display_width = f64::from(width) * sar;
-                    let display_height = f64::from(height);
-                    let (long, short) = if size == VideoSize::Hd720 {
-                        (1280.0, 720.0)
-                    } else {
-                        (854.0, 480.0)
-                    };
-                    display_width.max(display_height) > long
-                        || display_width.min(display_height) > short
-                }
-            };
+            let size_change = config.video_size != VideoSize::Original
+                && scaled_video_dimensions(video, config.video_size)?
+                    != scaled_video_dimensions(video, VideoSize::Original)?;
             let transform =
                 size_change || config.frame_rate != FrameRate::Original || config.quality != 23;
             if config.video_codec == VideoCodec::Copy && transform {
@@ -382,59 +358,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 {
                     return Err(invalid("The current H.264 encoding route cannot preserve this source's high bit depth or HDR. Use compatible stream copying; HDR conversion will be added later."));
                 }
-                let width = video
-                    .width
-                    .ok_or_else(|| invalid("The source width is unknown."))?;
-                let height = video
-                    .height
-                    .ok_or_else(|| invalid("The source height is unknown."))?;
-                if width == 0 || height == 0 || width > 16384 || height > 16384 {
-                    return Err(invalid(
-                        "The source geometry exceeds this processing route's limits.",
-                    ));
-                }
-                let sar = video
-                    .sample_aspect_ratio
-                    .as_ref()
-                    .map(|r| f64::from(r.numerator) / f64::from(r.denominator))
-                    .unwrap_or(1.0);
-                if !sar.is_finite() || sar <= 0.0 {
-                    return Err(invalid("The source pixel aspect ratio is invalid."));
-                }
-                let factor = match config.video_size {
-                    VideoSize::Original => 1.0,
-                    size => {
-                        let long = if size == VideoSize::Hd720 {
-                            1280.0
-                        } else {
-                            854.0
-                        };
-                        let short = if size == VideoSize::Hd720 {
-                            720.0
-                        } else {
-                            480.0
-                        };
-                        let dw = f64::from(width) * sar;
-                        let dh = f64::from(height);
-                        let (bw, bh) = if dw >= dh {
-                            (long, short)
-                        } else {
-                            (short, long)
-                        };
-                        (bw / dw).min(bh / dh).min(1.0)
-                    }
-                };
-                let (out_w, out_h) = if factor < 1.0 {
-                    (
-                        ((f64::from(width) * factor) as u32 / 2) * 2,
-                        ((f64::from(height) * factor) as u32 / 2) * 2,
-                    )
-                } else {
-                    (width, height)
-                };
-                if out_w < 2 || out_h < 2 || out_w % 2 != 0 || out_h % 2 != 0 {
-                    return Err(invalid("H.264 requires even dimensions. Choose a supported size or compatible stream copying."));
-                }
+                let (out_w, out_h) = h264_dimensions(video, config.video_size)?;
                 item.encoder = Some("libx264".into());
                 item.expected_codec = "h264".into();
                 item.width = Some(out_w);
@@ -451,19 +375,10 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             } else {
                 desired
             };
-            let transform = config
-                .sample_rate
-                .is_some_and(|rate| Some(rate) != audio.sample_rate)
-                || config.channels.is_some_and(|channels| {
-                    Some(channels) != audio.channels
-                        || audio.channel_layout.as_deref()
-                            != Some(if channels == 1 { "mono" } else { "stereo" })
-                })
-                || config.audio_bitrate.is_some();
+            let transform = audio_transform_requested(stream, config);
             let compatible = (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) })
                 > 0
-                && (config.format != OutputFormat::M4a
-                    || matches!(stream.codec.as_str(), "aac" | "alac"));
+                && audio_copy_allowed(config.format, &stream.codec);
             if config.audio_codec == AudioCodec::Copy && transform {
                 return Err(invalid(
                     "The selected audio settings require encoding; choose a compatible encoder.",
@@ -530,9 +445,8 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             stream.codec_id
         };
         if (unsafe { sys::avformat_query_codec(muxer, target_id as _, 0) }) <= 0
-            || (config.format == OutputFormat::M4a
-                && stream.kind == StreamKind::Audio
-                && !matches!(item.expected_codec.as_str(), "aac" | "alac"))
+            || (stream.kind == StreamKind::Audio
+                && !audio_copy_allowed(config.format, &item.expected_codec))
         {
             return Err(invalid(format!("{} stream {} is incompatible with this container. Choose a compatible format; tracks are never silently discarded.",stream.codec,stream.index)));
         }

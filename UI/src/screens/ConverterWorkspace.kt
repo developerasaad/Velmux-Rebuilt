@@ -23,7 +23,7 @@ fun ConverterWorkspace(
 ) {
     val formats = remember(media, source.id, video) { media.catalogForSource(source.id, video) }
     val format = formats.firstOrNull { it.format == config.format }
-    val choices = remember(media, source.id, config.format, config.videoCodec, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate) {
+    val choices = remember(media, source.id, config.format, config.videoCodec, config.videoSize, config.frameRate, config.quality, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate) {
         media.configurationChoices(source.id, config)
     }
     var sheet by remember { mutableStateOf<String?>(null) }
@@ -77,7 +77,7 @@ fun ConverterWorkspace(
                 Text("This route preserves original video geometry and timing.", color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL)) }) { Text("Use original geometry and timing") }
             }
-            if(lossless && config.audioBitrate != null || config.audioCodec == AudioCodec.COPY && (config.audioBitrate != null || config.sampleRate != null || config.channels != null)) {
+            if(lossless && config.audioBitrate != null || config.audioCodec == AudioCodec.COPY && (config.audioBitrate != null || (config.sampleRate ?: 0u) !in choices.sampleRates || (config.channels ?: 0u) !in choices.channels)) {
                 Text("The retained audio settings conflict with this choice.", color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = { onChange(config.copy(audioBitrate = null, sampleRate = null, channels = null)) }) { Text("Use original audio settings") }
             }

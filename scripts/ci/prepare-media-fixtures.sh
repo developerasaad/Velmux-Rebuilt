@@ -28,6 +28,9 @@ run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=192
 run_ffmpeg -f lavfi -i 'aevalsrc=0.1*sin(2*PI*440*t)|0.1*sin(2*PI*660*t)|0.1*sin(2*PI*880*t)|0|0.1*sin(2*PI*440*t)|0.1*sin(2*PI*660*t):s=48000:d=2:c=5.1' \
   -c:a flac "$fixtures/surround.flac"
 run_ffmpeg -f lavfi -i 'sine=frequency=440:sample_rate=8000:duration=2' -c:a flac "$fixtures/low-rate.flac"
+run_ffmpeg -i "$fixtures/stereo.wav" -c:a pcm_s32le "$fixtures/pcm32.wav"
+run_ffmpeg -f lavfi -i 'testsrc=size=321x181:rate=12:duration=1' \
+  -vf format=yuv444p -c:v ffv1 -threads:v 1 "$fixtures/odd-video.mkv"
 run_ffmpeg -f lavfi -i 'testsrc2=size=960x540:rate=24:duration=1' -c:v libx264 \
   -preset ultrafast -threads:v 1 -pix_fmt yuv420p "$fixtures/video-large.mp4"
 run_ffmpeg -f lavfi -i 'testsrc2=size=160x90:rate=12:duration=40' \

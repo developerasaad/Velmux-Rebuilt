@@ -1871,6 +1871,47 @@ fn unmasked_stereo_pcm_encodes_aac_without_losing_channel_identity() {
 #[test]
 fn configuration_choices_follow_real_sampling_and_encoding_limits() {
     let harness = Harness::new("applicable-settings");
+    let pcm32 = harness.inspect("pcm32.wav", Operation::AudioConverter);
+    assert!(!harness
+        .engine()
+        .media_catalog_for_source(pcm32.id.clone(), Operation::AudioConverter)
+        .unwrap()
+        .iter()
+        .any(|format| format.format == OutputFormat::Flac));
+    let mut invalid_precision = harness.defaults(&pcm32, Operation::AudioConverter);
+    invalid_precision.format = OutputFormat::Flac;
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(pcm32.id, invalid_precision),
+        Err(EngineError::Configuration { .. })
+    ));
+
+    let odd = harness.inspect("odd-video.mkv", Operation::VideoConverter);
+    let odd_default = harness.defaults(&odd, Operation::VideoConverter);
+    assert_eq!(odd_default.format, OutputFormat::Matroska);
+    let odd_choices = harness
+        .engine()
+        .configuration_choices(odd.id.clone(), odd_default.clone())
+        .unwrap();
+    assert_eq!(odd_choices.frame_rates, vec![FrameRate::Original]);
+    let copied = harness.complete(&harness.submit(&odd, odd_default).id);
+
+    let stereo = harness.inspect("stereo.flac", Operation::AudioConverter);
+    let mut equal = harness.defaults(&stereo, Operation::AudioConverter);
+    equal.format = OutputFormat::Flac;
+    equal.audio_codec = AudioCodec::Copy;
+    equal.sample_rate = Some(48000);
+    equal.channels = Some(2);
+    let equal_choices = harness
+        .engine()
+        .configuration_choices(stereo.id.clone(), equal.clone())
+        .unwrap();
+    assert!(equal_choices.sample_rates.contains(&48000) && equal_choices.channels.contains(&2));
+    harness
+        .engine()
+        .validate_configuration(stereo.id, equal)
+        .unwrap();
     let high = harness.inspect("high-rate.flac", Operation::AudioConverter);
     let mut config = harness.defaults(&high, Operation::AudioConverter);
     assert_eq!(config.format, OutputFormat::Flac, "Default should retain a compatible representation instead of assuming AAC supports 192 kHz");
@@ -1933,5 +1974,6 @@ fn configuration_choices_follow_real_sampling_and_encoding_limits() {
     let mp3 = harness.complete(&harness.submit(&low, config).id);
     let mut low_expected = expectation(&mp3, "mp3", 1, 8000);
     low_expected["tone_frequencies"] = json!([440]);
-    harness.expect(vec![expectation(&aac, "aac", 2, 48000), low_expected]);
+    harness.expect(vec![expectation(&aac, "aac", 2, 48000), low_expected,
+        json!({"path":copied.output.unwrap().locator,"video_codec":"ffv1","width":321,"height":181,"audio_codecs":[],"duration":1.0})]);
 }

@@ -241,7 +241,7 @@ class MediaSession(private val engine: Engine) {
         val defaults = defaultsNative(id, video)
         return defaults.copy(
             videoCodec = if (video) uniffi.velmux_core.VideoCodec.H264 else uniffi.velmux_core.VideoCodec.AUTOMATIC,
-            audioCodec = uniffi.velmux_core.AudioCodec.AAC,
+            audioCodec = if (video) uniffi.velmux_core.AudioCodec.AUTOMATIC else uniffi.velmux_core.AudioCodec.AAC,
             fileName = fileName,
         )
     }

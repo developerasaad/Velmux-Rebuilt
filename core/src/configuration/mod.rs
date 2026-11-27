@@ -254,23 +254,25 @@ pub(crate) fn default_config(
         .streams
         .iter()
         .any(|stream| stream.kind == crate::StreamKind::Audio);
-    if has_audio {
-        let current = choices(source, &config);
-        if !current.sample_rates.contains(&0) || !current.channels.contains(&0) {
-            for option in available
-                .iter()
-                .filter(|option| option.audio_codecs.contains(&AudioCodec::Copy))
-                .chain(
-                    available
-                        .iter()
-                        .filter(|option| !option.audio_codecs.contains(&AudioCodec::Copy)),
-                )
-            {
-                config.format = option.format;
-                let candidate = choices(source, &config);
-                if candidate.sample_rates.contains(&0) && candidate.channels.contains(&0) {
-                    break;
-                }
+    let usable = |candidate: &ConversionConfig| {
+        let current = choices(source, candidate);
+        (!has_audio || current.sample_rates.contains(&0) && current.channels.contains(&0))
+            && (operation != Operation::VideoConverter
+                || current.video_sizes.contains(&VideoSize::Original))
+    };
+    if !usable(&config) {
+        for option in available
+            .iter()
+            .filter(|option| option.audio_codecs.contains(&AudioCodec::Copy))
+            .chain(
+                available
+                    .iter()
+                    .filter(|option| !option.audio_codecs.contains(&AudioCodec::Copy)),
+            )
+        {
+            config.format = option.format;
+            if usable(&config) {
+                break;
             }
         }
     }
@@ -306,15 +308,24 @@ pub(crate) fn audio_target(format: OutputFormat) -> &'static str {
     }
 }
 
-pub(crate) fn audio_encoding_required(
+pub(crate) fn audio_copy_allowed(format: OutputFormat, codec: &str) -> bool {
+    match format {
+        OutputFormat::M4a => matches!(codec, "aac" | "alac"),
+        OutputFormat::Wav => codec == "pcm_s16le",
+        OutputFormat::Flac => codec == "flac",
+        OutputFormat::Mp3 => codec == "mp3",
+        _ => true,
+    }
+}
+
+pub(crate) fn audio_transform_requested(
     stream: &crate::StreamInfo,
     config: &ConversionConfig,
-    compatible: bool,
 ) -> bool {
     let Some(audio) = &stream.audio else {
         return false;
     };
-    let transform = config
+    config
         .sample_rate
         .is_some_and(|rate| Some(rate) != audio.sample_rate)
         || config.channels.is_some_and(|channels| {
@@ -322,7 +333,83 @@ pub(crate) fn audio_encoding_required(
                 || audio.channel_layout.as_deref()
                     != Some(if channels == 1 { "mono" } else { "stereo" })
         })
-        || config.audio_bitrate.is_some();
+        || config.audio_bitrate.is_some()
+}
+
+pub(crate) fn scaled_video_dimensions(
+    video: &crate::VideoInfo,
+    size: VideoSize,
+) -> Result<(u32, u32), EngineError> {
+    let width = video
+        .width
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid("The source width is unknown."))?;
+    let height = video
+        .height
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid("The source height is unknown."))?;
+    if size == VideoSize::Original {
+        return Ok((width, height));
+    }
+    let sar = video.sample_aspect_ratio.as_ref().map_or(1.0, |ratio| {
+        f64::from(ratio.numerator) / f64::from(ratio.denominator)
+    });
+    if !sar.is_finite() || sar <= 0.0 {
+        return Err(invalid("The source pixel aspect ratio is invalid."));
+    }
+    let (long, short) = if size == VideoSize::Hd720 {
+        (1280.0, 720.0)
+    } else {
+        (854.0, 480.0)
+    };
+    let dw = f64::from(width) * sar;
+    let dh = f64::from(height);
+    let (bw, bh) = if dw >= dh {
+        (long, short)
+    } else {
+        (short, long)
+    };
+    let factor = (bw / dw).min(bh / dh).min(1.0);
+    Ok(if factor < 1.0 {
+        (
+            ((f64::from(width) * factor) as u32 / 2) * 2,
+            ((f64::from(height) * factor) as u32 / 2) * 2,
+        )
+    } else {
+        (width, height)
+    })
+}
+
+pub(crate) fn h264_dimensions(
+    video: &crate::VideoInfo,
+    size: VideoSize,
+) -> Result<(u32, u32), EngineError> {
+    let dimensions = scaled_video_dimensions(video, size)?;
+    if video.width.is_some_and(|width| width > 16384)
+        || video.height.is_some_and(|height| height > 16384)
+        || video
+            .width
+            .zip(video.height)
+            .is_some_and(|(width, height)| u64::from(width) * u64::from(height) > 64 * 1024 * 1024)
+    {
+        return Err(invalid(
+            "The source geometry exceeds this processing route's limits.",
+        ));
+    }
+    if dimensions.0 < 2 || dimensions.1 < 2 || dimensions.0 % 2 != 0 || dimensions.1 % 2 != 0 {
+        return Err(invalid(
+            "H.264 requires even dimensions. Choose a supported size or compatible stream copying.",
+        ));
+    }
+    Ok(dimensions)
+}
+
+pub(crate) fn audio_encoding_required(
+    stream: &crate::StreamInfo,
+    config: &ConversionConfig,
+    compatible: bool,
+) -> bool {
+    let transform = audio_transform_requested(stream, config);
     let explicit = !matches!(config.audio_codec, AudioCodec::Automatic | AudioCodec::Copy);
     let target = audio_target(config.format);
     config.audio_codec != AudioCodec::Copy
@@ -409,14 +496,17 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
                 };
                 let compatible =
                     unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0
-                        && (candidate.format != OutputFormat::M4a
-                            || matches!(stream.codec.as_str(), "aac" | "alac"));
+                        && audio_copy_allowed(candidate.format, &stream.codec);
+                if candidate.audio_codec == AudioCodec::Copy {
+                    return compatible && !audio_transform_requested(stream, candidate);
+                }
                 if !audio_encoding_required(stream, candidate, compatible) {
                     return true;
                 }
                 let rate = candidate.sample_rate.or(facts.sample_rate);
                 let channels = candidate.channels.or(facts.channels);
                 stream.decoder_available
+                    && (target != "flac" || facts.bit_depth.is_none_or(|depth| depth <= 24))
                     && (!check_rate || rate.is_some_and(|rate| audio_rate_supported(target, rate)))
                     && (!check_channels
                         || channels.is_some_and(|channels| {
@@ -431,22 +521,55 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
             })
     };
     let mut result = ConfigurationChoices {
-        video_sizes: vec![VideoSize::Original],
+        video_sizes: Vec::new(),
         frame_rates: vec![FrameRate::Original],
         sample_rates: Vec::new(),
         channels: Vec::new(),
         audio_bitrates: Vec::new(),
     };
-    if can_encode_video {
-        result
-            .video_sizes
-            .extend([VideoSize::Hd720, VideoSize::Sd480]);
-        result.frame_rates.push(FrameRate::Fps30);
+    if let Some(stream) = info.streams.iter().find(|stream| {
+        stream.kind == StreamKind::Video
+            && !stream
+                .video
+                .as_ref()
+                .is_some_and(|video| video.attached_picture)
+    }) {
+        let copy_compatible = !muxer.is_null()
+            && unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
+        for size in [VideoSize::Original, VideoSize::Hd720, VideoSize::Sd480] {
+            let no_size_change = size == VideoSize::Original
+                || stream.video.as_ref().is_some_and(|video| {
+                    scaled_video_dimensions(video, size)
+                        .ok()
+                        .zip(scaled_video_dimensions(video, VideoSize::Original).ok())
+                        .is_some_and(|(selected, original)| selected == original)
+                });
+            if config.video_codec != VideoCodec::H264
+                && copy_compatible
+                && no_size_change
+                && config.frame_rate == FrameRate::Original
+                && config.quality == 23
+                || can_encode_video
+                    && stream
+                        .video
+                        .as_ref()
+                        .is_some_and(|video| h264_dimensions(video, size).is_ok())
+            {
+                result.video_sizes.push(size);
+            }
+        }
+        if can_encode_video
+            && stream
+                .video
+                .as_ref()
+                .is_some_and(|video| h264_dimensions(video, config.video_size).is_ok())
+        {
+            result.frame_rates.push(FrameRate::Fps30);
+        }
+    } else {
+        result.video_sizes.push(VideoSize::Original);
     }
     for rate in [0, 44100, 48000] {
-        if config.audio_codec == AudioCodec::Copy && rate != 0 {
-            continue;
-        }
         let mut candidate = config.clone();
         candidate.sample_rate = (rate != 0).then_some(rate);
         if valid(&candidate, true, false, false) {
@@ -454,9 +577,6 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
         }
     }
     for channels in [0, 1, 2] {
-        if config.audio_codec == AudioCodec::Copy && channels != 0 {
-            continue;
-        }
         let mut candidate = config.clone();
         candidate.channels = (channels != 0).then_some(channels);
         if valid(&candidate, false, true, false) {
@@ -576,11 +696,35 @@ pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<Form
                     .filter(|stream| stream.kind == kind)
                     .all(|stream| {
                         (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }) > 0
-                            && (option.format != OutputFormat::M4a
-                                || stream.kind != StreamKind::Audio
-                                || matches!(stream.codec.as_str(), "aac" | "alac"))
+                            && (stream.kind != StreamKind::Audio
+                                || audio_copy_allowed(option.format, &stream.codec))
                     })
             };
+            if option.format == OutputFormat::Flac
+                && !compatible(StreamKind::Audio)
+                && info
+                    .streams
+                    .iter()
+                    .filter_map(|stream| stream.audio.as_ref())
+                    .any(|audio| audio.bit_depth.is_some_and(|depth| depth > 24))
+            {
+                return None;
+            }
+            if info
+                .streams
+                .iter()
+                .filter_map(|stream| stream.video.as_ref())
+                .filter(|video| !video.attached_picture)
+                .any(|video| {
+                    [VideoSize::Original, VideoSize::Hd720, VideoSize::Sd480]
+                        .into_iter()
+                        .all(|size| h264_dimensions(video, size).is_err())
+                })
+            {
+                option
+                    .video_codecs
+                    .retain(|codec| *codec != VideoCodec::H264);
+            }
             if info.streams.iter().any(|stream| {
                 stream.kind == StreamKind::Video
                     && !stream
@@ -609,6 +753,9 @@ pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<Form
                     .retain(|codec| matches!(codec, AudioCodec::Automatic | AudioCodec::Copy));
             }
             if !compatible(StreamKind::Video) {
+                if option.format.is_video() && !option.video_codecs.contains(&VideoCodec::H264) {
+                    return None;
+                }
                 option
                     .video_codecs
                     .retain(|codec| *codec != VideoCodec::Copy);
