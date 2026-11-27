@@ -103,7 +103,11 @@ final class PickerFlowUITests: XCTestCase {
             self.element(label: fileName).isHittable || self.element(label: base).isHittable
         }
         let file = element(label: fileName).isHittable ? element(label: fileName) : element(label: base)
-        file.tap()
+        // Files' icon-mode cell center falls on the filename/badge region for
+        // a movie thumbnail. Tap the actual enabled file icon when available.
+        let icon = file.images.firstMatch
+        if icon.exists && icon.isHittable { icon.tap() }
+        else { file.tap() }
         // iOS versions presenting an explicit Open action still use the real
         // picker action. Single-selection versions dismiss on the file tap.
         let open = app.navigationBars.buttons["Open"].firstMatch
@@ -135,7 +139,12 @@ final class PickerFlowUITests: XCTestCase {
         let field = tagged.exists ? tagged : app.textFields.matching(NSPredicate(format: "label CONTAINS 'Output name'")).firstMatch
         try waitFor("The output-name field was not accessible") { field.exists && field.isHittable }
         field.tap()
-        guard let current = field.value as? String, !current.isEmpty, current != "Output name" else {
+        let keyboardContinue = app.buttons["Continue"].firstMatch
+        if keyboardContinue.exists && keyboardContinue.isHittable { keyboardContinue.tap() }
+        // Compose exports this editable TextView's content as its accessibility
+        // label on iOS; UIKit text fields normally expose the same text as value.
+        let current = (field.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? field.label
+        guard !current.isEmpty, current != "Output name" else {
             throw failure("The output-name field did not expose its editable value")
         }
         field.press(forDuration: 1.2)
@@ -145,7 +154,9 @@ final class PickerFlowUITests: XCTestCase {
         } else {
             field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count) + stem)
         }
-        XCTAssertEqual(field.value as? String, stem, "The accepted output name must identify this UI request uniquely")
+        try waitFor("The edited output name did not identify this request uniquely") {
+            (field.value as? String) == stem || field.label == stem
+        }
         for title in ["Done", "Return"] {
             let key = app.keyboards.buttons[title].firstMatch
             if key.exists && key.isHittable { key.tap(); break }

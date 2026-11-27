@@ -1974,6 +1974,8 @@ fn configuration_choices_follow_real_sampling_and_encoding_limits() {
     let mp3 = harness.complete(&harness.submit(&low, config).id);
     let mut low_expected = expectation(&mp3, "mp3", 1, 8000);
     low_expected["tone_frequencies"] = json!([440]);
+    low_expected["gapless_duration"] = json!(true);
+    low_expected["decoded_samples"] = json!(16000);
     harness.expect(vec![expectation(&aac, "aac", 2, 48000), low_expected,
         json!({"path":copied.output.unwrap().locator,"video_codec":"ffv1","width":321,"height":181,"audio_codecs":[],"duration":1.0})]);
 }

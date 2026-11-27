@@ -349,6 +349,10 @@ final class ConversionIntegrationTests: XCTestCase {
         defer { actions.releasePreview(controller: controller) }
         controller.loadViewIfNeeded()
         let playerController = try XCTUnwrap(controller.children.first as? AVPlayerViewController)
+        for _ in 0..<750 {
+            if playerController.player != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         let player = try XCTUnwrap(playerController.player)
         let item = try XCTUnwrap(player.currentItem)
         let ready = expectation(description: "Encoded preview is ready in AVPlayer")
@@ -374,29 +378,42 @@ final class ConversionIntegrationTests: XCTestCase {
         let host = try XCTUnwrap(UIApplication.shared.delegate as? AppDelegate)
         let actions = try XCTUnwrap(host.mediaActions)
         let root = try XCTUnwrap(host.window?.rootViewController)
-        let canceled = expectation(description: "Native picker cancellation callback")
+        root.loadViewIfNeeded()
+        XCTAssertNotNil(root.view.window, "The real presentation host must be attached")
+        var canceled: XCTestExpectation?
         var calls = 0
         actions.selectSource(video: true) { selected, error in
             calls += 1
             XCTAssertNil(selected)
             XCTAssertNil(error, "Picker cancellation is not an error")
-            canceled.fulfill()
+            canceled?.fulfill()
             return
         }
         var picker: UIDocumentPickerViewController?
-        for _ in 0..<100 {
-            picker = root.presentedViewController as? UIDocumentPickerViewController
+        func presentedPicker(_ controller: UIViewController) -> UIDocumentPickerViewController? {
+            if let picker = controller as? UIDocumentPickerViewController { return picker }
+            if let presented = controller.presentedViewController,
+               let picker = presentedPicker(presented) { return picker }
+            return controller.children.compactMap { presentedPicker($0) }.first
+        }
+        // Files' first remote-view-service launch can take longer than the
+        // subsequent presentations exercised by the UI tests.
+        for _ in 0..<500 {
+            picker = presentedPicker(root)
             if picker != nil { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         let presented = try XCTUnwrap(picker)
+        XCTAssertNotNil(presented.presentingViewController)
         XCTAssertFalse(presented.allowsMultipleSelection)
+        let cancellation = expectation(description: "Native picker cancellation callback")
+        canceled = cancellation
         // This verifies UIKit presentation and delegate cancellation. It does
         // not represent an automated selection from an external Files provider.
         actions.documentPickerWasCancelled(presented)
         actions.documentPickerWasCancelled(presented)
         presented.dismiss(animated: false)
-        await fulfillment(of: [canceled], timeout: 5)
+        await fulfillment(of: [cancellation], timeout: 5)
         XCTAssertEqual(calls, 1)
     }
 

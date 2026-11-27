@@ -99,7 +99,23 @@ def check_case(case):
         assert int(stream["sample_rate"]) == case["sample_rate"], path
         assert stream["channels"] == case["channels"], path
     if "duration" in case:
-        assert_close(float(info["format"]["duration"]), case["duration"], case.get("duration_tolerance", 0.15), str(path))
+        duration = float(info["format"]["duration"])
+        if case.get("gapless_duration"):
+            assert len(audio) == 1 and audio[0]["codec_name"] == "mp3", path
+            # Low-rate MPEG audio has a sizeable coded priming/tail interval.
+            # Require actual skip/discard metadata and exact independently
+            # decoded sample count rather than widening a duration tolerance.
+            skipped = sum(int(side.get("skip_samples", 0)) + int(side.get("discard_padding", 0))
+                          for packet in media_packets(info, "audio") for side in packet.get("side_data_list", [])
+                          if side.get("side_data_type") == "Skip Samples")
+            rate = int(audio[0]["sample_rate"])
+            assert 0 < skipped < rate // 2, f"{path}: missing/unreasonable gapless padding"
+            assert_close(duration - skipped / rate, case["duration"], 1 / rate, f"{path}: playable duration")
+        else:
+            assert_close(duration, case["duration"], case.get("duration_tolerance", 0.15), str(path))
+    if "decoded_samples" in case:
+        raw = run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0", "-f", "f32le", "-acodec", "pcm_f32le", "-"])
+        assert len(raw) == case["decoded_samples"] * case["channels"] * 4, f"{path}: decoded sample count changed"
     if "duration_range" in case:
         lower, upper = case["duration_range"]
         assert lower <= float(info["format"]["duration"]) <= upper, f"{path}: preview is not bounded to its selected interval"

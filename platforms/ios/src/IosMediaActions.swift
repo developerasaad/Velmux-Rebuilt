@@ -132,18 +132,73 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
 
     func createPreview(locator: String, onUnsupported: @escaping () -> Void) -> UIViewController {
         dispatchPrecondition(condition: .onQueue(.main))
-        do {
-            let url = try IosMediaServices.resolveSource(locator)
-            return IosPlayerController(url: url) { _ = onUnsupported() }
-        } catch {
-            DispatchQueue.main.async { _ = onUnsupported() }
-            return UIViewController()
-        }
+        return IosPlayerController(locator: locator, onUnsupported: onUnsupported)
     }
 
     func releasePreview(controller: UIViewController) {
         dispatchPrecondition(condition: .onQueue(.main))
         (controller as? IosPlayerController)?.releasePlayer()
+    }
+}
+
+/** Owns pending coordination independently of the controller's main-thread lifetime. */
+private final class IosPreviewPreparation {
+    struct Prepared {
+        let asset: AVURLAsset
+        let lease: IosSourceLease
+    }
+    private let lock = NSLock()
+    private var canceled = false
+    private var coordinator: NSFileCoordinator?
+    private let accessQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .userInitiated
+        return queue
+    }()
+
+    func prepare(locator: String, completion: @escaping (Prepared?) -> Void) {
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        lock.lock()
+        let stopped = canceled
+        lock.unlock()
+        guard !stopped, let url = try? IosMediaServices.resolveSource(locator) else { completion(nil); return }
+        let lease = IosSourceLease(url: url)
+        let pending = NSFileCoordinator(filePresenter: lease)
+        lock.lock()
+        if canceled {
+            lock.unlock()
+            lease.releaseAccess()
+            completion(nil)
+            return
+        }
+        coordinator = pending
+        let intent = NSFileAccessIntent.readingIntent(with: url, options: [])
+        // The asynchronous request is submitted under the cancellation lock, so
+        // cancellation cannot slip between registration and request submission.
+        pending.coordinate(with: [intent], queue: accessQueue) { [self] error in
+            lock.lock()
+            coordinator = nil
+            let discarded = canceled
+            lock.unlock()
+            guard !discarded, error == nil else {
+                lease.releaseAccess()
+                completion(nil)
+                return
+            }
+            completion(Prepared(asset: AVURLAsset(url: intent.url), lease: lease))
+        }
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        canceled = true
+        let pending = coordinator
+        lock.unlock()
+        // Foundation permits cancellation from any thread without waiting for
+        // coordination to finish. The worker keeps its lease until it returns.
+        pending?.cancel()
     }
 }
 
@@ -154,28 +209,45 @@ private final class IosPlayerController: UIViewController {
     private var statusObservation: NSKeyValueObservation?
     private var unsupported: (() -> Void)?
     private var released = false
+    private var preparation: IosPreviewPreparation?
 
-    init(url: URL, onUnsupported: @escaping () -> Void) {
+    init(locator: String, onUnsupported: @escaping () -> Void) {
         unsupported = onUnsupported
-        lease = IosSourceLease(url: url)
         super.init(nibName: nil, bundle: nil)
-        var coordinationError: NSError?
-        var asset: AVURLAsset?
-        NSFileCoordinator(filePresenter: lease).coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinated in
-            asset = AVURLAsset(url: coordinated)
-        }
-        if coordinationError == nil, let asset {
-            let item = AVPlayerItem(asset: asset)
-            playback.player = AVPlayer(playerItem: item)
-            playback.showsPlaybackControls = true
-            playback.videoGravity = .resizeAspect
-            statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-                if item.status == .failed {
-                    DispatchQueue.main.async { self?.reportUnsupported() }
+        let pending = IosPreviewPreparation()
+        preparation = pending
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            pending.prepare(locator: locator) { result in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.released, self.preparation === pending else {
+                        result?.lease.releaseAccess()
+                        return
+                    }
+                    self.preparation = nil
+                    guard let result else { self.reportUnsupported(); return }
+                    self.attach(result)
                 }
             }
-        } else {
-            DispatchQueue.main.async { [weak self] in self?.reportUnsupported() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak pending] in
+            guard let self, let pending, !self.released, self.preparation === pending else { return }
+            self.preparation = nil
+            pending.cancel()
+            self.reportUnsupported()
+        }
+    }
+
+    private func attach(_ prepared: IosPreviewPreparation.Prepared) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        lease = prepared.lease
+        let item = AVPlayerItem(asset: prepared.asset)
+        playback.player = AVPlayer(playerItem: item)
+        playback.showsPlaybackControls = true
+        playback.videoGravity = .resizeAspect
+        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            if item.status == .failed {
+                DispatchQueue.main.async { self?.reportUnsupported() }
+            }
         }
     }
 
@@ -206,6 +278,8 @@ private final class IosPlayerController: UIViewController {
         guard !released else { return }
         released = true
         unsupported = nil
+        preparation?.cancel()
+        preparation = nil
         statusObservation?.invalidate()
         statusObservation = nil
         playback.player?.pause()
@@ -216,6 +290,7 @@ private final class IosPlayerController: UIViewController {
     }
 
     deinit {
+        preparation?.cancel()
         statusObservation?.invalidate()
         lease?.releaseAccess()
     }

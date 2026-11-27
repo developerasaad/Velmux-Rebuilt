@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application android:name=".VelmuxApplication" android:allowBackup="false" android:label="Velmux" android:supportsRtl="true" android:theme="@style/VelmuxTheme">
-        <activity android:name=".MainActivity" android:exported="true">
+        <!-- Compose updates sizing, density and theme in place so ordinary
+             display changes preserve the active unsubmitted workspace. -->
+        <activity android:name=".MainActivity" android:exported="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|fontScale|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

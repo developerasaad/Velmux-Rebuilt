@@ -174,6 +174,8 @@ final class NativeMediaServicesTests: XCTestCase {
         defer { actions.releasePreview(controller: controller) }
         controller.loadViewIfNeeded()
         let playback = try XCTUnwrap(controller.children.first as? AVPlayerViewController)
+        let attached = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in playback.player != nil }, object: nil)
+        wait(for: [attached], timeout: 15)
         XCTAssertTrue(playback.showsPlaybackControls)
         let player = try XCTUnwrap(playback.player)
         let item = try XCTUnwrap(player.currentItem)
@@ -191,6 +193,23 @@ final class NativeMediaServicesTests: XCTestCase {
         }
         wait(for: [sought], timeout: 10)
         XCTAssertEqual(player.currentTime().seconds, 0.25, accuracy: 0.025)
+    }
+
+    @MainActor
+    func testReleasedPreviewNeverAttachesLatePlayerOrReportsUnsupported() throws {
+        let fixture = root.appendingPathComponent("released-tone.wav")
+        try Self.waveFixture().write(to: fixture, options: .withoutOverwriting)
+        let actions = IosMediaActions { nil }
+        let unsupported = expectation(description: "Released preview must suppress late errors")
+        unsupported.isInverted = true
+        let controller = actions.createPreview(locator: fixture.absoluteString) { unsupported.fulfill() }
+        controller.loadViewIfNeeded()
+        let playback = try XCTUnwrap(controller.children.first as? AVPlayerViewController)
+        actions.releasePreview(controller: controller)
+        actions.releasePreview(controller: controller)
+        wait(for: [unsupported], timeout: 0.5)
+        XCTAssertNil(playback.player)
+        XCTAssertEqual(try Data(contentsOf: fixture), Self.waveFixture())
     }
 
     private static func waveFixture() -> Data {

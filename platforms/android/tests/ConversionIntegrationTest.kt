@@ -6,6 +6,9 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.graphics.Rect
+import android.view.View
+import android.view.ViewGroup
 import android.os.SystemClock
 import android.os.Build
 import android.os.Bundle
@@ -16,6 +19,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.PlayerView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -24,6 +28,7 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiScrollable
 import androidx.test.uiautomator.UiSelector
+import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import com.velmux.ui.app.JobSnapshot
 import org.junit.Assert.*
@@ -45,6 +50,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -74,7 +80,7 @@ class ConversionIntegrationTest {
         revoke("video.mp4")
         assertFalse(resolver.persistedUriPermissions.any { it.uri == uri })
         try {
-            ActivityScenario.launch(MainActivity::class.java).use {
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 awaitText("Video Converter")
                 capture("ui-home.png")
                 clickText("Video Converter")
@@ -92,6 +98,8 @@ class ConversionIntegrationTest {
                 clickText("Codec")
                 clickText("H.264")
                 capture("ui-video-workspace.png")
+                exerciseEmbeddedPlayerControls(scenario)
+                exerciseResponsiveWorkspace()
                 clickText("Convert", exact = true)
                 val submitted = awaitNewJob(before)
                 val completed = awaitJob(submitted.id)
@@ -186,9 +194,11 @@ class ConversionIntegrationTest {
         val uri = grantTransient("video-large.mp4")
         val original = hash(uri)
         val first = media.inspectNative(uri.toString(), "video-large.mp4", true)
-        val second = media.inspectNative(uri.toString(), "video-large.mp4", true)
+        var secondId: String? = null
         fun hasRead() = resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
         try {
+            val second = media.inspectNative(uri.toString(), "video-large.mp4", true)
+            secondId = second.id
             assertTrue("The first core reference did not acquire durable access", hasRead())
             media.releaseNative(first.id)
             assertTrue("A remaining live inspection lost source access", hasRead())
@@ -200,7 +210,7 @@ class ConversionIntegrationTest {
             assertEquals(original, hash(uri))
         } finally {
             runCatching { media.releaseNative(first.id) }
-            runCatching { media.releaseNative(second.id) }
+            secondId?.let { id -> runCatching { media.releaseNative(id) } }
             revoke("video-large.mp4")
         }
     }
@@ -272,6 +282,114 @@ class ConversionIntegrationTest {
             instrumentation.runOnMainSync { player?.release() }
             revoke("video.mp4")
         }
+    }
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    private fun exerciseEmbeddedPlayerControls(scenario: ActivityScenario<MainActivity>) {
+        reachableText("video.mp4", exact = true)
+        var embedded: PlayerView? = null
+        waitUntil("The converter's embedded player did not prepare", 30_000) {
+            var prepared = false
+            scenario.onActivity { activity ->
+                embedded = findPlayerView(activity.window.decorView)
+                prepared = embedded?.player?.playbackState == Player.STATE_READY
+            }
+            prepared
+        }
+        fun clickControl(description: String) {
+            var control = device.wait(Until.findObject(By.desc(description)), 2_000)
+            if (control == null) {
+                val bounds = Rect()
+                scenario.onActivity { assertTrue(requireNotNull(embedded).getGlobalVisibleRect(bounds)) }
+                device.click(bounds.centerX(), bounds.centerY())
+                control = device.wait(Until.findObject(By.desc(description)), 3_000)
+            }
+            requireNotNull(control) { "The embedded player did not expose its $description control" }.click()
+        }
+        clickControl("Play")
+        waitUntil("Embedded playback did not advance after the real Play control", 10_000) {
+            var advancing = false
+            scenario.onActivity { advancing = requireNotNull(embedded?.player).currentPosition >= 150 }
+            advancing
+        }
+        clickControl("Pause")
+        scenario.onActivity { assertFalse("The real Pause control did not pause playback", requireNotNull(embedded?.player).playWhenReady) }
+        val frameTimestamp = AtomicLong(-1)
+        val listener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ -> frameTimestamp.set(presentationTimeUs) }
+        var native: ExoPlayer? = null
+        runCatching {
+            UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6)
+                .scrollIntoView(UiSelector().resourceIdMatches(".*:id/exo_progress"))
+        }
+        val timebar = Rect()
+        scenario.onActivity {
+            native = requireNotNull(embedded?.player) as ExoPlayer
+            native?.setVideoFrameMetadataListener(listener)
+            val progress = requireNotNull(embedded?.findViewById<View>(androidx.media3.ui.R.id.exo_progress))
+            assertTrue("The native seek bar is not reachable in the workspace", progress.getGlobalVisibleRect(timebar))
+            assertTrue(timebar.width() > 40 && timebar.height() > 0)
+        }
+        try {
+            // Tap the actual native timebar; observing a decoded presentation
+            // timestamp proves this is more than a displayed seek position.
+            device.click(timebar.left + timebar.width() * 2 / 3, timebar.centerY())
+            waitUntil("The embedded native seek control did not decode the requested interval", 10_000) {
+                frameTimestamp.get() in 900_000L..1_900_000L
+            }
+            scenario.onActivity { assertTrue(requireNotNull(embedded?.player).currentPosition in 900L..1_900L) }
+            capture("ui-video-embedded-seek.png")
+        } finally {
+            scenario.onActivity { native?.clearVideoFrameMetadataListener(listener) }
+        }
+    }
+
+    private fun findPlayerView(view: View): PlayerView? {
+        if (view is PlayerView) return view
+        if (view is ViewGroup) for (index in 0 until view.childCount) {
+            findPlayerView(view.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+
+    private fun exerciseResponsiveWorkspace() {
+        val originalFontScale = device.executeShellCommand("settings get system font_scale").trim().toFloatOrNull()
+            ?.takeIf { it.isFinite() && it > 0 }?.toString() ?: "1.0"
+        val originalRotation = device.executeShellCommand("settings get system user_rotation").trim().toIntOrNull() ?: 0
+        val originalAutoRotation = device.executeShellCommand("settings get system accelerometer_rotation").trim().toIntOrNull() ?: 0
+        var phase = "landscape"
+        try {
+            device.setOrientationLeft()
+            waitUntil("The emulator did not enter landscape", 10_000) { device.displayWidth > device.displayHeight }
+            awaitText("Convert", exact = true)
+            reachableText("video.mp4", exact = true)
+            capture("ui-video-landscape.png")
+            clickText("Codec")
+            awaitText("H.264")
+            clickText("H.264")
+            assertTrue("Convert became unreachable in landscape", device.hasObject(By.text("Convert")))
+            device.setOrientationNatural()
+            waitUntil("The emulator did not return to portrait", 10_000) { device.displayHeight > device.displayWidth }
+            phase = "large-font"
+            device.executeShellCommand("settings put system font_scale 1.3")
+            waitUntil("The emulator did not apply 1.3 font scale", 10_000) { abs(context.resources.configuration.fontScale - 1.3f) < 0.01f }
+            awaitText("Convert", exact = true)
+            reachableText("video.mp4", exact = true)
+            capture("ui-video-large-font.png")
+            clickText("Format")
+            awaitText("MP4", exact = true)
+            clickText("MP4", exact = true)
+            assertTrue("Convert became unreachable at 1.3 font scale", device.hasObject(By.text("Convert")))
+        } catch (error: Throwable) {
+            runCatching { capture("failure-responsive-$phase.png") }
+            throw error
+        } finally {
+            device.executeShellCommand("settings put system font_scale $originalFontScale")
+            device.setOrientationNatural()
+            device.unfreezeRotation()
+            device.executeShellCommand("settings put system user_rotation $originalRotation")
+            device.executeShellCommand("settings put system accelerometer_rotation $originalAutoRotation")
+        }
+        awaitText("Convert", exact = true)
     }
 
     private fun verifyVideo(uri: Uri) {
@@ -569,7 +687,9 @@ class ConversionIntegrationTest {
         assertTrue("Visible UI text was not found: $text", device.wait(Until.hasObject(selector), 30_000))
     }
 
-    private fun clickText(text: String, exact: Boolean = false) {
+    private fun clickText(text: String, exact: Boolean = false) = reachableText(text, exact).click()
+
+    private fun reachableText(text: String, exact: Boolean = false): UiObject2 {
         val selector = if (exact) By.text(text) else By.textContains(text)
         var target = device.wait(Until.findObject(selector), 5_000)
         if (target == null) {
@@ -577,7 +697,7 @@ class ConversionIntegrationTest {
             runCatching { scroll.scrollIntoView(if (exact) UiSelector().text(text) else UiSelector().textContains(text)) }
             target = device.wait(Until.findObject(selector), 5_000)
         }
-        requireNotNull(target) { "The visible UI action could not be found: $text" }.click()
+        return requireNotNull(target) { "The UI content could not be reached by scrolling: $text" }
     }
 
     private fun capture(name: String) {
