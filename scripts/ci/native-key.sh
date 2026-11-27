@@ -5,6 +5,8 @@ cd "$(dirname "$0")/../.."
 case "$1" in
   host) key=$(bash scripts/ffmpeg/identity.sh host) ;;
   android)
+    # Hosted images export their default NDK; select our pin explicitly.
+    unset ANDROID_NDK_HOME ANDROID_NDK_ROOT
     resolve_android_ndk
     printf 'ANDROID_NDK_HOME=%s\n' "$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
     key=$(bash scripts/ffmpeg/identity.sh android "$2")

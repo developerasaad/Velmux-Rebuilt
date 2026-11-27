@@ -1,6 +1,12 @@
 name: Native dependencies
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Native platform to construct
+        type: choice
+        options: [all, android]
+        default: all
 permissions:
   contents: read
 concurrency:
@@ -12,11 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {target: host, abi: host, runner: ubuntu-24.04}
-          - {target: android, abi: arm64-v8a, runner: ubuntu-24.04}
-          - {target: android, abi: x86_64, runner: ubuntu-24.04}
-          - {target: ios, abi: arm64, runner: macos-15}
+        include: ${{ fromJSON(inputs.platform == 'android' && '[{"target":"android","abi":"arm64-v8a","runner":"ubuntu-24.04"},{"target":"android","abi":"x86_64","runner":"ubuntu-24.04"}]' || '[{"target":"host","abi":"host","runner":"ubuntu-24.04"},{"target":"android","abi":"arm64-v8a","runner":"ubuntu-24.04"},{"target":"android","abi":"x86_64","runner":"ubuntu-24.04"},{"target":"ios","abi":"arm64","runner":"macos-15"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     steps:
