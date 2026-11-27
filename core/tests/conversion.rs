@@ -2049,3 +2049,97 @@ fn basic_conversion_preserves_compatible_tracks_metadata_and_chapters() {
         "preserve_video_packets":true,"preserve_auxiliary_tracks_and_chapters":true}),
     ]);
 }
+
+#[test]
+fn attached_artwork_is_preserved_and_incompatible_catalog_formats_are_omitted() {
+    let harness = Harness::new("attached-artwork");
+    let original_hash = digest(&fixture("cover-art.flac"));
+    let source = harness.inspect("cover-art.flac", Operation::AudioConverter);
+    let artwork = source
+        .info
+        .streams
+        .iter()
+        .find(|stream| {
+            stream
+                .video
+                .as_ref()
+                .is_some_and(|video| video.attached_picture)
+        })
+        .expect("The real FLAC fixture must expose its attached picture");
+    assert_eq!(artwork.codec, "png");
+    assert_eq!(artwork.video.as_ref().unwrap().width, Some(32));
+    assert_eq!(source.info.streams.len(), 2);
+    let options = harness
+        .engine()
+        .media_catalog_for_source(source.id.clone(), Operation::AudioConverter)
+        .unwrap();
+    assert!(
+        options
+            .iter()
+            .any(|option| option.format == OutputFormat::Flac
+                && option.audio_codecs.contains(&AudioCodec::Copy)),
+        "Compatible FLAC/PNG copying must remain available"
+    );
+    assert!(
+        !options
+            .iter()
+            .any(|option| option.format == OutputFormat::Wav),
+        "WAV cannot preserve this attached picture with the current copy-only artwork route"
+    );
+    let defaults = harness.defaults(&source, Operation::AudioConverter);
+    assert!(options
+        .iter()
+        .any(|option| option.format == defaults.format));
+    harness
+        .engine()
+        .validate_configuration(source.id.clone(), defaults.clone())
+        .unwrap();
+    for option in &options {
+        let mut config = defaults.clone();
+        config.format = option.format;
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), config)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Advertised artwork destination {:?} is invalid: {error}",
+                    option.format
+                )
+            });
+    }
+    let mut config = defaults;
+    config.format = OutputFormat::Flac;
+    config.audio_codec = AudioCodec::Copy;
+    let completed = harness.complete(&harness.submit(&source, config).id);
+    let output = harness
+        .engine()
+        .inspect_source(
+            completed.output.as_ref().unwrap().locator.clone(),
+            "published-cover.flac".into(),
+            Operation::AudioConverter,
+            CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(output.info.streams.len(), 2);
+    let copied_artwork = output
+        .info
+        .streams
+        .iter()
+        .find(|stream| {
+            stream
+                .video
+                .as_ref()
+                .is_some_and(|video| video.attached_picture)
+        })
+        .expect("Publication discarded the attached picture");
+    assert_eq!(copied_artwork.codec, artwork.codec);
+    assert_eq!(copied_artwork.video.as_ref().unwrap().width, Some(32));
+    assert_eq!(copied_artwork.video.as_ref().unwrap().height, Some(32));
+    harness.engine().release_inspection(output.id).unwrap();
+    harness.engine().release_inspection(source.id).unwrap();
+    assert_eq!(digest(&fixture("cover-art.flac")), original_hash);
+    let mut expected = expectation(&completed, "flac", 2, 48000);
+    expected["source"] = json!("cover-art.flac");
+    expected["attached_picture_codec"] = json!("png");
+    harness.expect(vec![expected]);
+}

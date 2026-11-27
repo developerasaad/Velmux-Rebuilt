@@ -24,8 +24,14 @@ else:
     if directory.is_symlink():
         raise SystemExit("The fixture source directory is not an owned directory")
     manifest = {}
-    for name in ("video.mp4", "stereo.wav"):
-        source, target = fixtures / name, directory / name
+    # The generic-data alias proves actual-content inspection through the Files
+    # picker, rather than depending on provider/native media type recognition.
+    for name, original in (
+        ("video.mp4", "video.mp4"),
+        ("video.bin", "video.mp4"),
+        ("stereo.wav", "stereo.wav"),
+    ):
+        source, target = fixtures / original, directory / name
         data = source.read_bytes()
         expected = hashlib.sha256(data).hexdigest()
         try:

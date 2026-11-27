@@ -19,7 +19,7 @@ class FixtureDocumentsProvider : DocumentsProvider() {
             DocumentsContract.Root.COLUMN_DOCUMENT_ID to ROOT,
             DocumentsContract.Root.COLUMN_TITLE to "Velmux Test Sources",
             DocumentsContract.Root.COLUMN_SUMMARY to "Read-only verification media",
-            DocumentsContract.Root.COLUMN_MIME_TYPES to "video/*\naudio/*",
+            DocumentsContract.Root.COLUMN_MIME_TYPES to "video/*\naudio/*\napplication/octet-stream",
             DocumentsContract.Root.COLUMN_FLAGS to DocumentsContract.Root.FLAG_LOCAL_ONLY,
             DocumentsContract.Root.COLUMN_ICON to android.R.drawable.ic_menu_gallery,
         )

@@ -9,7 +9,7 @@ import java.io.FileNotFoundException
 
 /** The helper accepts only whitelisted generated media and the signed target app. */
 internal object FixtureFiles {
-    val names = listOf("video.mp4", "stereo.wav", "stereo.flac", "video-large.mp4", "positive-origin.mkv", "vfr.mkv", "rotated-sar.mp4", "multi-track.mkv", "hdr.mkv", "truncated.mp4", "invalid.bin")
+    val names = listOf("video.mp4", "video.bin", "stereo.wav", "stereo.flac", "video-large.mp4", "positive-origin.mkv", "vfr.mkv", "rotated-sar.mp4", "multi-track.mkv", "hdr.mkv", "truncated.mp4", "invalid.bin")
 
     fun requireControlCaller(context: Context) {
         val uid = Binder.getCallingUid()
@@ -24,6 +24,9 @@ internal object FixtureFiles {
     @Synchronized
     fun open(context: Context, id: String): File {
         if (id !in names) throw FileNotFoundException("Unknown verification source")
+        // A generic-data document is the same original fixture bytes, without
+        // an extra media copy or misleading extension-based MIME declaration.
+        if (id == "video.bin") return open(context, "video.mp4")
         val root = File(context.filesDir, "conversion-fixtures")
         if (!root.isDirectory && !root.mkdirs()) throw FileNotFoundException("Fixture storage is unavailable")
         val file = File(root, id)

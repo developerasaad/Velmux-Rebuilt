@@ -121,7 +121,10 @@ class AndroidPlatformActions(private val activity: ComponentActivity) : Platform
     companion object {
         fun selectionIntent(video: Boolean) = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = if (video) "video/*" else "audio/*"
+            // Providers may label valid media as generic data. The engine
+            // inspects the actual container and validates the chosen operation.
+            type = "*/*"
+            putExtra(Intent.EXTRA_TITLE, if (video) "Select a video source" else "Select an audio source")
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }

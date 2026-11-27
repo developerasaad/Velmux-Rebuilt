@@ -23,6 +23,12 @@ run_ffmpeg -f lavfi -i 'testsrc2=size=320x180:rate=24000/1001:duration=2' \
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
   -c:a pcm_s16le -map_metadata -1 "$fixtures/stereo.wav"
 run_ffmpeg -i "$fixtures/stereo.wav" -c:a flac -compression_level 5 "$fixtures/stereo.flac"
+run_ffmpeg -f lavfi -i 'color=c=0xb87333:size=32x32:duration=0.1' \
+  -frames:v 1 -c:v png -threads:v 1 -update 1 "$fixtures/cover.png"
+run_ffmpeg -i "$fixtures/stereo.flac" -i "$fixtures/cover.png" \
+  -map 0:a -map 1:v -c copy -disposition:v:0 attached_pic \
+  -metadata:s:v:0 title='Embedded copper cover' -metadata:s:v:0 comment='Cover (front)' \
+  "$fixtures/cover-art.flac"
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=192000:d=2' \
   -c:a flac "$fixtures/high-rate.flac"
 run_ffmpeg -f lavfi -i 'aevalsrc=0.1*sin(2*PI*440*t)|0.1*sin(2*PI*660*t)|0.1*sin(2*PI*880*t)|0|0.1*sin(2*PI*440*t)|0.1*sin(2*PI*660*t):s=48000:d=2:c=5.1' \
@@ -88,6 +94,8 @@ for path in root.iterdir():
 rotation = probes['rotated-sar.mp4']['streams'][0].get('side_data_list', [])
 print('Independent rotation facts:', rotation)
 assert any(abs(item.get('rotation', 0)) == 90 for item in rotation), 'The independently generated rotation fixture lacks its required display matrix'
+artwork = [stream for stream in probes['cover-art.flac']['streams'] if stream.get('disposition', {}).get('attached_pic') == 1]
+assert len(artwork) == 1 and artwork[0]['codec_name'] == 'png' and (artwork[0]['width'], artwork[0]['height']) == (32, 32), 'The independently generated FLAC fixture lacks its required PNG attached picture'
 files = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
          for path in root.iterdir() if path.name != 'fixtures.json' and path.is_file()}
 manifest = {'files': files, 'ffmpeg_version': subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0]}

@@ -75,9 +75,10 @@ class ConversionIntegrationTest {
     fun systemPickerCancelThenVideoConversionPublishesDecodedOutput() {
         media.beginNative()
         val before = media.jobsNative().map { it.id }.toSet()
-        val uri = grant("video.mp4")
+        val uri = grant(PICKER_VIDEO)
+        assertEquals("The generic-data fixture must not advertise a video MIME type", "application/octet-stream", resolver.getType(uri))
         val sourceHash = hash(uri)
-        revoke("video.mp4")
+        revoke(PICKER_VIDEO)
         assertFalse(resolver.persistedUriPermissions.any { it.uri == uri })
         try {
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
@@ -90,16 +91,16 @@ class ConversionIntegrationTest {
                 assertFalse("Picker cancellation must not become a source error", device.hasObject(By.text("Source unavailable")))
                 assertEquals(before, media.jobsNative().map { it.id }.toSet())
                 clickText("Video Converter")
-                chooseDocument("video.mp4")
-                awaitText("video.mp4")
+                chooseDocument(PICKER_VIDEO)
+                awaitText(PICKER_VIDEO)
                 awaitText("Convert", exact = true)
                 assertTrue("The picker result must have durable read permission",
                     resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission })
                 clickText("Codec")
                 clickText("H.264")
                 capture("ui-video-workspace.png")
-                exerciseEmbeddedPlayerControls(scenario)
-                exerciseResponsiveWorkspace()
+                exerciseEmbeddedPlayerControls(scenario, PICKER_VIDEO)
+                exerciseResponsiveWorkspace(PICKER_VIDEO)
                 exerciseInvalidOutputName(before)
                 clickText("Convert", exact = true)
                 val submitted = awaitNewJob(before)
@@ -122,7 +123,7 @@ class ConversionIntegrationTest {
         } finally {
             runCatching { media.setAppearanceNative("system") }
             cleanupNewJobs(before)
-            revoke("video.mp4")
+            revoke(PICKER_VIDEO)
         }
     }
 
@@ -286,8 +287,8 @@ class ConversionIntegrationTest {
     }
 
     @androidx.annotation.OptIn(UnstableApi::class)
-    private fun exerciseEmbeddedPlayerControls(scenario: ActivityScenario<MainActivity>) {
-        reachableText("video.mp4", exact = true)
+    private fun exerciseEmbeddedPlayerControls(scenario: ActivityScenario<MainActivity>, sourceName: String) {
+        reachableText(sourceName, exact = true)
         var embedded: PlayerView? = null
         waitUntil("The converter's embedded player did not prepare", 30_000) {
             var prepared = false
@@ -395,7 +396,7 @@ class ConversionIntegrationTest {
         return null
     }
 
-    private fun exerciseResponsiveWorkspace() {
+    private fun exerciseResponsiveWorkspace(sourceName: String) {
         val originalFontScale = device.executeShellCommand("settings get system font_scale").trim().toFloatOrNull()
             ?.takeIf { it.isFinite() && it > 0 }?.toString() ?: "1.0"
         val originalRotation = device.executeShellCommand("settings get system user_rotation").trim().toIntOrNull() ?: 0
@@ -405,7 +406,7 @@ class ConversionIntegrationTest {
             device.setOrientationLeft()
             waitUntil("The emulator did not enter landscape", 10_000) { device.displayWidth > device.displayHeight }
             awaitText("Convert", exact = true)
-            reachableText("video.mp4", exact = true)
+            reachableText(sourceName, exact = true)
             capture("ui-video-landscape.png")
             clickText("Codec")
             awaitText("H.264")
@@ -417,7 +418,7 @@ class ConversionIntegrationTest {
             device.executeShellCommand("settings put system font_scale 1.3")
             waitUntil("The emulator did not apply 1.3 font scale", 10_000) { abs(context.resources.configuration.fontScale - 1.3f) < 0.01f }
             awaitText("Convert", exact = true)
-            reachableText("video.mp4", exact = true)
+            reachableText(sourceName, exact = true)
             capture("ui-video-large-font.png")
             clickText("Format")
             awaitText("MP4", exact = true)
@@ -741,6 +742,25 @@ class ConversionIntegrationTest {
             runCatching { scroll.scrollIntoView(if (exact) UiSelector().text(text) else UiSelector().textContains(text)) }
             target = device.wait(Until.findObject(selector), 5_000)
         }
+        if (target == null) {
+            // In a short landscape viewport the native player can occupy the
+            // entire middle of the scroll area and consume those gestures.
+            // Swipe the real shared content gutter instead of its controls.
+            for (forward in listOf(true, false)) {
+                repeat(12) {
+                    if (target == null) {
+                        val area = device.findObject(By.scrollable(true))?.visibleBounds
+                        if (area != null && area.height() > 32) {
+                            val x = area.left + minOf(8, area.width() / 8)
+                            val top = area.top + 8
+                            val bottom = area.bottom - 8
+                            device.swipe(x, if (forward) bottom else top, x, if (forward) top else bottom, 20)
+                            target = device.findObject(selector)
+                        }
+                    }
+                }
+            }
+        }
         return requireNotNull(target) { "The UI content could not be reached by scrolling: $text" }
     }
 
@@ -793,5 +813,8 @@ class ConversionIntegrationTest {
         fail(message)
     }
 
-    private companion object { const val AUTHORITY = "com.velmux.mobile.test.documents" }
+    private companion object {
+        const val AUTHORITY = "com.velmux.mobile.test.documents"
+        const val PICKER_VIDEO = "video.bin"
+    }
 }

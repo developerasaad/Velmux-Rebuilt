@@ -654,7 +654,14 @@ pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<Form
             if info
                 .streams
                 .iter()
-                .filter(|stream| !matches!(stream.kind, StreamKind::Video | StreamKind::Audio))
+                .filter(|stream| {
+                    !matches!(stream.kind, StreamKind::Video | StreamKind::Audio)
+                        || stream.kind == StreamKind::Video
+                            && stream
+                                .video
+                                .as_ref()
+                                .is_some_and(|video| video.attached_picture)
+                })
                 .any(|stream| {
                     (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }) <= 0
                 })

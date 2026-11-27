@@ -45,8 +45,11 @@ final class PickerFlowUITests: XCTestCase {
         capture("Home after actual picker cancellation")
 
         try tap(label: "Video Converter")
-        try selectSeededDocument("video.mp4")
-        try waitForWorkspace(source: "video.mp4")
+        // CI seeds the same generated MP4 bytes under a generic-data extension
+        // in the external fixture app. The actual picker must not hide it based
+        // on native media UTIs; successful conversion requires Rust inspection.
+        try selectSeededDocument("video.bin")
+        try waitForWorkspace(source: "video.bin")
         try choose(title: "Codec", option: "H.264")
         let stem = "picker-video-" + UUID().uuidString.lowercased()
         try setOutputName(stem)

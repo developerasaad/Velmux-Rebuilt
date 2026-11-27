@@ -32,7 +32,12 @@ final class IosMediaActions: NSObject, PlatformActions, NativePreviewProvider, U
                 _ = completion(nil, "The document picker is unavailable while the application is not visible.")
                 return
             }
-            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [video ? UTType.movie : UTType.audio], asCopy: false)
+            // Providers can advertise valid media as generic data (including
+            // containers the native player cannot decode). Rust inspects actual
+            // bytes and validates the selected operation after document access.
+            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false)
+            picker.title = video ? "Choose a video source" : "Choose an audio source"
+            picker.navigationItem.prompt = "The selected file's contents are inspected."
             picker.allowsMultipleSelection = false
             picker.shouldShowFileExtensions = true
             picker.delegate = self

@@ -5,6 +5,7 @@ import CoreMedia
 import CoreVideo
 import SQLite3
 import UIKit
+import UniformTypeIdentifiers
 import XCTest
 import VelmuxUI
 @testable import Velmux
@@ -406,6 +407,14 @@ final class ConversionIntegrationTests: XCTestCase {
         let presented = try XCTUnwrap(picker)
         XCTAssertNotNil(presented.presentingViewController)
         XCTAssertFalse(presented.allowsMultipleSelection)
+        XCTAssertFalse(UTType.data.conforms(to: .movie))
+        XCTAssertFalse(UTType.data.conforms(to: .audio))
+        let matroska = UTType(filenameExtension: "mkv")
+        let generic = UTType(filenameExtension: "bin")
+        let types = XCTAttachment(string: "Runtime document types: mkv=\(matroska?.identifier ?? "unknown"), movie=\(matroska?.conforms(to: .movie) ?? false), data=\(matroska?.conforms(to: .data) ?? false); bin=\(generic?.identifier ?? "unknown"), movie=\(generic?.conforms(to: .movie) ?? false). Generic data is not a movie/audio subtype; actual video.bin selection is verified by the external Files UI test.")
+        types.name = "Native provider type hierarchy"
+        types.lifetime = .keepAlways
+        add(types)
         let cancellation = expectation(description: "Native picker cancellation callback")
         canceled = cancellation
         // This verifies UIKit presentation and delegate cancellation. It does

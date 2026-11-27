@@ -79,8 +79,14 @@ def check_case(case):
     path = Path(case["path"])
     assert path.is_file() and path.stat().st_size > 64, f"Missing/nontrivial output: {path}"
     info = probe(path, packets=True)
-    video = [stream for stream in info["streams"] if stream["codec_type"] == "video"]
+    pictures = [stream for stream in info["streams"] if stream["codec_type"] == "video" and stream.get("disposition", {}).get("attached_pic")]
+    video = [stream for stream in info["streams"] if stream["codec_type"] == "video" and not stream.get("disposition", {}).get("attached_pic")]
     audio = [stream for stream in info["streams"] if stream["codec_type"] == "audio"]
+    if "attached_picture_codec" in case:
+        assert len(pictures) == 1 and pictures[0]["codec_name"] == case["attached_picture_codec"], f"{path}: attached artwork changed"
+        assert (pictures[0]["width"], pictures[0]["height"]) == (32, 32), f"{path}: artwork geometry changed"
+    else:
+        assert not pictures, f"{path}: unexpected attached artwork"
     if "video_codec" in case:
         assert len(video) == 1 and video[0]["codec_name"] == case["video_codec"], path
         assert (video[0]["width"], video[0]["height"]) == (case["width"], case["height"]), path
@@ -145,6 +151,13 @@ def check_case(case):
         assert path.stat().st_size > lower_path.stat().st_size, f"{path}: bitrate control produced no measurable size difference"
     if case.get("source"):
         source = probe(FIXTURES / case["source"], packets=True)
+        if "attached_picture_codec" in case:
+            original_pictures = [stream for stream in source["streams"] if stream.get("disposition", {}).get("attached_pic")]
+            assert len(original_pictures) == 1, f"{path}: missing independent source artwork"
+            before = [packet["data_hash"] for packet in source["packets"] if packet["stream_index"] == original_pictures[0]["index"]]
+            after = [packet["data_hash"] for packet in info["packets"] if packet["stream_index"] == pictures[0]["index"]]
+            assert len(before) == 1 and before == after, f"{path}: copied artwork payload changed"
+            assert first_rgb(path, 32, 32) == first_rgb(FIXTURES / case["source"], 32, 32), f"{path}: decoded artwork changed"
         if case.get("preserve_video_packets"):
             original = media_packets(source, "video")
             result = media_packets(info, "video")

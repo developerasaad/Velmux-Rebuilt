@@ -88,7 +88,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
             ready = true
         } catch (error: Exception) { showFailure(error, "Media engine unavailable") }
     }
-    LaunchedEffect(media) {
+    LaunchedEffect(media, ready) {
         media.jobsRevision.collectLatest {
             if (ready) {
                 try { jobs = media.jobs(); media.runtimeError()?.let { alert = Alert("Job worker unavailable", it) } }

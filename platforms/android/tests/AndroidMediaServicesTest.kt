@@ -225,7 +225,11 @@ class AndroidMediaServicesTest {
     fun documentPickerRequestsExactlyOneDurableReadableSource() {
         val intent = AndroidPlatformActions.selectionIntent(video = true)
         assertEquals(Intent.ACTION_OPEN_DOCUMENT, intent.action)
-        assertEquals("video/*", intent.type)
+        assertEquals("*/*", intent.type)
+        assertEquals("Select a video source", intent.getStringExtra(Intent.EXTRA_TITLE))
+        val audioIntent = AndroidPlatformActions.selectionIntent(video = false)
+        assertEquals("*/*", audioIntent.type)
+        assertEquals("Select an audio source", audioIntent.getStringExtra(Intent.EXTRA_TITLE))
         assertTrue(intent.hasCategory(Intent.CATEGORY_OPENABLE))
         assertFalse(intent.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, true))
         assertTrue(intent.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
