@@ -115,6 +115,8 @@ jobs:
             platforms/android/build/reports
             platforms/android/build/outputs/androidTest-results
             build/android-logcat.txt
+            build/android-symbols.txt
+            build/android-tombstones
           retention-days: 7
   ios:
     if: inputs.platform == 'all' || inputs.platform == 'ios'
@@ -148,10 +150,21 @@ jobs:
         with:
           path: scripts/ffmpeg-builder/out
           key: native-ios-arm64-${{ steps.identity.outputs.key }}
+      - uses: actions/cache/restore@v4
+        id: konan
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/**', 'core/**', 'platforms/ios/**') }}
+          restore-keys: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-
       - name: Device-target build
         run: bash scripts/build.sh ios-device
       - name: Simulator runtime integration
         run: bash scripts/test.sh ios-simulator
+      - uses: actions/cache/save@v4
+        if: always() && steps.konan.outputs.cache-hit != 'true'
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/**', 'core/**', 'platforms/ios/**') }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
