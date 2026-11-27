@@ -704,10 +704,26 @@ class ConversionIntegrationTest {
             root = device.wait(Until.findObject(By.text("Velmux Test Sources")), 10_000)
         }
         requireNotNull(root) { "The read-only test document provider was not listed by DocumentsUI" }.click()
-        // Grid cards can intersect the viewport while their names remain below
-        // it; use DocumentsUI's own list control before locating the exact row.
-        device.findObject(By.desc("List view"))?.click()
+        // Compact DocumentsUI can expose an action's description behind the
+        // overflow button. Choose the visible menu row, then verify the actual
+        // one-column layout before searching for the document.
+        device.wait(Until.hasObject(By.res("android", "title")), 10_000)
+        val moreOptions = device.findObject(By.desc("More options"))
+        moreOptions?.click()
+        val listOption = device.wait(Until.findObject(By.text("List view")), 3_000)
+        if (listOption != null) listOption.click()
+        else if (device.hasObject(By.text("Grid view"))) device.pressBack()
+        else {
+            if (moreOptions != null) device.pressBack()
+            device.findObject(By.desc("List view"))?.click()
+        }
         device.waitForIdle(2_000)
+        waitUntil("DocumentsUI did not apply its list layout", 10_000) {
+            val titles = device.findObjects(By.res("android", "title")).filter {
+                it.text.substringAfterLast('.', "") in setOf("bin", "mp4", "mkv", "wav", "flac")
+            }
+            titles.size >= 2 && titles.map { it.visibleBounds.left }.distinct().size == 1
+        }
         var document = device.wait(Until.findObject(By.text(name)), 3_000)
         if (document == null) {
             // DocumentsUI sorts these genuine source rows; the requested video

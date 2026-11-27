@@ -151,13 +151,14 @@ final class PickerFlowUITests: XCTestCase {
         guard !current.isEmpty, current != "Output name" else {
             throw failure("The output-name field did not expose its editable value")
         }
-        field.press(forDuration: 1.2)
-        if element(label: "Select All").isHittable {
-            element(label: "Select All").tap()
-            field.typeText(stem)
-        } else {
-            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count) + stem)
+        // Clear and verify before inserting. Combining deletion and insertion
+        // after a selection gesture can leave an old prefix in the real editor.
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count + 8))
+        try waitFor("The previous output name was not cleared", timeout: 10) {
+            let text = (field.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? field.label
+            return text.isEmpty || text == "Output name"
         }
+        field.typeText(stem)
         try waitFor("The edited output name did not identify this request uniquely") {
             (field.value as? String) == stem || field.label == stem
         }

@@ -34,7 +34,7 @@ Milestone 1 is complete; its inspected source, host, Android and Apple evidence 
 - [Kotlin compatibility table](https://kotlinlang.org/docs/multiplatform/multiplatform-compatibility-guide.html) and [Compose 1.9 changes](https://kotlinlang.org/docs/multiplatform/whats-new-compose-190.html)
 - [bindgen allowlisting](https://rust-lang.github.io/rust-bindgen/allowlisting.html)
 
-SQLite will enter through the Rust-owned durable store in Milestone 2; a maintained rusqlite binding with bundled SQLite avoids separate platform schemas. No database or unused SQLite dependency is introduced before that store exists. FFmpeg construction retains the complete pinned software-codec chain, while runtime hardware availability and 10-bit x265 encoding remain separate verification obligations.
+Milestone 2 introduces the Rust-owned durable store through rusqlite with bundled SQLite, avoiding separate platform schemas. The database dependency was introduced with its actual operational store. FFmpeg construction retains the complete pinned software-codec chain, while runtime hardware availability and 10-bit x265 encoding remain separate verification obligations.
 
 CI acceptance and unresolved compatibility facts are recorded in PROGRESS.md.
 
