@@ -1,6 +1,6 @@
 # Velmux
 
-An offline Android and iOS media utility under greenfield development. The currently authorized work is the engineering foundation; no conversion workflows are available yet.
+An offline Android and iOS media utility under greenfield development. Milestone 1, the engineering foundation, is verified; no conversion workflows are available yet. Further implementation requires explicit authorization.
 
 Rust owns the engine, Compose Multiplatform shares the UI, and Kotlin/Swift hosts provide operating-system facilities. See REQUIREMENTS.md for the complete product scope, IMPLEMENTATION.md for decisions, and PROGRESS.md for actual verification evidence.
 
@@ -8,7 +8,7 @@ Substantial builds run in GitHub Actions. Native libraries are constructed from 
 
 ## Development commands
 
-Substantial commands below are intended for CI or a deliberately provisioned build machine. Use Bash 5 for Android commands, JDK 21, Rust 1.99.1, Python 3, the pinned Android NDK, and Xcode 16.4 on a real Mac for Apple targets. Build entry points require unset CC/CXX/CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS; native compiler changes belong in the hashed repository recipe. Direct dependency wrappers have the same clean-environment requirement. CMake 3.31.6, Ninja 1.11.1.3, Meson 1.7.2, pkg-config, NASM and GNU autotools are required for native construction. `scripts/ci/setup-native.sh` provisions disposable CI workers only.
+Substantial commands below are intended for CI or a deliberately provisioned build machine. Use Bash 5 for Android commands, JDK 21, Rust 1.99.1, Python 3.9 or newer, the pinned Android NDK, and Xcode 16.4 on a real Mac for Apple targets. Build entry points require unset CC/CXX/CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS; native compiler changes belong in the hashed repository recipe. Direct dependency wrappers have the same clean-environment requirement. CMake 3.31.6, Ninja 1.11.1.3, Meson 1.7.2, pkg-config, NASM and GNU autotools are required for native construction. `scripts/ci/setup-native.sh` provisions disposable CI workers only.
 
 ```sh
 bash scripts/ci/check-sources.sh

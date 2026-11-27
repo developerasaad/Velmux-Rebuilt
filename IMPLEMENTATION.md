@@ -2,6 +2,8 @@
 
 The full product and acceptance requirements are in REQUIREMENTS.md. Authorization currently ends at Milestone 1.
 
+Milestone 1 is complete; its inspected source, host, Android and Apple evidence is recorded in PROGRESS.md. Milestones 2–7 are pending and require further authorization.
+
 | Milestone | Dependency | Acceptance boundary |
 | --- | --- | --- |
 | 1. Engineering foundation | Independent repository and reference audit | Pinned native dependencies, custom layout, generated interop, real FFmpeg/mobile calls and callbacks, host/mobile CI evidence |

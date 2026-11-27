@@ -1,55 +1,44 @@
 # Progress
 
-## Authorization
+## Authorization and status
 
-Milestone 1 — Engineering foundation is in progress. Milestones 2–7 remain pending and unauthorized. No processing tools are presented as complete.
+Milestone 1 — Engineering foundation is complete and accepted against its scoped gate on 27 November 2026. Milestones 2–7 remain pending and unauthorized. No conversion workflows are available or presented as complete.
 
 ## Verified foundation
 
-- Independent history on main, origin developerasaad/Velmux-Rebuilt, repository-local author/committer developerasaad <developer.asaad@gmail.com>. Push, Actions inspection and dispatch work independently. Original Velmux is read-only reference.
-- REQUIREMENTS.md matches the full supplied specification byte-for-byte. The required responsibility layout, identity and palette are established; see IMPLEMENTATION.md and docs/reference-findings.md.
-- Pinned FFmpeg 7.1.5 archive digest and official detached signature checked. Complete authorized construction closure retained, including cross-toolchain fixes; no original application implementation imported.
-- Target-specific native identity isolation, shared-input invalidation and generated-PATH/tool-version tests pass locally and in CI. Public build/test entry points require the selected clean compiler environment; Android commands require Bash 5.
+- Independent history on main, origin developerasaad/Velmux-Rebuilt, repository-local author/committer developerasaad <developer.asaad@gmail.com>. Push, Actions inspection and dispatch work. Original Velmux remains read-only reference.
+- REQUIREMENTS.md matches the complete supplied specification byte-for-byte. The required physical layout, application identity and shared palette are established; see IMPLEMENTATION.md and docs/reference-findings.md.
+- FFmpeg 7.1.5 source digest and official detached signature checked. Complete authorized construction closure retained, including cross-toolchain fixes; no original application implementation imported.
+- Target-specific native identities cover source, flags, architectures and toolchains. Nine regression assertions exercise isolation and invalidation. Ordinary application changes reuse native dependencies.
+- Generated Gobley/UniFFI interoperability connects the shared Compose shell to direct linked FFmpeg libraries. Android Application and iOS AppDelegate each own one process-lifetime session; screen disposal does not close it. Native Kotlin/Swift providers supply real private-storage paths and callbacks.
 
 | Evidence | Source | Inspected result |
 | --- | --- | --- |
-| [Source checks 45931075236](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931075236) | `662af3d` | Passed script parsing, nine cache-identity regressions, Rust formatting and custom Gradle configuration |
-| [Native dependencies 45927805349](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45927805349) | `ef805cc` | Android arm64-v8a/x86_64 and Apple arm64 device/simulator construction and compiled-component validation passed; host C probe also passed |
-| [Host integration 45930002333](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45930002333) | `c16faf5` | Corrected host SVT recipe constructed and saved; four real Rust/FFmpeg integration tests and Clippy passed |
-| [Android integration 45930005832](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45930005832) | `c16faf5` | Generated bindings, release/debug builds, both ABI closures and ELF/APK 16 KiB alignment passed; API 29 process crashed before tests |
-| [Apple integration 45929262928](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45929262928) | `c9aab29` | Rust/Kotlin static framework and Swift host compiled; final app link failed on libass iconv dependency |
+| [Source checks 45935873278](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45935873278) | `de58d8f` | Script parsing, nine identity regressions, Rust formatting and custom Gradle configuration passed |
+| [Native dependencies 45927805349](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45927805349) | `ef805cc` | Android arm64-v8a/x86_64 and Apple arm64 device/simulator construction and compiled-component validation passed |
+| [Host integration job](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45934049976/job/140293050933) | `22f65bd` | Four real Rust/FFmpeg integration tests and Clippy passed after the explicit native-link policy was introduced |
+| [Android integration 45935435915](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45935435915) | `dd87364` | Release build, both ABI closures, ELF/APK 16 KiB alignment, platform libc/shared C++ checks and all three instrumentation tests on each of API 29 and API 35 passed |
+| [Apple integration 45935875430](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45935875430) | `de58d8f` | Unsigned arm64 device build and all five arm64 iOS 18.5 simulator tests passed; visible-controller assertions and uncaught-Kotlin-exception gate passed |
 
-The host Rust tests demonstrate linked FFmpeg registries, record values, native-provider calls, shared engine lifetime, typed cancellation/access errors and concurrent cursor isolation. Native build-tree manifests are not physical hardware or actual accelerated-processing evidence.
+The host tests establish real linked FFmpeg registries, record values, native-provider calls, shared engine lifetime, typed pre-call/mid-callback cancellation, invalid-storage errors and concurrent cursor isolation. Android tests establish native host launch/activity recreation with the same application session, actual FFmpeg calls, callbacks, basic type conversion, typed cancellation/storage errors and idempotent close. Both API-level test executions are present in the inspected job log; the retained XML is the later API 35 execution.
 
-## Implemented, pending mobile runtime acceptance
+The inspected Apple log and retained XCTest result establish visible shared-controller launch using the AppDelegate session, real Swift-to-Kotlin-to-Rust-to-FFmpeg calls, provider callbacks on a worker thread, typed cancellation/storage errors, catchable closed-session errors and idempotent close. All five tests passed with zero failures; no uncaught Kotlin exception was logged.
 
-- Gobley/UniFFI bindings, one process-owned engine per native host, shared Compose diagnostics shell, custom source roots and native storage providers.
-- Android lifecycle recreation, native callbacks, typed errors and cancellation instrumentation tests; Swift worker-thread/provider/error/host tests.
-- Apple libass iconv system dependency is now explicitly linked. Apple compiler/dependency caches and Android tombstones/symbolication are retained for focused diagnosis.
+The host result remains applicable: subsequent build-script changes only alter Android SDK search paths; the latest source change concerns Apple launch verification. No unchanged expensive host rebuild was required. Independent final source review found no new consequential ownership, callback or cancellation defect.
 
-## Active verification and defects
+## Corrected integration defects
 
-- Android [45931078568](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931078568), `662af3d`: running with full native-crash evidence capture. Earlier logcat confirms SIGSEGV during Application startup before test execution. Cause remains under investigation; no successful Android runtime claim.
-- Apple [45931075511](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931075511), `662af3d`: running corrected device-host linkage, followed by simulator integration.
-- Host GCC IPO was incompatible with Rust native-archive bundling. SVT host LTO is explicitly disabled; the successful test run establishes this correction. Mobile recipes are unchanged by that fix.
-- Earlier failures corrected: hosted default NDK mismatch, missing bindgen opaque declarations, Apple x265/zimg C++ closure, activity-owned engine lifetime and unannotated Swift error propagation. A test-directory collision with the build ignore rule was corrected; source checks now pass.
-- No external access/runner blocker currently prevents work. Remaining failures are integration defects to resolve within Milestone 1.
+- Host SVT-AV1 GCC IPO/LTO archives lost usable symbols during Rust archive bundling. Host LTO is disabled; normal archives pass the Rust suite. Mobile recipes retain their verified configuration.
+- Android startup initially crashed before instrumentation. [Symbolication](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45932734608) traced an x265 constructor through page-size initialization into bundled Bionic libc. [Independent Clang probes](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45935213040) reproduced the cause: a generic NDK library search path selected static SDK archives ahead of API-specific shared stubs. Only managed FFmpeg-prefix archives are now bundled, SDK lookup follows the NDK driver's API-first ordering, and exactly one shared C++ runtime is packaged. The APK gate checks dynamic libc and rejects bundled Bionic symbols; both emulator runs now pass.
+- Apple x265/zimg C++ and libass iconv closure, arm64-only simulator architecture selection and SDK-matched simulator selection were corrected. Swift error annotations keep closed-session/native failures catchable. The first green XCTest run still logged a Compose plist sanity exception; final acceptance therefore additionally checks the required plist key, visible controller and absence of uncaught Kotlin exceptions.
+- Bindgen opaque declarations, pinned NDK resolution, process-owned engine lifetime, test-directory ignore collision and source-only compiler-cache identity were corrected and verified by subsequent relevant checks.
 
-## Current corrections awaiting runtime evidence
+## Acceptance decision
 
-- [Native symbolication 45932734608](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45932734608), `95c440d`, traced the startup fault to `__bionic_getauxval` / `page_size` from an x265 global constructor. The core ELF had no dynamic libc dependency: an explicit generic NDK library search path selected static platform archives ahead of API-specific shared stubs. Rust now bundles only genuine managed-prefix archives, keeps platform libraries dynamic, normalizes Android C++ runtime imports, and lets the NDK driver preserve API-first SDK library lookup. The release APK gate checks libc dependency and rejects bundled Bionic symbols. Independent source review completed; execution proof pending.
-- Apple [45931075511](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931075511), `662af3d`: unsigned device app build passed. Simulator compilation attempted unsupported x86_64 alongside arm64; the project now explicitly selects arm64, matching the Kotlin/Rust/native artifacts, and selects an SDK-matched runtime. Actual simulator tests remain pending.
-- Gobley 0.3.7 is retained. An upstream JNA regression was investigated, but symbolication identified platform-library bundling rather than evidence for changing the binding generator.
+The repository/identity/history, durable records, custom layout, pinned compatible toolchains, native construction/packaging, both mobile links, real host calls/callbacks and relevant host/emulator/simulator checks satisfy the Milestone 1 gate. Logs and test artifacts were inspected rather than relying only on workflow status. Final documentation-only changes do not alter the verified binaries. No unresolved blocker remains within this milestone. Work stops here; the next implementation requires explicit Milestone 2 authorization.
 
-- [Independent native link probes 45935213040](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45935213040), `74d2362`, reproduced the NDK path defect with tiny Clang shared-library builds: default/API-first lookup uses shared libc; explicitly prioritizing the generic ABI directory pulls static Bionic. The broad SDK search path has been removed.
-- iOS job in [45934049976](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45934049976), `22f65bd`, passed the device build and all five simulator interoperability tests. Inspection also found a Compose plist sanity exception despite green XCTest status. The required high-refresh plist key and a stronger visible-controller launch assertion are added; the shell now rejects uncaught Kotlin exceptions in the simulator log.
+## Limits and next boundary
 
-## Acceptance remaining
+Physical devices are unavailable. Emulator/simulator results do not establish physical hardware behavior, accelerated processing, media correctness or performance. Native component validation proves compiled capability, not successful hardware execution. The inherited x265 build does not establish 10-bit HEVC encoding. Android runtime evidence covers x86_64 emulators; arm64 packaging/linking is verified, with physical execution pending. Apple simulator evidence targets arm64 iOS 18.5; minimum-OS device runtime is not claimed.
 
-Demonstrate real Android and iOS host-to-Rust-to-FFmpeg calls and provider callbacks at runtime, cancellation/errors/lifetime behavior, Android API 29/newer launch and iOS simulator launch, plus successful unsigned Apple device-target linkage. Inspect final workflow evidence and review the integrated result before accepting Milestone 1.
-
-Physical devices are unavailable. Hardware-specific behavior, accelerated processing, media correctness and performance are unverified. The inherited x265 build does not establish 10-bit HEVC encoding. Product catalog, SQLite operational state and processing workflows belong to subsequent authorized milestones.
-
-## Next authorized action
-
-Resolve the Android native startup crash, complete Apple linking/simulator verification, and finish the Milestone 1 acceptance gate. Do not begin Milestone 2.
+Product catalogs, SQLite operational state and actual media workflows belong to later milestones. A maintained Rust-owned SQLite binding with bundled SQLite is planned when the durable store is introduced. Do not begin Milestone 2 without explicit authorization.
