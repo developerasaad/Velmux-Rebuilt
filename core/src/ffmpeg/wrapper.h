@@ -2,3 +2,14 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavfilter/avfilter.h>
+#include <libavutil/display.h>
+#include <libavutil/pixdesc.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/mastering_display_metadata.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
+#include <libavutil/audio_fifo.h>
+#include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+#include <libavfilter/buffersrc.h>
+#include <libavfilter/buffersink.h>

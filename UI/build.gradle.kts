@@ -48,6 +48,9 @@ kotlin {
         androidMain {
             kotlin.setSrcDirs(listOf("integration/android"))
             dependencies {
+                implementation("androidx.media3:media3-exoplayer:1.8.1")
+                implementation("androidx.media3:media3-ui:1.8.1")
+                implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
                 implementation("net.java.dev.jna:jna:5.18.1@aar") {
                     version { strictly("5.18.1") }
                 }

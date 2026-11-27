@@ -1,8 +1,8 @@
 # Implementation sequence
 
-The full product and acceptance requirements are in REQUIREMENTS.md. Authorization currently ends at Milestone 1.
+The full product and acceptance requirements are in REQUIREMENTS.md. Authorization currently ends at Milestone 2.
 
-Milestone 1 is complete; its inspected source, host, Android and Apple evidence is recorded in PROGRESS.md. Milestones 2–7 are pending and require further authorization.
+Milestone 1 is complete; its inspected source, host, Android and Apple evidence is recorded in PROGRESS.md. Milestone 2 is in progress under explicit authorization; Milestones 3–7 remain pending.
 
 | Milestone | Dependency | Acceptance boundary |
 | --- | --- | --- |
@@ -37,3 +37,15 @@ Milestone 1 is complete; its inspected source, host, Android and Apple evidence 
 SQLite will enter through the Rust-owned durable store in Milestone 2; a maintained rusqlite binding with bundled SQLite avoids separate platform schemas. No database or unused SQLite dependency is introduced before that store exists. FFmpeg construction retains the complete pinned software-codec chain, while runtime hardware availability and 10-bit x265 encoding remain separate verification obligations.
 
 CI acceptance and unresolved compatibility facts are recorded in PROGRESS.md.
+
+## Milestone 2 implementation order
+
+1. Native descriptor/security-scope leases and bounded Rust inspection; keep seekable originals direct and stage only nonseekable inputs.
+2. Deterministic Rust configuration and actual codec/container validation; immutable accepted requests in bundled SQLite through rusqlite 0.43.0.
+3. One bounded Rust worker, actual direct-library copying/encoding/filtering/muxing, finalized-output inspection and native publication reservation/receipt.
+4. Wire Home, converter workspaces, native preview with lazy fallback, Jobs and essential Settings to those operations.
+5. Verify realistic conversions independently on the host and through Android/iOS runtime tests, including failure/cancel/restart/publication ownership; retain M1 regressions.
+
+The initial exposed formats are MP4/Matroska for video and M4A/MP3/WAV 16-bit/FLAC for audio. Further catalog options remain required in Milestone 3 and are not advertised early. Accepted streams are preserved or rejected with a compatibility error, never silently discarded. Hardware routes remain separately unverified; software processing provides the initial deterministic route where its accepted semantics are supported.
+
+rusqlite's bundled SQLite keeps one Rust-owned operational schema. Its selected dependency closure requires thiserror 2.0.21; that patch update is included for compatibility. Native OS adapters implement document leases and publication primitives, with app/job policy retained in Rust. Publication reservations are persisted before saving, and completion is committed only after a confirmed user-accessible result. Interrupted work is explicitly restartable rather than labeled resumed.

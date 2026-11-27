@@ -181,9 +181,10 @@ fn main() {
     }
     let mut builder = bindgen::Builder::default()
         .header("src/ffmpeg/wrapper.h")
-        .allowlist_function("av_version_info|av_codec_iterate|av_codec_is_encoder|av_codec_is_decoder|av_muxer_iterate|av_demuxer_iterate|av_filter_iterate")
-        .allowlist_type("AVCodec|AVInputFormat|AVOutputFormat|AVFilter")
-        .opaque_type("AV.*")
+        .allowlist_function("av_.*|avcodec_.*|avformat_.*|avio_.*|avfilter_.*|av_buffersrc_.*|av_buffersink_.*|sws_.*|swr_.*")
+        .allowlist_type("AV.*|SwsContext|SwrContext")
+        .allowlist_var("AV.*|LIBAV.*|SWS.*|SWR.*")
+        .prepend_enum_name(false)
         .layout_tests(false)
         .generate_comments(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));

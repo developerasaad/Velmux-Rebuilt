@@ -6,7 +6,7 @@ use std::{ffi::CStr, ptr};
     non_snake_case,
     non_upper_case_globals
 )]
-mod sys {
+pub(crate) mod sys {
     include!(concat!(env!("OUT_DIR"), "/ffmpeg.rs"));
 }
 

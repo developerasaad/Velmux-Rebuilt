@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission android:name="com.velmux.mobile.test.FIXTURE_ACCESS" android:protectionLevel="signature" />
+    <application>
+        <provider
+            android:name="com.velmux.mobile.testing.NativeSourceTestProvider"
+            android:authorities="com.velmux.mobile.test.sources"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:readPermission="com.velmux.mobile.test.FIXTURE_ACCESS"
+            android:writePermission="com.velmux.mobile.test.FIXTURE_ACCESS" />
+    </application>
+</manifest>

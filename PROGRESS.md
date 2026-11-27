@@ -2,7 +2,7 @@
 
 ## Authorization and status
 
-Milestone 1 — Engineering foundation is complete and accepted against its scoped gate on 27 November 2026. Milestones 2–7 remain pending and unauthorized. No conversion workflows are available or presented as complete.
+Milestone 1 — Engineering foundation is complete and accepted against its scoped gate on 27 November 2026. Milestone 2 is explicitly authorized and in progress. Milestones 3–7 remain pending and unauthorized. No conversion workflows are available or presented as complete.
 
 ## Verified foundation
 
@@ -35,10 +35,16 @@ The host result remains applicable: subsequent build-script changes only alter A
 
 ## Acceptance decision
 
-The repository/identity/history, durable records, custom layout, pinned compatible toolchains, native construction/packaging, both mobile links, real host calls/callbacks and relevant host/emulator/simulator checks satisfy the Milestone 1 gate. Logs and test artifacts were inspected rather than relying only on workflow status. Final documentation-only changes do not alter the verified binaries. No unresolved blocker remains within this milestone. Work stops here; the next implementation requires explicit Milestone 2 authorization.
+The repository/identity/history, durable records, custom layout, pinned compatible toolchains, native construction/packaging, both mobile links, real host calls/callbacks and relevant host/emulator/simulator checks satisfy the Milestone 1 gate. Logs and test artifacts were inspected rather than relying only on workflow status. Final documentation-only changes do not alter the verified binaries. No unresolved blocker remains within this milestone. This Milestone 1 acceptance remains the regression baseline for the now-authorized Milestone 2 work.
 
 ## Limits and next boundary
 
 Physical devices are unavailable. Emulator/simulator results do not establish physical hardware behavior, accelerated processing, media correctness or performance. Native component validation proves compiled capability, not successful hardware execution. The inherited x265 build does not establish 10-bit HEVC encoding. Android runtime evidence covers x86_64 emulators; arm64 packaging/linking is verified, with physical execution pending. Apple simulator evidence targets arm64 iOS 18.5; minimum-OS device runtime is not claimed.
 
-Product catalogs, SQLite operational state and actual media workflows belong to later milestones. A maintained Rust-owned SQLite binding with bundled SQLite is planned when the durable store is introduced. Do not begin Milestone 2 without explicit authorization.
+Product catalogs, SQLite operational state and actual media workflows belong to later milestones. A maintained Rust-owned SQLite binding with bundled SQLite is planned when the durable store is introduced. Milestone 2 is now authorized; do not begin Milestone 3 without explicit authorization.
+
+## Milestone 2 integration
+
+Authorization is limited to Milestone 2. Implementing: descriptor-backed media access and inspection, Rust catalog/configuration, direct library conversion, SQLite jobs, native publication and playback adapters. These new paths are not yet verified. Existing Milestone 1 tests remain enabled.
+
+The first integrated unit introduces source/OS contracts and a real processing/store implementation. Focused host compilation/tests precede application wiring. Android and iOS adapters have source checks only; native picker interaction, player behavior and publication still require runtime evidence. Remaining M2 work includes shared application/workspaces/Jobs/Settings, preview fallback, independent media verification, cancellation/lifecycle/restart failure coverage and complete cross-platform acceptance. No Milestone 3 functionality is authorized.

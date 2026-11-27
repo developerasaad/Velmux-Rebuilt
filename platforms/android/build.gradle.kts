@@ -23,7 +23,10 @@ android {
             java.setSrcDirs(listOf("src"))
             res.setSrcDirs(listOf("resources"))
         }
-        getByName("androidTest") { java.setSrcDirs(listOf("tests")) }
+        getByName("androidTest") {
+            java.setSrcDirs(listOf("tests"))
+            manifest.srcFile("tests/AndroidManifest.xml")
+        }
     }
     buildFeatures { compose = true }
     compileOptions {
