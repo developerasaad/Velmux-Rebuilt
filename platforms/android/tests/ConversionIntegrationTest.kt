@@ -7,6 +7,7 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.graphics.Rect
+import android.graphics.Color
 import android.view.View
 import android.view.ViewGroup
 import android.os.SystemClock
@@ -74,6 +75,7 @@ class ConversionIntegrationTest {
     @Test
     fun systemPickerCancelThenVideoConversionPublishesDecodedOutput() {
         media.beginNative()
+        val originalAppearance = media.appearanceNative()
         val before = media.jobsNative().map { it.id }.toSet()
         val uri = grant(PICKER_VIDEO)
         assertEquals("The generic-data fixture must not advertise a video MIME type", "application/octet-stream", resolver.getType(uri))
@@ -116,12 +118,18 @@ class ConversionIntegrationTest {
                 clickText("Settings", exact = true)
                 clickText("Dark", exact = true)
                 waitUntil("Appearance was not committed") { media.appearanceNative() == "dark" }
+                awaitRenderedDarkAppearance()
                 capture("ui-settings-dark.png")
+                scenario.recreate()
+                awaitText("Video Converter", exact = true)
+                clickText("Settings", exact = true)
+                awaitRenderedDarkAppearance()
+                capture("ui-settings-dark-restored.png")
             }
             val accepted = media.jobsNative().filter { it.id !in before }
             assertEquals("One Convert action must produce one accepted job", 1, accepted.size)
         } finally {
-            runCatching { media.setAppearanceNative("system") }
+            runCatching { media.setAppearanceNative(originalAppearance) }
             cleanupNewJobs(before)
             revoke(PICKER_VIDEO)
         }
@@ -784,6 +792,21 @@ class ConversionIntegrationTest {
             }
         }
         return requireNotNull(target) { "The UI content could not be reached by scrolling: $text" }
+    }
+
+    private fun awaitRenderedDarkAppearance() {
+        waitUntil("The selected dark appearance did not reach the actual Settings UI") {
+            device.findObject(By.text("Dark"))?.parent?.isChecked == true
+        }
+        waitUntil("The Settings surface did not render its dark palette") {
+            val screenshot = instrumentation.uiAutomation.takeScreenshot() ?: return@waitUntil false
+            try {
+                // The right content margin is the shared theme's background,
+                // away from labels, controls and system status/navigation bars.
+                val pixel = screenshot.getPixel(screenshot.width - 8, screenshot.height / 2)
+                abs(Color.red(pixel) - 0x17) <= 2 && abs(Color.green(pixel) - 0x12) <= 2 && abs(Color.blue(pixel) - 0x0e) <= 2
+            } finally { screenshot.recycle() }
+        }
     }
 
     private fun capture(name: String) {
