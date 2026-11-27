@@ -1,8 +1,19 @@
 import XCTest
+import UIKit
 import VelmuxUI
 @testable import Velmux
 
 final class FoundationIntegrationTests: XCTestCase {
+    @MainActor
+    func testApplicationHostUsesLiveSharedSession() throws {
+        let host = try XCTUnwrap(UIApplication.shared.delegate as? AppDelegate)
+        XCTAssertNotNil(host.window?.rootViewController)
+        let session = try XCTUnwrap(host.session)
+        let report = try session.inspect()
+        XCTAssertTrue(report.ffmpegVersion.hasPrefix("7.1."))
+        XCTAssertGreaterThan(report.filterCount, 100)
+    }
+
     func testGeneratedBindingsAndLinkedFfmpeg() throws {
         let services = IosServices()
         let session = FoundationSession(services: services)

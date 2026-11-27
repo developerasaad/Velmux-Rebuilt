@@ -4,7 +4,7 @@ import VelmuxUI
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
-    private var session: FoundationSession?
+    private(set) var session: FoundationSession?
 
     func application(
         _ application: UIApplication,
