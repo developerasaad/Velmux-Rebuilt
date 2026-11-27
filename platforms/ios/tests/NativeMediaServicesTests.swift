@@ -147,8 +147,9 @@ final class NativeMediaServicesTests: XCTestCase {
     }
 
     func testInterruptedInitialReservationAndLongNameCollisionRecoverSafely() throws {
-        let longName = String(repeating: "a", count: 175) + ".mp4"
+        let longName = String(repeating: "a", count: 180) + ".mp4"
         let first = try services.reserveOutput(jobId: "long-name-first", fileName: longName, mimeType: "video/mp4")
+        XCTAssertEqual(first.displayName, longName, "A valid maximum-length stem must retain its media extension")
         let identifier = String(first.locator.dropFirst("velmux-reservation:".count))
         let manifest = services.operationalRoot.appendingPathComponent("publication-reservations/" + identifier + ".json")
         try FileManager.default.removeItem(at: manifest)

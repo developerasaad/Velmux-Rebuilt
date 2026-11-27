@@ -224,9 +224,13 @@ final class IosMediaServices: NSObject, MediaServices {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         while name.hasPrefix(".") { name.removeFirst() }
         if name.isEmpty { name = "converted_media" }
-        // Leave space for collision suffixes without splitting Unicode scalars.
-        while name.utf8.count > 180 { name.removeLast() }
-        return name
+        // Rust accepts a 180-byte stem plus the actual representation extension.
+        // Keep that extension and leave room for native collision suffixes.
+        let rawExtension = (name as NSString).pathExtension
+        let suffix = rawExtension.utf8.count <= 16 && !rawExtension.isEmpty ? "." + rawExtension : ""
+        var stem = suffix.isEmpty ? name : (name as NSString).deletingPathExtension
+        while (stem + suffix).utf8.count > 220 { stem.removeLast() }
+        return stem + suffix
     }
 
     private static func validStoredName(_ name: String) -> Bool {
