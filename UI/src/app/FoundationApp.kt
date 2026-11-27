@@ -29,7 +29,7 @@ private data class Alert(val title: String, val detail: String, val confirm: Str
 
 /** Navigation and transient alerts stay local; media rules and accepted jobs stay in Rust. */
 @Composable
-fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) {
+fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null, onAppearance: (Boolean) -> Unit = {}) {
     val media = session.media
     val scope = rememberCoroutineScope()
     var destination by remember { mutableStateOf(Destination.Home) }
@@ -142,7 +142,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
         }
     }
 
-    VelmuxTheme(appearance) {
+    VelmuxTheme(appearance, onAppearance) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().safeDrawingPadding()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

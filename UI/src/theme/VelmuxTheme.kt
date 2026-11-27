@@ -5,6 +5,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.Color
 
 private val LightPalette = lightColorScheme(
@@ -44,9 +45,11 @@ private val DarkPalette = darkColorScheme(
 )
 
 @Composable
-fun VelmuxTheme(appearance: String = "system", content: @Composable () -> Unit) {
+fun VelmuxTheme(appearance: String = "system", onAppearance: (Boolean) -> Unit = {}, content: @Composable () -> Unit) {
+    val dark = appearance == "dark" || (appearance == "system" && isSystemInDarkTheme())
+    LaunchedEffect(dark, onAppearance) { onAppearance(dark) }
     MaterialTheme(
-        colorScheme = if (appearance == "dark" || (appearance == "system" && isSystemInDarkTheme())) DarkPalette else LightPalette,
+        colorScheme = if (dark) DarkPalette else LightPalette,
         content = content,
     )
 }

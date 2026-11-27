@@ -145,17 +145,29 @@ final class PickerFlowUITests: XCTestCase {
         field.tap()
         let keyboardContinue = app.buttons["Continue"].firstMatch
         if keyboardContinue.waitForExistence(timeout: 2), keyboardContinue.isHittable { keyboardContinue.tap() }
-        // Compose exports this editable TextView's content as its accessibility
-        // label on iOS; UIKit text fields normally expose the same text as value.
-        let current = (field.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? field.label
-        guard !current.isEmpty, current != "Output name" else {
-            throw failure("The output-name field did not expose its editable value")
+        // Compose exports the editable text as its TextView label. Use the
+        // visible keyboard key and acknowledge each deletion; bulk synthetic
+        // backspaces can leave a prefix in this real Compose/iOS editor.
+        func editableName() -> String {
+            if field.elementType == .textView { return field.label }
+            return (field.value as? String) ?? field.label
         }
-        // Clear and verify before inserting. Combining deletion and insertion
-        // after a selection gesture can leave an old prefix in the real editor.
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count + 8))
+        let current = editableName()
+        guard !current.isEmpty, current != "Output name", current.count <= 64 else {
+            throw failure("The output-name field did not expose the expected editable default")
+        }
+        let delete = app.keyboards.keys["delete"].firstMatch
+        try waitFor("The native keyboard Delete key was unavailable") { delete.isHittable }
+        for _ in 0..<current.count {
+            let previous = editableName()
+            if previous.isEmpty || previous == "Output name" { break }
+            delete.tap()
+            try waitFor("The native Delete key did not update the output name", timeout: 5) {
+                editableName() != previous
+            }
+        }
         try waitFor("The previous output name was not cleared", timeout: 10) {
-            let text = (field.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? field.label
+            let text = editableName()
             return text.isEmpty || text == "Output name"
         }
         field.typeText(stem)

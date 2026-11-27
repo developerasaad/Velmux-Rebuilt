@@ -22,6 +22,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.ui.PlayerView
+import androidx.core.view.WindowCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -119,11 +120,13 @@ class ConversionIntegrationTest {
                 clickText("Dark", exact = true)
                 waitUntil("Appearance was not committed") { media.appearanceNative() == "dark" }
                 awaitRenderedDarkAppearance()
+                assertDarkSystemBars(scenario)
                 capture("ui-settings-dark.png")
                 scenario.recreate()
                 awaitText("Video Converter", exact = true)
                 clickText("Settings", exact = true)
                 awaitRenderedDarkAppearance()
+                assertDarkSystemBars(scenario)
                 capture("ui-settings-dark-restored.png")
             }
             val accepted = media.jobsNative().filter { it.id !in before }
@@ -792,6 +795,14 @@ class ConversionIntegrationTest {
             }
         }
         return requireNotNull(target) { "The UI content could not be reached by scrolling: $text" }
+    }
+
+    private fun assertDarkSystemBars(scenario: ActivityScenario<MainActivity>) {
+        scenario.onActivity { activity ->
+            val bars = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+            assertFalse("Dark Settings must retain readable status-bar icons", bars.isAppearanceLightStatusBars)
+            assertFalse("Dark Settings must retain readable navigation-bar icons", bars.isAppearanceLightNavigationBars)
+        }
     }
 
     private fun awaitRenderedDarkAppearance() {
