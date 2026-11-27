@@ -41,6 +41,14 @@ jobs:
           key: native-host-host-${{ steps.identity.outputs.key }}
       - name: Verify Rust and linked libraries
         run: bash scripts/test.sh host
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-media-evidence
+          path: |
+            build/media-fixtures/fixtures.json
+            build/media-test-output
+          retention-days: 7
   android:
     if: inputs.platform == 'all' || inputs.platform == 'android'
     runs-on: ubuntu-24.04
@@ -117,6 +125,7 @@ jobs:
             build/android-logcat.txt
             build/android-symbols.txt
             build/android-tombstones
+            build/android-screenshots
           retention-days: 7
   ios:
     if: inputs.platform == 'all' || inputs.platform == 'ios'

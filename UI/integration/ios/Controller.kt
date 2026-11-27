@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.interop.UIKitViewController
 import com.velmux.ui.app.FoundationApp
 import com.velmux.ui.app.FoundationSession
+import com.velmux.ui.app.PlatformActions
 import kotlinx.cinterop.ExperimentalForeignApi
 import platform.UIKit.UIViewController
 
@@ -47,6 +48,6 @@ internal fun IosMediaPreview(locator: String, modifier: Modifier, onUnsupported:
 }
 
 /** The native application owns the session independently of controller presentation. */
-fun createController(session: FoundationSession) = ComposeUIViewController {
-    FoundationApp(session)
+fun createController(session: FoundationSession, actions: PlatformActions) = ComposeUIViewController {
+    FoundationApp(session, actions)
 }

@@ -5,10 +5,14 @@ bash scripts/check-build-environment.sh "${1:-}"
 case "${1:-}" in
   host) bash scripts/ci/verify-host.sh ;;
   android)
+    if [ ! -f build/media-fixtures/fixtures.json ]; then bash scripts/ci/prepare-media-fixtures.sh; fi
     mkdir -p build
     capture_android() {
       result=$?
       adb logcat -d -v threadtime > build/android-logcat.txt 2>&1 || true
+      api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')
+      mkdir -p "build/android-screenshots/api-$api"
+      adb pull /sdcard/Android/data/com.velmux.mobile/files/screenshots "build/android-screenshots/api-$api/" || true
       if [ "$result" -ne 0 ]; then
         adb root || true
         adb wait-for-device || true
@@ -25,6 +29,7 @@ case "${1:-}" in
     ./gradlew -PbindingsTarget=android :android:connectedDebugAndroidTest
     ;;
   ios-simulator)
+    if [ ! -f build/media-fixtures/fixtures.json ]; then bash scripts/ci/prepare-media-fixtures.sh; fi
     bash scripts/ffmpeg/build-ios.sh
     ./gradlew -PbindingsTarget=ios :UI:linkDebugFrameworkIosSimulatorArm64
     mkdir -p build/ios/iphonesimulator

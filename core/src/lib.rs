@@ -7,6 +7,6 @@ mod processing;
 
 pub use api::*;
 pub use configuration::*;
-pub use jobs::{InspectedSource, JobObserver, JobRecord, JobState};
+pub use jobs::{InspectedSource, JobObserver, JobRecord, JobState, PreviewResult};
 pub use media::*;
 uniffi::setup_scaffolding!();

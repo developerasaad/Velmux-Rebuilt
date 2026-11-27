@@ -10,5 +10,6 @@ class VelmuxApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         session = FoundationSession(AndroidServices(filesDir))
+        session.media.attach(AndroidMediaServices(this))
     }
 }

@@ -198,6 +198,9 @@ impl Engine {
     pub fn restart_job(&self, id: String) -> Result<(), EngineError> {
         self.media_runtime()?.restart(&id)
     }
+    pub fn retry_publication(&self, id: String) -> Result<(), EngineError> {
+        self.media_runtime()?.retry_publication(&id)
+    }
     pub fn dismiss_job(&self, id: String) -> Result<(), EngineError> {
         self.media_runtime()?.dismiss(&id)
     }
@@ -209,6 +212,20 @@ impl Engine {
     }
     pub fn output_location(&self) -> Result<String, EngineError> {
         Ok(self.media_runtime()?.provider.output_location())
+    }
+    pub fn prepare_preview(
+        &self,
+        id: String,
+        start_us: i64,
+        cancellation: Arc<CancellationToken>,
+    ) -> Result<crate::PreviewResult, EngineError> {
+        self.media_runtime()?.preview(&id, start_us, cancellation)
+    }
+    pub fn cache_bytes(&self) -> Result<u64, EngineError> {
+        self.media_runtime()?.cache_bytes()
+    }
+    pub fn clear_cache(&self) -> Result<(), EngineError> {
+        self.media_runtime()?.clear_cache()
     }
 }
 

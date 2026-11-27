@@ -36,3 +36,6 @@ interface PlatformActions {
 /** Platform players report unsupported playback so the workspace can request a lazy fallback. */
 @Composable
 expect fun MediaPreview(locator: String, modifier: Modifier, onUnsupported: () -> Unit)
+
+@Composable
+expect fun HandleBack(enabled: Boolean, onBack: () -> Unit)

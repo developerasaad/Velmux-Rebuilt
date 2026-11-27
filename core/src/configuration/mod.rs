@@ -56,7 +56,7 @@ pub struct ConversionConfig {
     pub video_size: VideoSize,
     pub frame_rate: FrameRate,
     pub quality: u8,
-    pub audio_bitrate: u32,
+    pub audio_bitrate: Option<u32>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
     pub file_name: String,
@@ -129,7 +129,10 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
     if !(18..=28).contains(&config.quality) {
         return Err(invalid("Video quality must be between 18 and 28."));
     }
-    if ![128_000, 192_000, 256_000].contains(&config.audio_bitrate) {
+    if config
+        .audio_bitrate
+        .is_some_and(|rate| ![128_000, 192_000, 256_000].contains(&rate))
+    {
         return Err(invalid("Choose a supported audio bitrate."));
     }
     if config
@@ -168,7 +171,7 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
             ));
         }
         if matches!(config.format, OutputFormat::Wav | OutputFormat::Flac)
-            && config.audio_bitrate != 192_000
+            && config.audio_bitrate.is_some()
         {
             return Err(invalid(
                 "A lossy bitrate does not apply to this lossless format.",
@@ -194,7 +197,7 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
     if config.audio_codec == AudioCodec::Copy
         && (config.sample_rate.is_some()
             || config.channels.is_some()
-            || config.audio_bitrate != 192_000)
+            || config.audio_bitrate.is_some())
     {
         return Err(invalid(
             "Stream copying cannot change audio sampling, channels or bitrate.",
@@ -229,7 +232,7 @@ pub(crate) fn default_config(
         video_size: VideoSize::Original,
         frame_rate: FrameRate::Original,
         quality: 23,
-        audio_bitrate: 192_000,
+        audio_bitrate: None,
         sample_rate: None,
         channels: None,
         file_name: format!(
@@ -274,10 +277,16 @@ pub(crate) fn catalog(operation: Operation) -> Vec<FormatOption> {
                 vec![]
             },
             audio_codecs: match format {
-                OutputFormat::M4a => vec![AudioCodec::Aac, AudioCodec::Copy],
-                OutputFormat::Mp3 => vec![AudioCodec::Mp3, AudioCodec::Copy],
-                OutputFormat::Wav => vec![AudioCodec::PcmS16le, AudioCodec::Copy],
-                OutputFormat::Flac => vec![AudioCodec::Flac, AudioCodec::Copy],
+                OutputFormat::M4a => vec![AudioCodec::Automatic, AudioCodec::Aac, AudioCodec::Copy],
+                OutputFormat::Mp3 => vec![AudioCodec::Automatic, AudioCodec::Mp3, AudioCodec::Copy],
+                OutputFormat::Wav => vec![
+                    AudioCodec::Automatic,
+                    AudioCodec::PcmS16le,
+                    AudioCodec::Copy,
+                ],
+                OutputFormat::Flac => {
+                    vec![AudioCodec::Automatic, AudioCodec::Flac, AudioCodec::Copy]
+                }
                 _ => vec![AudioCodec::Automatic, AudioCodec::Aac, AudioCodec::Copy],
             },
         })

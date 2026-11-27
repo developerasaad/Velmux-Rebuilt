@@ -40,6 +40,7 @@ class FoundationSession(services: PlatformServices) {
             services.onDiagnostic(sequence.toLong())
         }
     })
+    val media = MediaSession(engine)
 
     /** Call away from the UI thread. Native callbacks run on the calling worker. */
     @Throws(EngineException::class, IllegalStateException::class)
@@ -91,6 +92,7 @@ class FoundationSession(services: PlatformServices) {
     /** Signal cancellation before waiting for an in-flight call to release its resources. */
     fun close() {
         if (!closed.compareAndSet(expect = false, update = true)) return
+        media.close()
         cancellation.cancel()
         synchronized(gate) {
             engine.close()

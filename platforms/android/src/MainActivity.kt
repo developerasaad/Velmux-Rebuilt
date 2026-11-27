@@ -11,6 +11,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val session = (application as VelmuxApplication).session
-        setContent { FoundationApp(session) }
+        val actions = AndroidPlatformActions(this)
+        setContent { FoundationApp(session, actions) }
     }
 }

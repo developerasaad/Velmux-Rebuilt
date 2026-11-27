@@ -9,6 +9,7 @@ use std::{
     path::Path,
     ptr,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 const EOF: i32 = -541478725;
@@ -76,6 +77,18 @@ fn shift_timestamp(timestamp: i64, origin: i64) -> Result<i64, EngineError> {
         })
 }
 
+fn check_work(token: &CancellationToken, deadline: Option<Instant>) -> Result<(), EngineError> {
+    if token.is_cancelled() {
+        return Err(EngineError::Cancelled);
+    }
+    if deadline.is_some_and(|limit| Instant::now() >= limit) {
+        return Err(EngineError::Platform {
+            detail: "Preparing this bounded preview took too long. Try another position.".into(),
+        });
+    }
+    Ok(())
+}
+
 struct Output {
     context: *mut sys::AVFormatContext,
 }
@@ -100,6 +113,12 @@ struct Transform {
     output_stream: *mut sys::AVStream,
     packets_written: u64,
     timestamp_origin: i64,
+    input_time_base: sys::AVRational,
+    preview_duration: Option<i64>,
+    preview_goal: Option<i64>,
+    preview_finished: bool,
+    tone_map: bool,
+    deadline: Option<Instant>,
 }
 impl Drop for Transform {
     fn drop(&mut self) {
@@ -150,9 +169,21 @@ impl Drop for Frame {
 unsafe fn copy_side_data(
     from: *const sys::AVCodecParameters,
     to: *mut sys::AVCodecParameters,
+    strip_hdr: bool,
 ) -> Result<(), EngineError> {
     for index in 0..(*from).nb_coded_side_data {
         let item = &*(*from).coded_side_data.add(index as usize);
+        if strip_hdr
+            && [
+                sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+                sys::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+                sys::AV_PKT_DATA_DOVI_CONF,
+                sys::AV_PKT_DATA_DYNAMIC_HDR10_PLUS,
+            ]
+            .contains(&item.type_)
+        {
+            continue;
+        }
         let allocated = sys::av_packet_side_data_new(
             &mut (*to).coded_side_data,
             &mut (*to).nb_coded_side_data,
@@ -176,6 +207,8 @@ unsafe fn make_transform(
     config: &crate::ConversionConfig,
     global: bool,
     origin_us: Option<i64>,
+    preview: Option<&super::PreviewRange>,
+    deadline: Option<Instant>,
 ) -> Result<Transform, EngineError> {
     let decoder_codec = sys::avcodec_find_decoder((*(*input).codecpar).codec_id);
     if decoder_codec.is_null() {
@@ -199,7 +232,25 @@ unsafe fn make_transform(
         output_stream: out,
         packets_written: 0,
         timestamp_origin: origin_in_time_base(origin_us, (*input).time_base)?,
+        input_time_base: (*input).time_base,
+        preview_duration: preview.map(|range| range.duration_us),
+        preview_goal: None,
+        preview_finished: false,
+        tone_map: false,
+        deadline,
     };
+    if let Some(range) = preview {
+        let end = origin_in_time_base(Some(range.duration_us), (*input).time_base)?;
+        let known_end = if (*input).duration > 0 && (*input).start_time != i64::MIN {
+            (*input)
+                .start_time
+                .checked_add((*input).duration)
+                .and_then(|value| value.checked_sub(transform.timestamp_origin))
+        } else {
+            None
+        };
+        transform.preview_goal = Some(known_end.map_or(end, |value| value.min(end)));
+    }
     if transform.decoder.is_null() || transform.encoder.is_null() {
         return Err(failure(-libc::ENOMEM, "Encode"));
     }
@@ -212,6 +263,7 @@ unsafe fn make_transform(
     (*dec).pkt_timebase = (*input).time_base;
     (*dec).thread_count = 2;
     (*dec).max_pixels = 64 * 1024 * 1024;
+    (*dec).max_samples = 16 * 1024 * 1024;
     check(
         sys::avcodec_open2(dec, decoder_codec, ptr::null_mut()),
         "Decode",
@@ -221,15 +273,21 @@ unsafe fn make_transform(
         (*enc).flags |= sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
     }
     let is_video = (*dec).codec_type == sys::AVMEDIA_TYPE_VIDEO;
+    transform.tone_map = preview.is_some()
+        && is_video
+        && [sys::AVCOL_TRC_SMPTE2084, sys::AVCOL_TRC_ARIB_STD_B67].contains(&(*dec).color_trc);
     if is_video {
         (*enc).width = plan.width.unwrap() as i32;
         (*enc).height = plan.height.unwrap() as i32;
         (*enc).pix_fmt = sys::AV_PIX_FMT_YUV420P;
-        (*enc).sample_aspect_ratio = if (*dec).sample_aspect_ratio.num > 0 {
-            (*dec).sample_aspect_ratio
-        } else {
-            sys::AVRational { num: 1, den: 1 }
-        };
+        (*enc).sample_aspect_ratio =
+            if (*input).sample_aspect_ratio.num > 0 && (*input).sample_aspect_ratio.den > 0 {
+                (*input).sample_aspect_ratio
+            } else if (*dec).sample_aspect_ratio.num > 0 && (*dec).sample_aspect_ratio.den > 0 {
+                (*dec).sample_aspect_ratio
+            } else {
+                sys::AVRational { num: 1, den: 1 }
+            };
         (*enc).time_base = if config.frame_rate == FrameRate::Fps30 {
             sys::AVRational { num: 1, den: 30 }
         } else {
@@ -245,6 +303,12 @@ unsafe fn make_transform(
         (*enc).colorspace = (*dec).colorspace;
         (*enc).color_range = (*dec).color_range;
         (*enc).chroma_sample_location = (*dec).chroma_sample_location;
+        if transform.tone_map {
+            (*enc).color_primaries = sys::AVCOL_PRI_BT709;
+            (*enc).color_trc = sys::AVCOL_TRC_BT709;
+            (*enc).colorspace = sys::AVCOL_SPC_BT709;
+            (*enc).color_range = sys::AVCOL_RANGE_MPEG;
+        }
         check(
             sys::av_opt_set(
                 (*enc).priv_data,
@@ -307,7 +371,7 @@ unsafe fn make_transform(
             den: (*enc).sample_rate,
         };
         if plan.expected_codec == "aac" || plan.expected_codec == "mp3" {
-            (*enc).bit_rate = i64::from(config.audio_bitrate);
+            (*enc).bit_rate = i64::from(config.audio_bitrate.unwrap_or(192_000));
         }
     }
     check(
@@ -318,7 +382,7 @@ unsafe fn make_transform(
         sys::avcodec_parameters_from_context((*out).codecpar, enc),
         "Encode",
     )?;
-    copy_side_data((*input).codecpar, (*out).codecpar)?;
+    copy_side_data((*input).codecpar, (*out).codecpar, transform.tone_map)?;
     (*(*out).codecpar).codec_tag = 0;
     (*out).time_base = (*enc).time_base;
     transform.graph = sys::avfilter_graph_alloc();
@@ -343,12 +407,23 @@ unsafe fn make_transform(
         } else {
             ""
         };
+        let trim = preview.map_or_else(String::new, |range| {
+            format!(
+                "trim=start=0:end={:.6},",
+                range.duration_us as f64 / 1_000_000.0
+            )
+        });
+        let tone = if transform.tone_map {
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=limited,format=yuv420p,"
+        } else {
+            ""
+        };
         (
             "buffer",
             "buffersink",
             args,
             format!(
-                "scale={}:{}:flags=bicubic,format=pix_fmts=yuv420p{fps}",
+                "{trim}{tone}scale={}:{}:flags=bicubic,format=pix_fmts=yuv420p{fps}",
                 (*enc).width,
                 (*enc).height
             ),
@@ -385,12 +460,18 @@ unsafe fn make_transform(
             CStr::from_ptr(sample_name).to_string_lossy(),
             CStr::from_ptr(in_layout.as_ptr()).to_string_lossy()
         );
+        let trim = preview.map_or_else(String::new, |range| {
+            format!(
+                "atrim=start=0:end={:.6},",
+                range.duration_us as f64 / 1_000_000.0
+            )
+        });
         (
             "abuffer",
             "abuffersink",
             args,
             format!(
-                "aresample={},aformat=sample_fmts={}:sample_rates={}:channel_layouts={}",
+                "{trim}aresample={},aformat=sample_fmts={}:sample_rates={}:channel_layouts={}",
                 (*enc).sample_rate,
                 CStr::from_ptr(output_sample).to_string_lossy(),
                 (*enc).sample_rate,
@@ -467,8 +548,10 @@ impl Transform {
         &mut self,
         out: *mut sys::AVFormatContext,
         packet: &mut Packet,
+        token: &CancellationToken,
     ) -> Result<(), EngineError> {
         loop {
+            check_work(token, self.deadline)?;
             let result = sys::avcodec_receive_packet(self.encoder, packet.0);
             if result == AGAIN || result == EOF {
                 return Ok(());
@@ -497,9 +580,7 @@ impl Transform {
         token: &CancellationToken,
     ) -> Result<(), EngineError> {
         loop {
-            if token.is_cancelled() {
-                return Err(EngineError::Cancelled);
-            }
+            check_work(token, self.deadline)?;
             let result = sys::av_buffersink_get_frame(self.sink, frame.0);
             if result == AGAIN || result == EOF {
                 return Ok(());
@@ -512,10 +593,26 @@ impl Transform {
                     (*self.encoder).time_base,
                 );
             }
+            if self.tone_map {
+                for kind in [
+                    sys::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+                    sys::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+                    sys::AV_FRAME_DATA_DYNAMIC_HDR_PLUS,
+                    sys::AV_FRAME_DATA_DOVI_RPU_BUFFER,
+                    sys::AV_FRAME_DATA_DOVI_METADATA,
+                    sys::AV_FRAME_DATA_DYNAMIC_HDR_VIVID,
+                ] {
+                    sys::av_frame_remove_side_data(frame.0, kind);
+                }
+                (*frame.0).color_primaries = sys::AVCOL_PRI_BT709;
+                (*frame.0).color_trc = sys::AVCOL_TRC_BT709;
+                (*frame.0).colorspace = sys::AVCOL_SPC_BT709;
+                (*frame.0).color_range = sys::AVCOL_RANGE_MPEG;
+            }
             let result = sys::avcodec_send_frame(self.encoder, frame.0);
             sys::av_frame_unref(frame.0);
             check(result, "Encode")?;
-            self.drain_encoder(out, packet)?;
+            self.drain_encoder(out, packet, token)?;
         }
     }
     unsafe fn drain_decoder(
@@ -527,9 +624,7 @@ impl Transform {
         token: &CancellationToken,
     ) -> Result<(), EngineError> {
         loop {
-            if token.is_cancelled() {
-                return Err(EngineError::Cancelled);
-            }
+            check_work(token, self.deadline)?;
             let result = sys::avcodec_receive_frame(self.decoder, frame.0);
             if result == AGAIN || result == EOF {
                 return Ok(());
@@ -545,6 +640,36 @@ impl Transform {
                 });
             }
             (*frame.0).pts = shift_timestamp((*frame.0).pts, self.timestamp_origin)?;
+            if let Some(duration_us) = self.preview_duration {
+                let end = origin_in_time_base(Some(duration_us), self.input_time_base)?;
+                if (*frame.0).pts >= end {
+                    self.preview_finished = true;
+                    sys::av_frame_unref(frame.0);
+                    continue;
+                }
+                let is_audio = (*self.decoder).codec_type == sys::AVMEDIA_TYPE_AUDIO;
+                let frame_duration = if is_audio && (*self.decoder).sample_rate > 0 {
+                    sys::av_rescale_q(
+                        i64::from((*frame.0).nb_samples),
+                        sys::AVRational {
+                            num: 1,
+                            den: (*self.decoder).sample_rate,
+                        },
+                        self.input_time_base,
+                    )
+                } else {
+                    (*frame.0).duration.max(0)
+                };
+                if self.preview_goal.is_some_and(|goal| {
+                    goal < end && (*frame.0).pts.saturating_add(frame_duration) >= goal
+                }) {
+                    self.preview_finished = true;
+                }
+                if !is_audio && (*frame.0).pts < 0 {
+                    sys::av_frame_unref(frame.0);
+                    continue;
+                }
+            }
             let result = sys::av_buffersrc_add_frame_flags(
                 self.source,
                 frame.0,
@@ -567,6 +692,11 @@ pub(crate) fn convert(
     token: Arc<CancellationToken>,
     mut progress: impl FnMut(i64),
 ) -> Result<(), EngineError> {
+    let deadline = plan
+        .preview_range
+        .as_ref()
+        .map(|_| Instant::now() + Duration::from_secs(30));
+    check_work(&token, deadline)?;
     let reserved = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -599,15 +729,20 @@ pub(crate) fn convert(
         let inf = input.format();
         if inf.is_null()
             || (*inf).streams.is_null()
-            || plan.streams.len() != (*inf).nb_streams as usize
-            || source.streams.len() != plan.streams.len()
+            || source.streams.len() != (*inf).nb_streams as usize
+            || plan.streams.is_empty()
+            || (plan.preview_range.is_none() && plan.streams.len() != (*inf).nb_streams as usize)
         {
             return Err(EngineError::InvalidMedia {
                 detail: "The opened source no longer matches the accepted stream plan.".into(),
             });
         }
+        let mut source_to_output = vec![None; (*inf).nb_streams as usize];
         for (position, item) in plan.streams.iter().enumerate() {
-            if item.index as usize != position || item.index >= (*inf).nb_streams {
+            if item.index >= (*inf).nb_streams
+                || source_to_output[item.index as usize].is_some()
+                || (plan.preview_range.is_none() && item.index as usize != position)
+            {
                 return Err(EngineError::Configuration {
                     detail: "The accepted stream mapping is invalid.".into(),
                 });
@@ -616,22 +751,54 @@ pub(crate) fn convert(
             if stream.is_null()
                 || (*stream).codecpar.is_null()
                 || (*stream).index != item.index as i32
-                || (*(*stream).codecpar).codec_id as i32 != source.streams[position].codec_id
+                || (*(*stream).codecpar).codec_id as i32
+                    != source.streams[item.index as usize].codec_id
             {
                 return Err(EngineError::InvalidMedia {
                     detail: "The opened source stream identities have changed.".into(),
                 });
             }
+            source_to_output[item.index as usize] = Some(position);
         }
-        // One origin preserves relative stream offsets. Never independently
-        // zero each stream, which would shift audio against video/subtitles.
-        let origin_us = source.start_time_us.or_else(|| {
-            source
-                .streams
-                .iter()
-                .filter_map(|stream| stream.start_time_us)
-                .min()
-        });
+        // One origin preserves relative stream offsets. Previews additionally
+        // subtract the selected logical range start from every selected track.
+        let source_origin = super::common_origin(source);
+        let origin_us = if let Some(range) = &plan.preview_range {
+            if range.start_us < 0 || !(1..=15_000_000).contains(&range.duration_us) {
+                return Err(EngineError::Configuration {
+                    detail: "The preview range is invalid.".into(),
+                });
+            }
+            Some(
+                source_origin
+                    .unwrap_or(0)
+                    .checked_add(range.start_us)
+                    .ok_or_else(|| EngineError::Configuration {
+                        detail: "The preview origin exceeds the supported range.".into(),
+                    })?,
+            )
+        } else {
+            source_origin
+        };
+        if plan
+            .preview_range
+            .as_ref()
+            .is_some_and(|range| range.start_us > 0)
+        {
+            check_work(&token, deadline)?;
+            let result = sys::av_seek_frame(
+                inf,
+                -1,
+                origin_us.unwrap(),
+                sys::AVSEEK_FLAG_BACKWARD as i32,
+            );
+            if result < 0 {
+                return Err(EngineError::UnsupportedMedia {
+                    detail: "This source cannot seek reliably to the requested preview position."
+                        .into(),
+                });
+            }
+        }
         let out = output.context;
         let mut transforms = Vec::new();
         let mut copy_packets = vec![0u64; plan.streams.len()];
@@ -640,7 +807,7 @@ pub(crate) fn convert(
             "Mux",
         )?;
         // Chapters are copied only to an explicitly compatible representation.
-        if (*inf).nb_chapters > 0 {
+        if (*inf).nb_chapters > 0 && plan.preview_range.is_none() {
             if plan.config.format != crate::OutputFormat::Matroska {
                 return Err(EngineError::Configuration {
                     detail: "Choose Matroska to preserve source chapters in this foundation."
@@ -696,6 +863,8 @@ pub(crate) fn convert(
                     &plan.config,
                     (*(*out).oformat).flags & sys::AVFMT_GLOBALHEADER as i32 != 0,
                     origin_us,
+                    plan.preview_range.as_ref(),
+                    deadline,
                 )?));
             } else {
                 check(
@@ -716,25 +885,43 @@ pub(crate) fn convert(
             "Mux",
         )?;
         check(sys::avformat_write_header(out, ptr::null_mut()), "Mux")?;
-        let mut packet = Packet::new()?;
+        let packet = Packet::new()?;
         let mut encoded = Packet::new()?;
         let mut frame = Frame::new()?;
         let mut filtered = Frame::new()?;
         let first = origin_us.unwrap_or(0);
         let mut furthest = 0i64;
+        let mut packets_read = 0usize;
         loop {
             input.check_cancelled()?;
+            check_work(&token, deadline)?;
+            if plan.preview_range.is_some() && packets_read >= 50_000 {
+                return Err(EngineError::Platform { detail: "This source requires too much scanning for a bounded preview. Try another position.".into() });
+            }
             let result = sys::av_read_frame(inf, packet.0);
             if result == EOF {
                 break;
             }
             input.check_result(result, "Unable to read the source during processing")?;
+            packets_read += 1;
             let index = (*packet.0).stream_index;
-            if index < 0 || index as usize >= transforms.len() {
+            if index < 0 || index as usize >= source_to_output.len() {
                 sys::av_packet_unref(packet.0);
                 return Err(EngineError::InvalidMedia {
                     detail: "A packet refers to an unknown stream.".into(),
                 });
+            }
+            let Some(output_index) = source_to_output[index as usize] else {
+                sys::av_packet_unref(packet.0);
+                continue;
+            };
+            if plan.preview_range.is_some()
+                && transforms[output_index]
+                    .as_ref()
+                    .is_some_and(|transform| transform.preview_finished)
+            {
+                sys::av_packet_unref(packet.0);
+                continue;
             }
             let src = *(*inf).streams.add(index as usize);
             if (*packet.0).pts != i64::MIN {
@@ -749,13 +936,13 @@ pub(crate) fn convert(
                 furthest = furthest.max(timestamp.saturating_sub(first));
                 progress(furthest);
             }
-            if let Some(transform) = &mut transforms[index as usize] {
+            if let Some(transform) = &mut transforms[output_index] {
                 let result = sys::avcodec_send_packet(transform.decoder, packet.0);
                 sys::av_packet_unref(packet.0);
                 check(result, "Decode")?;
                 transform.drain_decoder(out, &mut frame, &mut filtered, &mut encoded, &token)?;
             } else {
-                let dest = *(*out).streams.add(index as usize);
+                let dest = *(*out).streams.add(output_index);
                 let origin = origin_in_time_base(origin_us, (*src).time_base)?;
                 (*packet.0).pts = shift_timestamp((*packet.0).pts, origin)?;
                 (*packet.0).dts = shift_timestamp((*packet.0).dts, origin)?;
@@ -766,8 +953,17 @@ pub(crate) fn convert(
                 sys::av_packet_unref(packet.0);
                 check(result, "Mux")?;
                 if has_payload {
-                    copy_packets[index as usize] = copy_packets[index as usize].saturating_add(1);
+                    copy_packets[output_index] = copy_packets[output_index].saturating_add(1);
                 }
+            }
+            if plan.preview_range.is_some()
+                && transforms.iter().all(|transform| {
+                    transform
+                        .as_ref()
+                        .is_some_and(|transform| transform.preview_finished)
+                })
+            {
+                break;
             }
         }
         for transform in transforms.iter_mut().flatten() {
@@ -786,7 +982,7 @@ pub(crate) fn convert(
                 sys::avcodec_send_frame(transform.encoder, ptr::null()),
                 "Encode",
             )?;
-            transform.drain_encoder(out, &mut encoded)?;
+            transform.drain_encoder(out, &mut encoded, &token)?;
         }
         input.check_cancelled()?;
         for (index, item) in plan.streams.iter().enumerate() {

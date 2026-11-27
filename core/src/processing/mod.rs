@@ -22,6 +22,218 @@ pub(crate) struct StreamPlan {
 pub(crate) struct Plan {
     pub config: ConversionConfig,
     pub streams: Vec<StreamPlan>,
+    #[serde(default)]
+    pub preview_range: Option<PreviewRange>,
+}
+
+/// Logical elapsed source time; conversion adds the common inspected source
+/// origin before seeking. This never changes a submitted user configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct PreviewRange {
+    pub start_us: i64,
+    pub duration_us: i64,
+}
+
+pub(crate) fn common_origin(info: &MediaInfo) -> Option<i64> {
+    info.start_time_us.or_else(|| {
+        info.streams
+            .iter()
+            .filter_map(|stream| stream.start_time_us)
+            .min()
+    })
+}
+
+pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, EngineError> {
+    if start_us < 0
+        || info
+            .duration_us
+            .is_some_and(|duration| start_us >= duration)
+    {
+        return Err(invalid("The preview position lies outside this source."));
+    }
+    let duration_us = info
+        .duration_us
+        .map_or(15_000_000, |duration| (duration - start_us).min(15_000_000));
+    if duration_us <= 0 || start_us.checked_add(duration_us).is_none() {
+        return Err(invalid("The preview time range is invalid."));
+    }
+    let origin = common_origin(info).unwrap_or(0);
+    origin
+        .checked_add(start_us)
+        .and_then(|start| start.checked_add(duration_us))
+        .ok_or_else(|| invalid("The preview timestamps exceed the supported range."))?;
+    let video = info.streams.iter().find(|stream| {
+        stream.kind == StreamKind::Video
+            && !stream
+                .video
+                .as_ref()
+                .is_some_and(|video| video.attached_picture)
+    });
+    let audio = info
+        .streams
+        .iter()
+        .filter(|stream| stream.kind == StreamKind::Audio)
+        .filter(|stream| {
+            let Some(start) = stream
+                .start_time_us
+                .and_then(|start| start.checked_sub(origin))
+            else {
+                return true;
+            };
+            if start >= start_us + duration_us {
+                return false;
+            }
+            stream
+                .duration_us
+                .and_then(|duration| start.checked_add(duration))
+                .is_none_or(|end| end > start_us)
+        })
+        .min_by_key(|stream| {
+            (
+                u8::from(stream.disposition & sys::AV_DISPOSITION_DEFAULT == 0),
+                stream.index,
+            )
+        });
+    let mut streams = Vec::new();
+    if let Some(stream) = video {
+        if !stream.decoder_available {
+            return Err(invalid(
+                "A decoder is required to prepare this video preview.",
+            ));
+        }
+        let facts = stream
+            .video
+            .as_ref()
+            .ok_or_else(|| invalid("The preview geometry is unknown."))?;
+        let width = facts
+            .width
+            .ok_or_else(|| invalid("The preview width is unknown."))?;
+        let height = facts
+            .height
+            .ok_or_else(|| invalid("The preview height is unknown."))?;
+        if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 64 * 1024 * 1024 {
+            return Err(invalid(
+                "This source exceeds the preview decoder's geometry limit.",
+            ));
+        }
+        let sar = facts.sample_aspect_ratio.as_ref().map_or(1.0, |ratio| {
+            f64::from(ratio.numerator) / f64::from(ratio.denominator)
+        });
+        if !sar.is_finite() || sar <= 0.0 {
+            return Err(invalid("The preview pixel geometry is invalid."));
+        }
+        let factor = (640.0 / (f64::from(width) * sar).max(f64::from(height))).min(1.0);
+        let out_width = ((f64::from(width) * factor).floor() as u32 / 2) * 2;
+        let out_height = ((f64::from(height) * factor).floor() as u32 / 2) * 2;
+        if out_width < 2 || out_height < 2 {
+            return Err(invalid(
+                "The source aspect ratio cannot produce a usable preview.",
+            ));
+        }
+        let known_hdr = facts
+            .color_transfer
+            .as_deref()
+            .is_some_and(|transfer| matches!(transfer, "smpte2084" | "arib-std-b67"));
+        if (facts.mastering_display.is_some() || facts.content_light.is_some()) && !known_hdr {
+            return Err(invalid(
+                "This HDR source has no usable transfer information for a faithful preview.",
+            ));
+        }
+        if known_hdr && (facts.color_primaries.is_none() || facts.color_space.is_none()) {
+            return Err(invalid(
+                "This HDR source has incomplete color information for preview tone mapping.",
+            ));
+        }
+        streams.push(StreamPlan {
+            index: stream.index,
+            encoder: Some("libx264".into()),
+            expected_codec: "h264".into(),
+            width: Some(out_width),
+            height: Some(out_height),
+            sample_rate: None,
+            channels: None,
+            bit_depth: None,
+        });
+    }
+    if let Some(stream) = audio {
+        if !stream.decoder_available {
+            return Err(invalid(
+                "A decoder is required to prepare this audio preview.",
+            ));
+        }
+        let facts = stream
+            .audio
+            .as_ref()
+            .ok_or_else(|| invalid("The preview audio properties are unknown."))?;
+        let channels = facts
+            .channels
+            .ok_or_else(|| invalid("The preview channel layout is unknown."))?
+            .min(2);
+        if channels == 0 {
+            return Err(invalid("The preview channel layout is invalid."));
+        }
+        let rate = if facts.sample_rate == Some(44_100) {
+            44_100
+        } else {
+            48_000
+        };
+        streams.push(StreamPlan {
+            index: stream.index,
+            encoder: Some(if video.is_some() { "aac" } else { "pcm_s16le" }.into()),
+            expected_codec: if video.is_some() { "aac" } else { "pcm_s16le" }.into(),
+            width: None,
+            height: None,
+            sample_rate: Some(rate),
+            channels: Some(channels),
+            bit_depth: None,
+        });
+    }
+    if streams.is_empty() {
+        return Err(invalid(
+            "No playable media stream is available for preview.",
+        ));
+    }
+    let config = ConversionConfig {
+        operation: if video.is_some() {
+            Operation::VideoConverter
+        } else {
+            Operation::AudioConverter
+        },
+        format: if video.is_some() {
+            OutputFormat::Mp4
+        } else {
+            OutputFormat::Wav
+        },
+        video_codec: if video.is_some() {
+            VideoCodec::H264
+        } else {
+            VideoCodec::Automatic
+        },
+        audio_codec: if video.is_some() {
+            AudioCodec::Aac
+        } else {
+            AudioCodec::PcmS16le
+        },
+        video_size: VideoSize::Original,
+        frame_rate: if video.is_some() {
+            FrameRate::Fps30
+        } else {
+            FrameRate::Original
+        },
+        quality: 23,
+        audio_bitrate: Some(if video.is_some() { 128_000 } else { 192_000 }),
+        sample_rate: None,
+        channels: None,
+        file_name: "preview".into(),
+    };
+    Ok(Plan {
+        config,
+        streams,
+        preview_range: Some(PreviewRange {
+            start_us,
+            duration_us,
+        }),
+    })
 }
 
 fn codec_id(name: &str) -> Result<i32, EngineError> {
@@ -198,7 +410,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             };
             let transform = config.sample_rate.is_some()
                 || config.channels.is_some()
-                || config.audio_bitrate != 192_000;
+                || config.audio_bitrate.is_some();
             let compatible =
                 unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
             let encode = config.audio_codec != AudioCodec::Copy
@@ -268,6 +480,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
     Ok(Plan {
         config: config.clone(),
         streams,
+        preview_range: None,
     })
 }
 
@@ -321,6 +534,15 @@ pub(crate) fn verify_output(
             }
         }
     }
+    if let Some(range) = &plan.preview_range {
+        let actual = info
+            .duration_us
+            .ok_or_else(|| invalid("The preview has no verifiable duration."))?;
+        if actual <= 0 || actual > range.duration_us.saturating_add(250_000) {
+            return Err(invalid("The preview exceeds its bounded time range."));
+        }
+        return Ok(());
+    }
     if let Some(expected) = source.duration_us.filter(|value| *value > 0) {
         let actual = info.duration_us.ok_or_else(|| EngineError::InvalidMedia {
             detail: "The finalized output has no verifiable duration.".into(),
@@ -332,4 +554,91 @@ pub(crate) fn verify_output(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::{AudioInfo, StreamInfo};
+
+    fn audio_source() -> MediaInfo {
+        MediaInfo {
+            source_identity: "fixture-samples".into(),
+            byte_size: Some(960_000),
+            container: "wav".into(),
+            container_long_name: None,
+            duration_us: Some(60_000_000),
+            start_time_us: Some(10_000_000),
+            bit_rate: Some(128_000),
+            metadata: Vec::new(),
+            chapters: Vec::new(),
+            staged: false,
+            streams: vec![StreamInfo {
+                id: "fixture:0".into(),
+                index: 0,
+                container_id: 0,
+                kind: StreamKind::Audio,
+                codec_id: 0,
+                codec: "pcm_s16le".into(),
+                codec_long_name: None,
+                decoder_available: true,
+                time_base: Some(crate::Rational {
+                    numerator: 1,
+                    denominator: 8000,
+                }),
+                duration_us: Some(60_000_000),
+                start_time_us: Some(10_000_000),
+                frame_count: None,
+                bit_rate: Some(128_000),
+                disposition: 0,
+                profile: None,
+                level: None,
+                metadata: Vec::new(),
+                video: None,
+                subtitle: None,
+                audio: Some(AudioInfo {
+                    sample_rate: Some(8000),
+                    channels: Some(1),
+                    channel_layout: Some("mono".into()),
+                    sample_format: Some("s16".into()),
+                    bit_depth: Some(16),
+                    initial_padding: 0,
+                    trailing_padding: 0,
+                    seek_preroll: 0,
+                }),
+            }],
+        }
+    }
+
+    #[test]
+    fn preview_ranges_are_logical_bounded_and_do_not_change_source_facts() {
+        let source = audio_source();
+        let plan = preview_plan(&source, 25_000_000).unwrap();
+        let range = plan.preview_range.unwrap();
+        assert_eq!(range.start_us, 25_000_000);
+        assert_eq!(range.duration_us, 15_000_000);
+        assert_eq!(plan.config.format, OutputFormat::Wav);
+        assert_eq!(plan.streams[0].expected_codec, "pcm_s16le");
+        assert_eq!(common_origin(&source), Some(10_000_000));
+        assert_eq!(source.duration_us, Some(60_000_000));
+        assert_eq!(
+            preview_plan(&source, 59_000_000)
+                .unwrap()
+                .preview_range
+                .unwrap()
+                .duration_us,
+            1_000_000
+        );
+        assert!(preview_plan(&source, -1).is_err());
+        assert!(preview_plan(&source, 60_000_000).is_err());
+    }
+
+    #[test]
+    fn preview_rejects_overflow_and_tracks_outside_the_requested_range() {
+        let mut source = audio_source();
+        source.duration_us = None;
+        assert!(preview_plan(&source, i64::MAX).is_err());
+        source.streams[0].start_time_us = Some(30_000_000);
+        assert!(preview_plan(&source, 0).is_err());
+    }
 }

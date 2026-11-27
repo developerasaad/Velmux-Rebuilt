@@ -187,7 +187,7 @@ unsafe fn video_info(stream: &sys::AVStream, parameters: &sys::AVCodecParameters
     let pixel = sys::av_pix_fmt_desc_get(parameters.format);
     if bit_depth.is_none() && !pixel.is_null() {
         let components = (*pixel).nb_components.min(4) as usize;
-        bit_depth = (*pixel).comp[..components]
+        bit_depth = (&(*pixel).comp)[..components]
             .iter()
             .filter_map(|component| positive_i32(component.depth))
             .max();

@@ -1,4 +1,6 @@
+mod preview;
 mod store;
+pub use preview::PreviewResult;
 
 use crate::{
     configuration::{self, ConversionConfig, Operation},
@@ -123,6 +125,7 @@ pub(crate) struct Runtime {
     worker: Mutex<Option<JoinHandle<()>>>,
     submission: Mutex<()>,
     health: Mutex<Option<String>>,
+    previews: Mutex<HashMap<String, preview::PreviewWork>>,
 }
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -182,6 +185,7 @@ impl Runtime {
             worker: Mutex::new(None),
             submission: Mutex::new(()),
             health: Mutex::new(None),
+            previews: Mutex::new(HashMap::new()),
         });
         runtime.restore()?;
         let owned = runtime.clone();
@@ -193,6 +197,11 @@ impl Runtime {
         Ok(runtime)
     }
     pub fn shutdown(&self) {
+        if let Ok(previews) = self.previews.lock() {
+            for preview in previews.values() {
+                preview.cancel();
+            }
+        }
         if let Ok(mut control) = self.control.lock() {
             control.stop = true;
             if let Some((_, token)) = &control.active {
@@ -297,6 +306,7 @@ impl Runtime {
         if let Ok(mut assets) = self.assets.lock() {
             assets.remove(id);
         }
+        self.release_preview(id);
     }
     fn asset(&self, id: &str) -> Result<InspectedSource, EngineError> {
         self.assets
@@ -420,6 +430,12 @@ impl Runtime {
         Ok(())
     }
     pub fn restart(&self, id: &str) -> Result<(), EngineError> {
+        self.requeue(id, false)
+    }
+    pub fn retry_publication(&self, id: &str) -> Result<(), EngineError> {
+        self.requeue(id, true)
+    }
+    fn requeue(&self, id: &str, reuse_verified: bool) -> Result<(), EngineError> {
         let control = self.control.lock().map_err(internal)?;
         let mut record = self.store.get(id)?;
         if !matches!(record.state, JobState::Interrupted | JobState::Failed) {
@@ -436,10 +452,24 @@ impl Runtime {
                 "Wait for the worker to stop before restarting.",
             ));
         }
-        if !record.verified {
+        if record.verified && self.reconcile_publication(&mut record)? {
+            self.store.update(&record)?;
+            drop(control);
+            self.notify();
+            return Ok(());
+        }
+        if reuse_verified && !record.verified {
+            return Err(configuration::invalid(
+                "This job has no verified output to save. Restart processing instead.",
+            ));
+        }
+        if !reuse_verified {
             self.cleanup(&record);
             record.reservation = None;
             record.processed_us = 0;
+            record.verified = false;
+            record.verified_size = None;
+            record.verified_hash = None;
         }
         record.state = JobState::Queued;
         record.error = None;
@@ -489,9 +519,57 @@ impl Runtime {
             }
         }
         let directory = self.root.join("jobs").join(&record.id);
-        if uuid::Uuid::parse_str(&record.id).is_ok() {
+        if uuid::Uuid::parse_str(&record.id).is_ok()
+            && fs::read_to_string(directory.join(".velmux-job"))
+                .ok()
+                .as_deref()
+                == Some(&record.id)
+        {
             let _ = fs::remove_dir_all(directory);
         }
+    }
+    fn prepare_workdir(&self, record: &JobRecord) -> Result<(), EngineError> {
+        let parent = self.root.join("jobs");
+        fs::create_dir_all(&parent).map_err(storage)?;
+        if parent
+            .symlink_metadata()
+            .map_err(storage)?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(storage(
+                "The working directory is not owned private storage.",
+            ));
+        }
+        let directory = parent.join(&record.id);
+        match fs::create_dir(&directory) {
+            Ok(()) => {
+                use std::io::Write;
+                let mut marker = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(directory.join(".velmux-job"))
+                    .map_err(storage)?;
+                marker.write_all(record.id.as_bytes()).map_err(storage)?;
+                marker.sync_all().map_err(storage)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if directory
+                    .symlink_metadata()
+                    .map_err(storage)?
+                    .file_type()
+                    .is_symlink()
+                    || fs::read_to_string(directory.join(".velmux-job"))
+                        .ok()
+                        .as_deref()
+                        != Some(&record.id)
+                {
+                    return Err(storage("An unidentified directory occupies this job's working location. Its contents have been preserved."));
+                }
+            }
+            Err(error) => return Err(storage(error)),
+        }
+        Ok(())
     }
     fn restore(&self) -> Result<(), EngineError> {
         for mut record in self.store.list()? {
@@ -655,6 +733,7 @@ impl Runtime {
             processing::verify_output(&output, &request.source.info, &request.plan)?;
         }
         if !record.verified {
+            self.prepare_workdir(&record)?;
             let opened = self.provider.open_source(request.source.locator.clone())?;
             let input = Input::open(opened, self.provider.clone(), token.clone())?;
             if input.source_identity()? != request.source.info.source_identity {
@@ -662,7 +741,6 @@ impl Runtime {
                     detail: "The original source changed. Re-select it before processing.".into(),
                 });
             }
-            fs::create_dir_all(path.parent().unwrap()).map_err(storage)?;
             record.state = JobState::Processing;
             self.update(&record)?;
             let mut reported = Instant::now()

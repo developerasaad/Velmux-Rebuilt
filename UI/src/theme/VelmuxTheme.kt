@@ -29,9 +29,9 @@ private val DarkPalette = darkColorScheme(
 )
 
 @Composable
-fun VelmuxTheme(content: @Composable () -> Unit) {
+fun VelmuxTheme(appearance: String = "system", content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkPalette else LightPalette,
+        colorScheme = if (appearance == "dark" || (appearance == "system" && isSystemInDarkTheme())) DarkPalette else LightPalette,
         content = content,
     )
 }
