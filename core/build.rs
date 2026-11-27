@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=VELMUX_FFMPEG_PREFIX");
@@ -45,6 +45,40 @@ fn main() {
         .layout_tests(false)
         .generate_comments(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+    if target.ends_with("linux-android") {
+        let ndk = env::var_os("ANDROID_NDK_ROOT")
+            .or_else(|| env::var_os("ANDROID_NDK_HOME"))
+            .map(PathBuf::from)
+            .expect("Android builds require the pinned NDK");
+        let toolchains = ndk.join("toolchains/llvm/prebuilt");
+        let sysroot = std::fs::read_dir(toolchains)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("sysroot"))
+            .find(|path| path.is_dir())
+            .expect("NDK sysroot");
+        let runtime = sysroot.join("usr/lib").join(&target);
+        println!("cargo:rustc-link-search=native={}", runtime.display());
+        println!("cargo:rustc-link-lib=dylib=c++_shared");
+        builder = builder
+            .clang_arg(format!("--sysroot={}", sysroot.display()))
+            .clang_arg(format!("--target={target}29"));
+    } else if target == "aarch64-apple-ios" || target == "aarch64-apple-ios-sim" {
+        let (sdk, clang_target) = if target.ends_with("-sim") {
+            ("iphonesimulator", "arm64-apple-ios15.0-simulator")
+        } else {
+            ("iphoneos", "arm64-apple-ios15.0")
+        };
+        let output = Command::new("xcrun")
+            .args(["--sdk", sdk, "--show-sdk-path"])
+            .output()
+            .expect("xcrun must locate the target SDK");
+        assert!(output.status.success(), "target SDK resolution failed");
+        let sdk_path = String::from_utf8(output.stdout).unwrap();
+        builder = builder
+            .clang_arg(format!("--sysroot={}", sdk_path.trim()))
+            .clang_arg(format!("--target={clang_target}"));
+    }
     for include in includes {
         builder = builder.clang_arg(format!("-I{}", include.display()));
     }

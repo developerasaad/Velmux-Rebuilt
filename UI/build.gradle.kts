@@ -1,3 +1,4 @@
+import gobley.gradle.cargo.dsl.*
 import gobley.gradle.Variant
 import gobley.gradle.rust.targets.RustAndroidTarget
 import gobley.gradle.rust.targets.RustAppleMobileTarget
@@ -44,7 +45,14 @@ kotlin {
             kotlin.setSrcDirs(listOf("tests"))
             dependencies { implementation(kotlin("test")) }
         }
-        androidMain { kotlin.setSrcDirs(listOf("integration/android")) }
+        androidMain {
+            kotlin.setSrcDirs(listOf("integration/android"))
+            dependencies {
+                implementation("net.java.dev.jna:jna:5.18.1@aar") {
+                    version { strictly("5.18.1") }
+                }
+            }
+        }
         iosMain { kotlin.setSrcDirs(listOf("integration/ios")) }
     }
 }
@@ -70,7 +78,29 @@ compose.resources {
     )
 }
 
-cargo { packageDirectory = layout.projectDirectory.dir("../core") }
+cargo {
+    packageDirectory = layout.projectDirectory.dir("../core")
+    builds.android {
+        dynamicLibraries.addAll("c++_shared")
+        variants {
+            buildTaskProvider.configure {
+                additionalEnvironment.put(
+                    "RUSTFLAGS",
+                    providers.environmentVariable("RUSTFLAGS").orElse("").map {
+                        "$it -C link-args=-Wl,-z,max-page-size=16384".trim()
+                    },
+                )
+            }
+        }
+    }
+    builds.appleMobile {
+        variants {
+            buildTaskProvider.configure {
+                additionalEnvironment.put("IPHONEOS_DEPLOYMENT_TARGET", "15.0")
+            }
+        }
+    }
+}
 uniffi {
     generateFromLibrary {
         namespace = "velmux_core"

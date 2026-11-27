@@ -8,7 +8,6 @@ case "${1:-}" in
     ;;
   android)
     bash scripts/ffmpeg/build-android.sh arm64-v8a x86_64
-    bash scripts/ci/stage-android-runtime.sh
     ./gradlew -PbindingsTarget=android :android:assembleRelease
     python3 scripts/ci/verify-apk.py platforms/android/build/outputs/apk/release/android-release-unsigned.apk
     ;;

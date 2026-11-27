@@ -22,7 +22,6 @@ android {
             manifest.srcFile("AndroidManifest.xml")
             java.setSrcDirs(listOf("src"))
             res.setSrcDirs(listOf("resources"))
-            jniLibs.setSrcDirs(listOf(layout.buildDirectory.dir("generated/jniLibs")))
         }
         getByName("androidTest") { java.setSrcDirs(listOf("tests")) }
     }

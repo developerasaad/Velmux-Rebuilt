@@ -5,7 +5,6 @@ case "${1:-}" in
   host) bash scripts/ci/verify-host.sh ;;
   android)
     bash scripts/ffmpeg/build-android.sh arm64-v8a x86_64
-    bash scripts/ci/stage-android-runtime.sh
     ./gradlew -PbindingsTarget=android :android:connectedDebugAndroidTest
     ;;
   ios-simulator)
