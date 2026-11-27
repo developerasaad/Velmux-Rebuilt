@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: native-dependencies-${{ github.ref }}
+  group: native-dependencies-${{ github.ref }}-${{ inputs.platform || 'all' }}
   cancel-in-progress: false
 jobs:
   native:

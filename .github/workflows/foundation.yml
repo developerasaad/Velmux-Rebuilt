@@ -1,0 +1,124 @@
+name: Foundation integration
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Integration target
+        type: choice
+        options: [all, host, android, ios]
+        default: all
+permissions:
+  contents: read
+concurrency:
+  group: foundation-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: false
+jobs:
+  host:
+    if: inputs.platform == 'all' || inputs.platform == 'host'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: bash scripts/ci/setup-native.sh
+      - id: identity
+        run: bash scripts/ci/native-key.sh host
+      - uses: actions/cache@v4
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-host-host-${{ steps.identity.outputs.key }}
+      - name: Verify Rust and linked libraries
+        run: bash scripts/test.sh host
+  android:
+    if: inputs.platform == 'all' || inputs.platform == 'android'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy --target aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: gradle/actions/setup-gradle@v4
+      - run: bash scripts/ci/setup-native.sh
+      - id: arm64
+        run: bash scripts/ci/native-key.sh android arm64-v8a
+      - uses: actions/cache/restore@v4
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-android-arm64-v8a-${{ steps.arm64.outputs.key }}
+      - id: x64
+        run: bash scripts/ci/native-key.sh android x86_64
+      - uses: actions/cache/restore@v4
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-android-x86_64-${{ steps.x64.outputs.key }}
+      - name: Release build and APK closure
+        run: bash scripts/build.sh android
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: API 29 integration
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash scripts/test.sh android
+      - name: API 35 integration
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash scripts/test.sh android
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-foundation-evidence
+          path: platforms/android/build/reports
+          retention-days: 7
+  ios:
+    if: inputs.platform == 'all' || inputs.platform == 'ios'
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy --target aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - uses: gradle/actions/setup-gradle@v4
+      - run: bash scripts/ci/setup-native.sh
+      - id: identity
+        run: bash scripts/ci/native-key.sh ios
+      - uses: actions/cache@v4
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-ios-arm64-${{ steps.identity.outputs.key }}
+      - name: Device-target build
+        run: bash scripts/build.sh ios-device
+      - name: Simulator runtime integration
+        run: bash scripts/test.sh ios-simulator
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-foundation-evidence
+          path: build/ios-tests.xcresult
+          retention-days: 7
