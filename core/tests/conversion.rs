@@ -664,6 +664,12 @@ fn real_inspection_and_invalid_direct_core_requests() {
         90.0
     );
     let tracks = harness.inspect("multi-track.mkv", Operation::VideoConverter);
+    let tracks_default = harness.defaults(&tracks, Operation::VideoConverter);
+    assert_eq!(tracks_default.format, OutputFormat::Matroska);
+    harness
+        .engine()
+        .validate_configuration(tracks.id.clone(), tracks_default)
+        .unwrap();
     assert_eq!(
         tracks
             .info
@@ -701,6 +707,11 @@ fn real_inspection_and_invalid_direct_core_requests() {
     assert_eq!(video.bit_depth, Some(10));
     assert_eq!(video.color_transfer.as_deref(), Some("smpte2084"));
     let mut config = harness.defaults(&hdr, Operation::VideoConverter);
+    assert_eq!(config.format, OutputFormat::Matroska);
+    harness
+        .engine()
+        .validate_configuration(hdr.id.clone(), config.clone())
+        .unwrap();
     config.video_codec = VideoCodec::H264;
     assert!(matches!(
         harness
@@ -945,6 +956,239 @@ fn sqlite_restore_distinguishes_interruption_manual_pause_and_cancellation() {
     assert!(harness.work(&records[0]).exists());
     assert!(harness.work(&records[1]).exists());
     assert!(!harness.work(&records[2]).exists());
+}
+
+#[test]
+fn real_process_kill_restores_interrupted_and_queued_jobs() {
+    const TEST_NAME: &str = "real_process_kill_restores_interrupted_and_queued_jobs";
+    const CHILD_ENV: &str = "VELMUX_DURABILITY_CHILD";
+    const ROOT_NAME: &str = "process-kill-durability";
+
+    if std::env::var_os(CHILD_ENV).as_deref() == Some(std::ffi::OsStr::new("1")) {
+        let harness = Harness::new(ROOT_NAME);
+        let source = harness.inspect("stereo.flac", Operation::AudioConverter);
+        let mut retained_config = harness.defaults(&source, Operation::AudioConverter);
+        retained_config.format = OutputFormat::Wav;
+        retained_config.audio_codec = AudioCodec::PcmS16le;
+        retained_config.file_name = "published_before_process_kill".into();
+        let retained = harness.complete(&harness.submit(&source, retained_config).id);
+        let retained_hash = digest(Path::new(&retained.output.as_ref().unwrap().locator));
+
+        let mut first_config = harness.defaults(&source, Operation::AudioConverter);
+        first_config.audio_codec = AudioCodec::Aac;
+        first_config.sample_rate = Some(44_100);
+        first_config.channels = Some(1);
+        first_config.file_name = "accepted_before_process_kill".into();
+        let mut second_config = harness.defaults(&source, Operation::AudioConverter);
+        second_config.format = OutputFormat::Mp3;
+        second_config.audio_codec = AudioCodec::Mp3;
+        second_config.file_name = "queued_before_process_kill".into();
+        let first_key = uuid::Uuid::new_v4().to_string();
+        let second_key = uuid::Uuid::new_v4().to_string();
+        harness.provider.block_source.store(true, Ordering::SeqCst);
+        let first = harness
+            .engine()
+            .submit_conversion(
+                source.id.clone(),
+                first_key.clone(),
+                first_config.clone(),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        harness.provider.source_gate.wait_entered();
+        assert_eq!(harness.record(&first.id).state, JobState::Preparing);
+        let second = harness
+            .engine()
+            .submit_conversion(
+                source.id,
+                second_key.clone(),
+                second_config.clone(),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(harness.record(&second.id).state, JobState::Queued);
+        let phase = json!({
+            "first": first, "second": second, "retained": retained,
+            "first_key": first_key, "second_key": second_key,
+            "first_config": first_config, "second_config": second_config,
+            "source_hash": digest(&fixture("stereo.flac")), "retained_hash": retained_hash,
+        });
+        // Keep accepted configuration independent of subsequent workspace edits.
+        first_config.file_name = "unaccepted_later_edit".into();
+        second_config.channels = Some(1);
+        assert_ne!(
+            serde_json::to_value(first_config).unwrap(),
+            phase["first_config"]
+        );
+        assert_ne!(
+            serde_json::to_value(second_config).unwrap(),
+            phase["second_config"]
+        );
+        // The parent's phase observation means both requests were durably accepted,
+        // later edits occurred, and the worker holds an open source FD in its callback.
+        let temporary = harness.root.join("phase.tmp");
+        let mut file = File::create(&temporary).unwrap();
+        file.write_all(&serde_json::to_vec(&phase).unwrap())
+            .unwrap();
+        file.sync_all().unwrap();
+        fs::rename(temporary, harness.root.join("phase.json")).unwrap();
+        loop {
+            thread::park_timeout(Duration::from_secs(1));
+        }
+    }
+
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let root = repository().join("build/media-test-output").join(ROOT_NAME);
+    if root.exists() {
+        fs::remove_dir_all(&root).unwrap();
+    }
+    let mut child = KillOnDrop(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let phase_path = root.join("phase.json");
+    while !phase_path.exists() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "Durability child exited before accepting both jobs"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "Durability child did not reach its native Preparing gate"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let phase: Value = serde_json::from_slice(&fs::read(phase_path).unwrap()).unwrap();
+    child.0.kill().unwrap();
+    let killed = child.0.wait().unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        killed.signal(),
+        Some(9),
+        "Expected a real SIGKILL: {killed:?}"
+    );
+    let first: JobRecord = serde_json::from_value(phase["first"].clone()).unwrap();
+    let second: JobRecord = serde_json::from_value(phase["second"].clone()).unwrap();
+    let retained: JobRecord = serde_json::from_value(phase["retained"].clone()).unwrap();
+    let first_config: ConversionConfig =
+        serde_json::from_value(phase["first_config"].clone()).unwrap();
+    let second_config: ConversionConfig =
+        serde_json::from_value(phase["second_config"].clone()).unwrap();
+    let first_key = phase["first_key"].as_str().unwrap();
+    let second_key = phase["second_key"].as_str().unwrap();
+    let database = root.join("operational/operations.sqlite3");
+    let accepted_request = |id: &str| -> (String, Value, String) {
+        let (key, request, state): (String, String, String) = Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT submission_key,request,state FROM jobs WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        (key, serde_json::from_str(&request).unwrap(), state)
+    };
+    let first_saved = accepted_request(&first.id);
+    let second_saved = accepted_request(&second.id);
+    assert_eq!(first_saved.2, "preparing");
+    assert_eq!(second_saved.2, "queued");
+    assert_eq!(first_saved.0, first_key);
+    assert_eq!(second_saved.0, second_key);
+    assert_eq!(first_saved.1["plan"]["config"], phase["first_config"]);
+    assert_eq!(second_saved.1["plan"]["config"], phase["second_config"]);
+
+    // Reopen existing SQLite and files, deliberately bypassing Harness::new cleanup.
+    let provider = ProviderState::new(root.clone());
+    let mut harness = Harness {
+        root,
+        engine: None,
+        provider,
+    };
+    harness.reopen();
+    let interrupted = harness.record(&first.id);
+    assert_eq!(interrupted.state, JobState::Interrupted);
+    assert_eq!(interrupted.error_category.as_deref(), Some("interrupted"));
+    assert!(interrupted.output.is_none());
+    let queued_result = harness.complete(&second.id);
+    assert_eq!(
+        harness.record(&first.id).state,
+        JobState::Interrupted,
+        "Interrupted work resumed without an explicit restart"
+    );
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.engine().jobs().unwrap().len(), 3);
+    assert_eq!(queued_result.file_name, "queued_before_process_kill.mp3");
+    let source = harness.inspect("stereo.flac", Operation::AudioConverter);
+    for (record, key, config) in [
+        (&first, first_key, &first_config),
+        (&second, second_key, &second_config),
+    ] {
+        let duplicate = harness
+            .engine()
+            .submit_conversion(
+                source.id.clone(),
+                key.into(),
+                config.clone(),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(duplicate.id, record.id);
+    }
+    let mut edited = first_config.clone();
+    edited.file_name = "conflicting_after_process_kill".into();
+    assert!(matches!(
+        harness.engine().submit_conversion(
+            source.id,
+            first_key.into(),
+            edited,
+            CancellationToken::new()
+        ),
+        Err(EngineError::Configuration { .. })
+    ));
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 1);
+    harness.engine().restart_job(first.id.clone()).unwrap();
+    let restarted = harness.complete(&first.id);
+    assert_eq!(restarted.file_name, "accepted_before_process_kill.m4a");
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(accepted_request(&first.id).1, first_saved.1);
+    assert_eq!(accepted_request(&second.id).1, second_saved.1);
+    assert_eq!(
+        digest(&fixture("stereo.flac")),
+        phase["source_hash"].as_str().unwrap()
+    );
+    let retained_path = Path::new(&retained.output.as_ref().unwrap().locator);
+    assert_eq!(
+        digest(retained_path),
+        phase["retained_hash"].as_str().unwrap()
+    );
+    harness.engine().dismiss_job(retained.id.clone()).unwrap();
+    harness.engine().clear_cache().unwrap();
+    harness.close();
+    harness.reopen();
+    assert_eq!(harness.record(&first.id).state, JobState::Completed);
+    assert_eq!(harness.record(&second.id).state, JobState::Completed);
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        digest(retained_path),
+        phase["retained_hash"].as_str().unwrap()
+    );
+    harness.expect(vec![
+        expectation(&retained, "pcm_s16le", 2, 48_000),
+        expectation(&queued_result, "mp3", 2, 48_000),
+        expectation(&restarted, "aac", 1, 44_100),
+    ]);
 }
 
 struct SourceMutation {

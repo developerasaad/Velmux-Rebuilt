@@ -146,6 +146,9 @@ private fun WorkspacePreview(media: MediaSession, source: SourceSnapshot, video:
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if(!fallback) MediaPreview(source.locator, Modifier.fillMaxWidth().height(if(video) 220.dp else 120.dp)) { fallback = true }
         else {
+            if(source.info.streams.any { it.video?.colorTransfer in setOf("smpte2084", "arib-std-b67") }) {
+                Text("SDR compatibility preview. Output uses the accepted color settings.", style = MaterialTheme.typography.bodySmall)
+            }
             if(loading) { CircularProgressIndicator(Modifier.size(24.dp)); Text("Preparing a playable preview…") }
             result?.let { clip ->
                 Text("Preview · ${duration(clip.startUs)}–${duration(clip.startUs + clip.durationUs)}", style = MaterialTheme.typography.labelLarge)

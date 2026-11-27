@@ -293,6 +293,9 @@ impl Runtime {
         let opened = self.provider.open_source(locator.clone())?;
         let info = media::inspect(opened, self.provider.clone(), token)?;
         processing::validate_operation(&info, operation)?;
+        if configuration::source_catalog(&info, operation).is_empty() {
+            return Err(EngineError::UnsupportedMedia{detail:"None of the currently available converter formats can preserve this source's streams and chapters. The original is unchanged.".into()});
+        }
         let source = InspectedSource {
             id: uuid::Uuid::new_v4().to_string(),
             locator,

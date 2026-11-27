@@ -203,7 +203,7 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
 
 pub(crate) fn default_config(
     operation: Operation,
-    _source: &MediaInfo,
+    source: &MediaInfo,
     name: &str,
 ) -> ConversionConfig {
     let stem = std::path::Path::new(name)
@@ -223,13 +223,20 @@ pub(crate) fn default_config(
         clean.push(c);
     }
     let stem = clean.trim().trim_matches('.');
+    let preferred = if operation == Operation::VideoConverter {
+        OutputFormat::Mp4
+    } else {
+        OutputFormat::M4a
+    };
+    let available = source_catalog(source, operation);
+    let format = available
+        .iter()
+        .find(|option| option.format == preferred)
+        .or_else(|| available.first())
+        .map_or(preferred, |option| option.format);
     ConversionConfig {
         operation,
-        format: if operation == Operation::VideoConverter {
-            OutputFormat::Mp4
-        } else {
-            OutputFormat::M4a
-        },
+        format,
         video_codec: VideoCodec::Automatic,
         audio_codec: AudioCodec::Automatic,
         video_size: VideoSize::Original,
@@ -301,6 +308,9 @@ pub(crate) fn source_catalog(info: &MediaInfo, operation: Operation) -> Vec<Form
     catalog(operation)
         .into_iter()
         .filter_map(|mut option| {
+            if !info.chapters.is_empty() && option.format != OutputFormat::Matroska {
+                return None;
+            }
             let name = std::ffi::CString::new(option.format.muxer()).unwrap();
             let muxer =
                 unsafe { sys::av_guess_format(name.as_ptr(), std::ptr::null(), std::ptr::null()) };

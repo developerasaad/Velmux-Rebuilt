@@ -283,6 +283,11 @@ pub(crate) fn validate_operation(
 pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, EngineError> {
     validate_fields(config)?;
     validate_operation(info, config.operation)?;
+    if !info.chapters.is_empty() && config.format != OutputFormat::Matroska {
+        return Err(invalid(
+            "Choose Matroska to preserve this source's chapters with the current converter route.",
+        ));
+    }
     if !info
         .streams
         .iter()
