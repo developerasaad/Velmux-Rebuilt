@@ -171,11 +171,27 @@ final class PickerFlowUITests: XCTestCase {
         let card = app.descendants(matching: .any).matching(identifier: "job-" + fileName).firstMatch
         try waitFor("The accepted request did not appear in Jobs", timeout: 45) { card.exists }
         try waitFor("The actual picker conversion did not complete: \(fileName)", timeout: 120) {
-            card.descendants(matching: .any).matching(NSPredicate(format: "label == 'Completed'")).firstMatch.exists
+            self.elementWithin(card: card, label: "Completed", type: .staticText) != nil
         }
-        XCTAssertTrue(card.descendants(matching: .any).matching(NSPredicate(format: "label == 'Open'")).firstMatch.exists)
-        XCTAssertTrue(card.descendants(matching: .any).matching(NSPredicate(format: "label == 'Share'")).firstMatch.exists)
-        XCTAssertFalse(card.descendants(matching: .any).matching(NSPredicate(format: "label == 'Failed'")).firstMatch.exists)
+        XCTAssertNotNil(elementWithin(card: card, label: fileName, type: .any), "The card must identify this exact request")
+        XCTAssertNotNil(elementWithin(card: card, label: "Open", type: .button), "This completed result must have its own reachable Open action")
+        XCTAssertNotNil(elementWithin(card: card, label: "Share", type: .button), "This completed result must have its own reachable Share action")
+        XCTAssertNil(elementWithin(card: card, label: "Failed", type: .staticText))
+    }
+
+    private func elementWithin(card: XCUIElement, label: String, type: XCUIElement.ElementType) -> XCUIElement? {
+        // Compose's iOS LazyColumn flattens the tagged card, status and actions
+        // into accessibility siblings. Its unique tag still exposes the actual
+        // card bounds; require the exact label and positive, reachable geometry
+        // inside those bounds rather than accepting another job's completion.
+        guard card.exists else { return nil }
+        let bounds = card.frame
+        return app.descendants(matching: type).matching(NSPredicate(format: "label == %@", label))
+            .allElementsBoundByIndex.first { candidate in
+                let frame = candidate.frame
+                return frame.width > 0 && frame.height > 0 && bounds.contains(frame)
+                    && candidate.isHittable && candidate.isEnabled
+            }
     }
 
     private func verifySettingsPersistenceAndRestore() throws {
