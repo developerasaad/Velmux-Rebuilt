@@ -45,3 +45,10 @@ Dependency construction and target capability verification; Android/iOS linking,
 ## Next authorized action
 
 Continue Milestone 1 integration and verification. Do not begin Milestone 2.
+
+## Current integration defects
+
+- Current native construction [45927805349](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45927805349), `ef805cc`: host, both Android ABIs and both Apple slices passed.
+- Android [45928769529](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45928769529), `c9aab29`: generated bindings, release build and ELF/APK alignment/closure checks passed; API 29 instrumentation crashed before tests. Added in-emulator logcat capture; runtime is not verified.
+- Host Rust linkage exposed SVT's default slim GCC LTO objects. Switching back to GCC's linker did not fix Rust archive bundling. The host recipe now explicitly disables SVT LTO; the unsuccessful linker override was removed. Only host artifacts are invalidated.
+- Apple integration [45929262928](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45929262928), `c9aab29`: running device host build.

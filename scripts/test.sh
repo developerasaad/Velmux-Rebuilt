@@ -5,6 +5,9 @@ bash scripts/check-build-environment.sh "${1:-}"
 case "${1:-}" in
   host) bash scripts/ci/verify-host.sh ;;
   android)
+    mkdir -p build
+    trap 'result=$?; adb logcat -d -v threadtime > build/android-logcat.txt 2>&1 || true; if [ "$result" -ne 0 ]; then tail -n 250 build/android-logcat.txt; fi; exit "$result"' EXIT
+    adb logcat -c
     bash scripts/ffmpeg/build-android.sh arm64-v8a x86_64
     ./gradlew -PbindingsTarget=android :android:connectedDebugAndroidTest
     ;;

@@ -1,4 +1,0 @@
-[target.x86_64-unknown-linux-gnu]
-# The pinned host SVT-AV1 archive contains GCC IPO objects. Use the system
-# GCC linker/plugin rather than Rust's default LLVM linker for host verification.
-rustflags = ["-C", "linker-features=-lld", "-C", "link-self-contained=-linker"]

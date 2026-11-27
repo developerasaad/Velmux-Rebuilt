@@ -217,7 +217,7 @@ if [ ! -f "$HOST_PREFIX/lib/libSvtAv1Enc.a" ]; then
   # removal of <3.5 policy compatibility; this is the official escape hatch.
   cmake -G Ninja -S "$svt_src" -B "$svt_build" \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOST_PREFIX" \
-    -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF \
+    -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DSVT_AV1_LTO=OFF \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 >/dev/null
   cmake --build "$svt_build" >/dev/null
   cmake --install "$svt_build" >/dev/null

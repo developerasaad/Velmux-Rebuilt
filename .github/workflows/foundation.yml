@@ -23,6 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+          cache-on-failure: true
       - run: bash scripts/ci/setup-native.sh
       - id: identity
         run: bash scripts/ci/native-key.sh host
@@ -54,6 +55,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+          cache-on-failure: true
       - uses: gradle/actions/setup-gradle@v4
       - run: bash scripts/ci/setup-native.sh
       - id: arm64
@@ -109,7 +111,10 @@ jobs:
         if: always()
         with:
           name: android-foundation-evidence
-          path: platforms/android/build/reports
+          path: |
+            platforms/android/build/reports
+            platforms/android/build/outputs/androidTest-results
+            build/android-logcat.txt
           retention-days: 7
   ios:
     if: inputs.platform == 'all' || inputs.platform == 'ios'
@@ -126,6 +131,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+          cache-on-failure: true
       - uses: gradle/actions/setup-gradle@v4
       - run: bash scripts/ci/setup-native.sh
       - id: identity
