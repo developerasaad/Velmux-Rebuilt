@@ -1,4 +1,73 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{
+    collections::BTreeMap,
+    env,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+fn managed_archive(path: &Path, prefix: &Path) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    if !canonical.starts_with(prefix) {
+        return false;
+    }
+    let mut magic = [0; 8];
+    File::open(&canonical)
+        .unwrap()
+        .read_exact(&mut magic)
+        .unwrap();
+    assert_eq!(
+        &magic,
+        b"!<arch>\n",
+        "expected a complete native archive: {}",
+        canonical.display()
+    );
+    println!("cargo:rerun-if-changed={}", canonical.display());
+    true
+}
+
+fn emit_library(name: &str, prefix: &Path, android: bool, cpp_emitted: &mut bool) {
+    assert!(
+        !name.starts_with(':'),
+        "unexpected verbatim system library: {name}"
+    );
+    if android && ["c++", "stdc++", "c++abi", "c++_static", "c++_shared"].contains(&name) {
+        if !*cpp_emitted {
+            println!("cargo:rustc-link-lib=dylib=c++_shared");
+            *cpp_emitted = true;
+        }
+        return;
+    }
+    let system = [
+        "c", "m", "dl", "pthread", "rt", "util", "resolv", "log", "android", "mediandk", "System",
+        "c++", "stdc++", "gcc", "gcc_s", "atomic", "unwind",
+    ]
+    .contains(&name);
+    // pkg-config's cross-system path heuristics can classify NDK libc.a as
+    // vendored. Bundling it duplicates Bionic globals and crashes in constructors.
+    let bundled =
+        !system && managed_archive(&prefix.join("lib").join(format!("lib{name}.a")), prefix);
+    if [
+        "avfilter",
+        "avformat",
+        "avcodec",
+        "swscale",
+        "swresample",
+        "avutil",
+    ]
+    .contains(&name)
+    {
+        assert!(
+            bundled,
+            "required FFmpeg archive missing from managed prefix: {name}"
+        );
+    }
+    let kind = if bundled { "static" } else { "dylib" };
+    println!("cargo:rustc-link-lib={kind}={name}");
+}
 
 fn main() {
     println!("cargo:rerun-if-env-changed=VELMUX_FFMPEG_PREFIX");
@@ -23,7 +92,14 @@ fn main() {
     env::set_var("PKG_CONFIG_LIBDIR", prefix.join("lib/pkgconfig"));
     env::set_var("PKG_CONFIG_PATH", prefix.join("lib/pkgconfig"));
     env::set_var("PKG_CONFIG_ALLOW_CROSS", "1");
+    println!(
+        "cargo:rerun-if-changed={}",
+        prefix.join("BUILD-IDENTITY").display()
+    );
     let mut includes = Vec::new();
+    let mut defines = BTreeMap::new();
+    let android = target.ends_with("linux-android");
+    let mut cpp_emitted = false;
     for name in [
         "libavfilter",
         "libavformat",
@@ -34,9 +110,53 @@ fn main() {
     ] {
         let library = pkg_config::Config::new()
             .statik(true)
+            .cargo_metadata(false)
             .probe(name)
             .unwrap_or_else(|error| panic!("{name} in {}: {error}", prefix.display()));
+        for directory in &library.link_paths {
+            println!("cargo:rustc-link-search=native={}", directory.display());
+        }
+        for name in &library.libs {
+            emit_library(name, &prefix, android, &mut cpp_emitted);
+        }
+        for file in &library.link_files {
+            assert!(
+                managed_archive(file, &prefix),
+                "unexpected external native archive: {}",
+                file.display()
+            );
+            println!(
+                "cargo:rustc-link-search=native={}",
+                file.parent().unwrap().display()
+            );
+            println!(
+                "cargo:rustc-link-lib=static:+verbatim={}",
+                file.file_name().unwrap().to_str().unwrap()
+            );
+        }
+        for directory in &library.framework_paths {
+            println!("cargo:rustc-link-search=framework={}", directory.display());
+        }
+        for framework in &library.frameworks {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        for arguments in &library.ld_args {
+            assert!(
+                !arguments
+                    .iter()
+                    .any(|argument| ["-Bstatic", "--whole-archive", "--push-state"]
+                        .contains(&argument.as_str())),
+                "unexpected archive policy in {arguments:?}"
+            );
+            if !arguments.is_empty() {
+                println!("cargo:rustc-link-arg=-Wl,{}", arguments.join(","));
+            }
+        }
         includes.extend(library.include_paths);
+        defines.extend(library.defines);
+    }
+    if android && !cpp_emitted {
+        println!("cargo:rustc-link-lib=dylib=c++_shared");
     }
     let mut builder = bindgen::Builder::default()
         .header("src/ffmpeg/wrapper.h")
@@ -60,7 +180,6 @@ fn main() {
             .expect("NDK sysroot");
         let runtime = sysroot.join("usr/lib").join(&target);
         println!("cargo:rustc-link-search=native={}", runtime.display());
-        println!("cargo:rustc-link-lib=dylib=c++_shared");
         builder = builder
             .clang_arg(format!("--sysroot={}", sysroot.display()))
             .clang_arg(format!("--target={target}29"));
@@ -79,6 +198,12 @@ fn main() {
         builder = builder
             .clang_arg(format!("--sysroot={}", sdk_path.trim()))
             .clang_arg(format!("--target={clang_target}"));
+    }
+    for (name, value) in defines {
+        builder = builder.clang_arg(match value {
+            Some(value) => format!("-D{name}={value}"),
+            None => format!("-D{name}"),
+        });
     }
     for include in includes {
         builder = builder.clang_arg(format!("-I{}", include.display()));

@@ -154,7 +154,7 @@ jobs:
         id: konan
         with:
           path: ~/.konan
-          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/**', 'core/**', 'platforms/ios/**') }}
+          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/src/**', 'UI/integration/**', 'UI/build.gradle.kts', 'core/src/**', 'core/Cargo.*', 'core/build.rs', 'platforms/ios/src/**', 'platforms/ios/tests/**', 'platforms/ios/Velmux.xcodeproj/project.pbxproj', 'build.gradle.kts') }}
           restore-keys: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-
       - name: Device-target build
         run: bash scripts/build.sh ios-device
@@ -164,7 +164,7 @@ jobs:
         if: always() && steps.konan.outputs.cache-hit != 'true'
         with:
           path: ~/.konan
-          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/**', 'core/**', 'platforms/ios/**') }}
+          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/src/**', 'UI/integration/**', 'UI/build.gradle.kts', 'core/src/**', 'core/Cargo.*', 'core/build.rs', 'platforms/ios/src/**', 'platforms/ios/tests/**', 'platforms/ios/Velmux.xcodeproj/project.pbxproj', 'build.gradle.kts') }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

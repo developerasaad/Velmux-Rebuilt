@@ -35,6 +35,12 @@ The host Rust tests demonstrate linked FFmpeg registries, record values, native-
 - Earlier failures corrected: hosted default NDK mismatch, missing bindgen opaque declarations, Apple x265/zimg C++ closure, activity-owned engine lifetime and unannotated Swift error propagation. A test-directory collision with the build ignore rule was corrected; source checks now pass.
 - No external access/runner blocker currently prevents work. Remaining failures are integration defects to resolve within Milestone 1.
 
+## Current corrections awaiting runtime evidence
+
+- [Native symbolication 45932734608](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45932734608), `95c440d`, traced the startup fault to `__bionic_getauxval` / `page_size` from an x265 global constructor. The core ELF had no dynamic libc dependency: pkg-config had classified NDK system archives for static bundling. Rust now bundles only genuine managed-prefix archives, keeps platform libraries dynamic, and normalizes Android C++ runtime imports. The release APK gate checks libc dependency and rejects bundled Bionic symbols. Independent source review completed; execution proof pending.
+- Apple [45931075511](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931075511), `662af3d`: unsigned device app build passed. Simulator compilation attempted unsupported x86_64 alongside arm64; the project now explicitly selects arm64, matching the Kotlin/Rust/native artifacts, and selects an SDK-matched runtime. Actual simulator tests remain pending.
+- Gobley 0.3.7 is retained. An upstream JNA regression was investigated, but symbolication identified platform-library bundling rather than evidence for changing the binding generator.
+
 ## Acceptance remaining
 
 Demonstrate real Android and iOS host-to-Rust-to-FFmpeg calls and provider callbacks at runtime, cancellation/errors/lifetime behavior, Android API 29/newer launch and iOS simulator launch, plus successful unsigned Apple device-target linkage. Inspect final workflow evidence and review the integrated result before accepting Milestone 1.
