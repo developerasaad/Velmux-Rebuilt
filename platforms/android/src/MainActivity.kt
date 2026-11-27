@@ -2,6 +2,7 @@ package com.velmux.mobile
 
 import android.os.Bundle
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -18,6 +19,9 @@ class MainActivity : ComponentActivity() {
             FoundationApp(session, actions, onAppearance = { dark ->
                 // Follow the actual application palette, including a manual
                 // preference different from the operating system's appearance.
+                // API35 forces transparent system bars; the native window
+                // background must match when it is visible beyond Compose.
+                window.setBackgroundDrawable(ColorDrawable(if (dark) 0xFF17120E.toInt() else 0xFFFFF8F3.toInt()))
                 val style = if (dark) SystemBarStyle.dark(0xFF17120E.toInt())
                     else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)

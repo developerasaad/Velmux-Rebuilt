@@ -814,8 +814,13 @@ class ConversionIntegrationTest {
             try {
                 // The right content margin is the shared theme's background,
                 // away from labels, controls and system status/navigation bars.
-                val pixel = screenshot.getPixel(screenshot.width - 8, screenshot.height / 2)
-                abs(Color.red(pixel) - 0x17) <= 2 && abs(Color.green(pixel) - 0x12) <= 2 && abs(Color.blue(pixel) - 0x0e) <= 2
+                fun darkBackground(pixel: Int) = abs(Color.red(pixel) - 0x17) <= 2 &&
+                    abs(Color.green(pixel) - 0x12) <= 2 && abs(Color.blue(pixel) - 0x0e) <= 2
+                val content = screenshot.getPixel(screenshot.width - 8, screenshot.height / 2)
+                // The emulator's top-center status-bar gap contains no icons.
+                // Icon-mode flags alone cannot prove a contrasting background.
+                val statusBar = screenshot.getPixel(screenshot.width / 2, 8)
+                darkBackground(content) && darkBackground(statusBar)
             } finally { screenshot.recycle() }
         }
     }
