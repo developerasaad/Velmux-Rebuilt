@@ -12,6 +12,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.velmux.ui.app.*
 import com.velmux.ui.components.OptionSheet
+import com.velmux.ui.components.PrimaryButton as Button
 import kotlinx.coroutines.CancellationException
 import uniffi.velmux_core.*
 

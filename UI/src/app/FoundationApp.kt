@@ -166,8 +166,8 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
                         TextButton(onClick = { preparation?.cancel(); selectionGeneration += 1 }) { Text("Cancel") }
                     }
                 } else when (destination) {
-                    Destination.Home -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text("Make media work for you", style = MaterialTheme.typography.headlineMedium)
+                    Destination.Home -> Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Make media work for you", Modifier.fillMaxWidth(), style = MaterialTheme.typography.headlineSmall)
                         Text("Convert on your device. Your original files stay untouched.", style = MaterialTheme.typography.bodyLarge)
                         if (!ready) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { CircularProgressIndicator(Modifier.size(20.dp)); Text("Restoring the workspace…") }
                         Text("Video", Modifier.padding(top = 20.dp).semantics { heading() }, style = MaterialTheme.typography.titleMedium)

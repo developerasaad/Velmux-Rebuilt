@@ -85,10 +85,14 @@ class AndroidMediaServicesTest {
             assertTrue("Closing a worker descriptor must not release a durable source reference", hasRead())
             services.releaseSourceAccess(uri.toString())
             assertFalse("Unused owned permission was retained", hasRead())
+            // Android clears the persistable offer as well as the retained
+            // permission. A new selection must deliver a new real OS grant.
+            resolver.call(fixtureAuthority, "create", key, null)
             services.retainSourceAccess(uri.toString())
             AndroidMediaServices(context).reconcileSourceAccess(emptyList())
             assertFalse("Orphaned owned permission survived startup reconciliation", hasRead())
             // An unrelated facility's pre-existing permission never becomes ours.
+            resolver.call(fixtureAuthority, "create", key, null)
             resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             services.retainSourceAccess(uri.toString())
             services.releaseSourceAccess(uri.toString())
@@ -96,6 +100,62 @@ class AndroidMediaServicesTest {
             assertTrue("Cleanup released an unowned persisted permission", hasRead())
             resolver.openInputStream(uri)!!.use { assertTrue(it.read() >= 0) }
         } finally {
+            runCatching { resolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            resolver.call(fixtureAuthority, "remove", key, null)
+        }
+    }
+
+    @Test
+    fun pickerDeliveryCannotLoseItsPersistableOfferToAnOldSourceRelease() {
+        val resolver = context.contentResolver
+        val key = UUID.randomUUID().toString()
+        val uri = Uri.parse(resolver.call(fixtureAuthority, "create", key, null)!!.getString("uri")!!)
+        val locator = uri.toString()
+        val services = AndroidMediaServices(context)
+        fun hasRead() = resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+        var activeSelection: Long? = null
+        try {
+            services.retainSourceAccess(locator)
+            val first = AndroidDocumentGrants.beginSelection(context).also { activeSelection = it }
+            // Manufacture the same real OS grant that a second picker result
+            // delivers while the old Rust source reference is still alive.
+            resolver.call(fixtureAuthority, "create", key, null)
+            AndroidDocumentGrants.finishSelection(context, first, locator)
+            activeSelection = null
+            services.releaseSourceAccess(locator)
+            assertTrue("Old source cleanup destroyed the new picker handoff", hasRead())
+            services.retainSourceAccess(locator)
+            val opened = services.openSource(locator)
+            ParcelFileDescriptor.adoptFd(opened.fd).close()
+            services.releaseSource(opened.leaseId)
+            assertTrue("The new source lost lasting access", hasRead())
+            services.releaseSourceAccess(locator)
+            assertFalse("Claimed handoff prevented final cleanup", hasRead())
+
+            resolver.call(fixtureAuthority, "create", key, null)
+            services.retainSourceAccess(locator)
+            val canceled = AndroidDocumentGrants.beginSelection(context).also { activeSelection = it }
+            services.releaseSourceAccess(locator)
+            assertTrue("Cleanup raced an active system picker", hasRead())
+            AndroidDocumentGrants.finishSelection(context, canceled, null)
+            activeSelection = null
+            assertFalse("Canceled selection retained an unused permission", hasRead())
+
+            resolver.call(fixtureAuthority, "create", key, null)
+            services.retainSourceAccess(locator)
+            val abandoned = AndroidDocumentGrants.beginSelection(context).also { activeSelection = it }
+            AndroidDocumentGrants.finishSelection(context, abandoned, locator)
+            activeSelection = null
+            services.releaseSourceAccess(locator)
+            assertTrue(hasRead())
+            val next = AndroidDocumentGrants.beginSelection(context).also { activeSelection = it }
+            assertFalse("The next picker did not expire an unclaimed handoff", hasRead())
+            AndroidDocumentGrants.finishSelection(context, abandoned, locator)
+            AndroidDocumentGrants.finishSelection(context, next, null)
+            activeSelection = null
+        } finally {
+            activeSelection?.let { AndroidDocumentGrants.finishSelection(context, it, null) }
+            services.reconcileSourceAccess(emptyList())
             runCatching { resolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             resolver.call(fixtureAuthority, "remove", key, null)
         }

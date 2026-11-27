@@ -141,7 +141,7 @@ final class PickerFlowUITests: XCTestCase {
         try waitFor("The output-name field was not accessible") { field.exists && field.isHittable }
         field.tap()
         let keyboardContinue = app.buttons["Continue"].firstMatch
-        if keyboardContinue.exists && keyboardContinue.isHittable { keyboardContinue.tap() }
+        if keyboardContinue.waitForExistence(timeout: 2), keyboardContinue.isHittable { keyboardContinue.tap() }
         // Compose exports this editable TextView's content as its accessibility
         // label on iOS; UIKit text fields normally expose the same text as value.
         let current = (field.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? field.label

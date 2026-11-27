@@ -10,8 +10,37 @@ internal object AndroidDocumentGrants {
     private const val PREFERENCES = "velmux-document-grant-receipts"
     private const val OWNED = "owned-read-uris"
     private val gate = Any()
+    private var nextSelection = 0L
+    private var selection: Long? = null
+    private var deliveredLocator: String? = null
+    private val deferredReleases = mutableSetOf<String>()
 
-    fun retain(context: Context, locator: String) = synchronized(gate) {
+    fun beginSelection(context: Context): Long = synchronized(gate) {
+        check(selection == null) { "A document selection is already open." }
+        deliveredLocator = null
+        drainReleases(context)
+        (++nextSelection).also { selection = it }
+    }
+
+    fun finishSelection(context: Context, token: Long, locator: String?) = synchronized(gate) {
+        if (selection != token) return@synchronized
+        selection = null
+        deliveredLocator = locator
+        drainReleases(context)
+    }
+
+    fun retain(context: Context, locator: String): Unit = synchronized(gate) {
+        try {
+            retainPermission(context, locator)
+            deferredReleases.remove(locator)
+            Unit
+        } finally {
+            if (deliveredLocator == locator) deliveredLocator = null
+            drainReleases(context)
+        }
+    }
+
+    private fun retainPermission(context: Context, locator: String) {
         val uri = Uri.parse(locator)
         if (uri.scheme != "content") throw PlatformFailure("The source does not have a document URI.")
         val resolver = context.contentResolver
@@ -27,7 +56,7 @@ internal object AndroidDocumentGrants {
             // A revoked/reacquired permission is a different OS grant, even if
             // a previous receipt could not be removed during storage failure.
             if (owned.remove(locator)) preferences.edit().putStringSet(OWNED, owned).remove(receiptKey).commit()
-            return@synchronized
+            return
         }
         try {
             if (!existing) resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -48,15 +77,34 @@ internal object AndroidDocumentGrants {
     }
 
     fun release(context: Context, locator: String) {
-        synchronized(gate) { runCatching { releaseOwned(context, locator) } }
+        synchronized(gate) {
+            if (selection != null || deliveredLocator == locator) {
+                // Releasing persisted access also destroys a newly delivered
+                // persistable offer on Android. Hold that OS handoff until
+                // Rust claims it or the next selection expires it.
+                deferredReleases.add(locator)
+            } else runCatching { releaseOwned(context, locator) }
+        }
     }
 
     fun reconcile(context: Context, retainedLocators: List<String>) {
         synchronized(gate) {
             val retained = retainedLocators.toSet()
+            selection = null
+            deliveredLocator = null
+            deferredReleases.removeAll(retained)
+            drainReleases(context)
             val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             val owned = preferences.getStringSet(OWNED, emptySet()).orEmpty().toSet()
             owned.filterNot { it in retained }.forEach { locator -> runCatching { releaseOwned(context, locator) } }
+        }
+    }
+
+    private fun drainReleases(context: Context) {
+        if (selection != null) return
+        deferredReleases.filterNot { it == deliveredLocator }.toList().forEach { locator ->
+            runCatching { releaseOwned(context, locator) }
+            deferredReleases.remove(locator)
         }
     }
 

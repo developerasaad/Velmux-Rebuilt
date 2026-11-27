@@ -100,6 +100,7 @@ class ConversionIntegrationTest {
                 capture("ui-video-workspace.png")
                 exerciseEmbeddedPlayerControls(scenario)
                 exerciseResponsiveWorkspace()
+                exerciseInvalidOutputName(before)
                 clickText("Convert", exact = true)
                 val submitted = awaitNewJob(before)
                 val completed = awaitJob(submitted.id)
@@ -297,50 +298,93 @@ class ConversionIntegrationTest {
             prepared
         }
         fun clickControl(description: String) {
-            var control = device.wait(Until.findObject(By.desc(description)), 2_000)
-            if (control == null) {
+            val controlBounds = Rect()
+            var visible = false
+            scenario.onActivity {
+                val control = requireNotNull(embedded?.findViewById<View>(androidx.media3.ui.R.id.exo_play_pause))
+                visible = control.getGlobalVisibleRect(controlBounds)
+            }
+            if (!visible) {
                 val bounds = Rect()
                 scenario.onActivity { assertTrue(requireNotNull(embedded).getGlobalVisibleRect(bounds)) }
                 device.click(bounds.centerX(), bounds.centerY())
-                control = device.wait(Until.findObject(By.desc(description)), 3_000)
             }
-            requireNotNull(control) { "The embedded player did not expose its $description control" }.click()
-        }
-        clickControl("Play")
-        waitUntil("Embedded playback did not advance after the real Play control", 10_000) {
-            var advancing = false
-            scenario.onActivity { advancing = requireNotNull(embedded?.player).currentPosition >= 150 }
-            advancing
-        }
-        clickControl("Pause")
-        scenario.onActivity { assertFalse("The real Pause control did not pause playback", requireNotNull(embedded?.player).playWhenReady) }
-        val frameTimestamp = AtomicLong(-1)
-        val listener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ -> frameTimestamp.set(presentationTimeUs) }
-        var native: ExoPlayer? = null
-        runCatching {
-            UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6)
-                .scrollIntoView(UiSelector().resourceIdMatches(".*:id/exo_progress"))
-        }
-        val timebar = Rect()
-        scenario.onActivity {
-            native = requireNotNull(embedded?.player) as ExoPlayer
-            native?.setVideoFrameMetadataListener(listener)
-            val progress = requireNotNull(embedded?.findViewById<View>(androidx.media3.ui.R.id.exo_progress))
-            assertTrue("The native seek bar is not reachable in the workspace", progress.getGlobalVisibleRect(timebar))
-            assertTrue(timebar.width() > 40 && timebar.height() > 0)
+            waitUntil("The embedded player did not expose its $description control", 3_000) {
+                var matches = false
+                scenario.onActivity {
+                    val control = requireNotNull(embedded?.findViewById<View>(androidx.media3.ui.R.id.exo_play_pause))
+                    matches = control.contentDescription?.toString() == description && control.getGlobalVisibleRect(controlBounds)
+                }
+                matches
+            }
+            // Read the actual native control's bounds without a slow complete
+            // accessibility-tree traversal: this fixture is only two seconds.
+            assertTrue(device.click(controlBounds.centerX(), controlBounds.centerY()))
         }
         try {
-            // Tap the actual native timebar; observing a decoded presentation
-            // timestamp proves this is more than a displayed seek position.
-            device.click(timebar.left + timebar.width() * 2 / 3, timebar.centerY())
-            waitUntil("The embedded native seek control did not decode the requested interval", 10_000) {
-                frameTimestamp.get() in 900_000L..1_900_000L
+            clickControl("Play")
+            waitUntil("Embedded playback did not advance after the real Play control", 10_000) {
+                var advancing = false
+                scenario.onActivity { advancing = requireNotNull(embedded?.player).currentPosition >= 150 }
+                advancing
             }
-            scenario.onActivity { assertTrue(requireNotNull(embedded?.player).currentPosition in 900L..1_900L) }
-            capture("ui-video-embedded-seek.png")
-        } finally {
-            scenario.onActivity { native?.clearVideoFrameMetadataListener(listener) }
+            clickControl("Pause")
+            waitUntil("The real Pause control did not pause playback", 3_000) {
+                var paused = false
+                scenario.onActivity { paused = !requireNotNull(embedded?.player).playWhenReady }
+                paused
+            }
+            val frameTimestamp = AtomicLong(-1)
+            val listener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ -> frameTimestamp.set(presentationTimeUs) }
+            var native: ExoPlayer? = null
+            runCatching {
+                UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6)
+                    .scrollIntoView(UiSelector().resourceIdMatches(".*:id/exo_progress"))
+            }
+            val timebar = Rect()
+            scenario.onActivity {
+                native = requireNotNull(embedded?.player) as ExoPlayer
+                native?.setVideoFrameMetadataListener(listener)
+                val progress = requireNotNull(embedded?.findViewById<View>(androidx.media3.ui.R.id.exo_progress))
+                assertTrue("The native seek bar is not reachable in the workspace", progress.getGlobalVisibleRect(timebar))
+                assertTrue(timebar.width() > 40 && timebar.height() > 0)
+            }
+            try {
+                // Tap the actual native timebar; observing a decoded presentation
+                // timestamp proves this is more than a displayed seek position.
+                device.click(timebar.left + timebar.width() * 2 / 3, timebar.centerY())
+                waitUntil("The embedded native seek control did not decode the requested interval", 10_000) {
+                    frameTimestamp.get() in 900_000L..1_900_000L
+                }
+                scenario.onActivity { assertTrue(requireNotNull(embedded?.player).currentPosition in 900L..1_900L) }
+                capture("ui-video-embedded-seek.png")
+            } finally {
+                scenario.onActivity { native?.clearVideoFrameMetadataListener(listener) }
+            }
+        } catch (error: Throwable) {
+            runCatching { capture("failure-embedded-player.png") }
+            throw error
         }
+    }
+
+    private fun exerciseInvalidOutputName(before: Set<String>) {
+        reachableText("Output name", exact = true)
+        val field = requireNotNull(device.findObjects(By.clazz("android.widget.EditText"))
+            .firstOrNull { it.text.isNotBlank() && it.text.toIntOrNull() == null }) {
+            "The output name field is not reachable"
+        }
+        val validName = field.text
+        field.text = "../invalid-output"
+        clickText("Convert", exact = true)
+        awaitText("Conversion was not accepted", exact = true)
+        awaitText("Use a filename")
+        assertEquals("Rejected configuration created a job", before, media.jobsNative().map { it.id }.toSet())
+        capture("ui-invalid-output-alert.png")
+        clickText("OK", exact = true)
+        assertFalse("The dismissed error remained visible", device.hasObject(By.text("Conversion was not accepted")))
+        reachableText("Output name", exact = true)
+        requireNotNull(device.findObject(By.clazz("android.widget.EditText").text("../invalid-output"))).text = validName
+        awaitText("Convert", exact = true)
     }
 
     private fun findPlayerView(view: View): PlayerView? {

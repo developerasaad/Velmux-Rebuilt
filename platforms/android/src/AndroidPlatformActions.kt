@@ -15,15 +15,18 @@ import com.velmux.ui.app.SelectedSource
 /** Construct during Activity.onCreate, before the activity reaches STARTED. */
 class AndroidPlatformActions(private val activity: ComponentActivity) : PlatformActions {
     private var pendingSelection: ((SelectedSource?, String?) -> Unit)? = null
+    private var selectionToken: Long? = null
     private val picker = activity.registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val completion = pendingSelection ?: return@registerForActivityResult
         pendingSelection = null
         if (result.resultCode != Activity.RESULT_OK) {
+            finishSelection(null)
             completion(null, null)
         } else {
             val intent = result.data
             val uri = intent?.data
             if (intent == null || uri == null || intent.clipData?.itemCount?.let { it > 1 } == true) {
+                finishSelection(null)
                 completion(null, "Select one readable media document.")
             } else {
                 var selected: SelectedSource? = null
@@ -43,6 +46,7 @@ class AndroidPlatformActions(private val activity: ComponentActivity) : Platform
                 } catch (_: Exception) {
                     failure = "The selected document could not be read. Select it again."
                 }
+                finishSelection(selected?.locator)
                 completion(selected, failure)
             }
         }
@@ -53,6 +57,7 @@ class AndroidPlatformActions(private val activity: ComponentActivity) : Platform
             override fun onDestroy(owner: LifecycleOwner) {
                 val completion = pendingSelection
                 pendingSelection = null
+                finishSelection(null)
                 completion?.invoke(null, null)
             }
         })
@@ -65,12 +70,20 @@ class AndroidPlatformActions(private val activity: ComponentActivity) : Platform
         }
         pendingSelection = completion
         try {
+            selectionToken = AndroidDocumentGrants.beginSelection(activity)
             picker.launch(selectionIntent(video))
         } catch (error: Exception) {
             if (pendingSelection !== completion) throw error
             pendingSelection = null
+            finishSelection(null)
             completion(null, "The system document picker is unavailable.")
         }
+    }
+
+    private fun finishSelection(locator: String?) {
+        val token = selectionToken ?: return
+        selectionToken = null
+        AndroidDocumentGrants.finishSelection(activity, token, locator)
     }
 
     override fun openOutput(locator: String, completion: (String?) -> Unit) {
