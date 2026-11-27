@@ -1979,3 +1979,44 @@ fn configuration_choices_follow_real_sampling_and_encoding_limits() {
     harness.expect(vec![expectation(&aac, "aac", 2, 48000), low_expected,
         json!({"path":copied.output.unwrap().locator,"video_codec":"ffv1","width":321,"height":181,"audio_codecs":[],"duration":1.0})]);
 }
+
+#[test]
+fn exposed_quality_and_bitrate_controls_change_real_encoded_media() {
+    let harness = Harness::new("encoding-controls");
+    let video = harness.inspect("video.mp4", Operation::VideoConverter);
+    let mut config = harness.defaults(&video, Operation::VideoConverter);
+    config.video_codec = VideoCodec::H264;
+    config.quality = 28;
+    config.file_name = "quality_28".into();
+    let lower = harness.complete(&harness.submit(&video, config.clone()).id);
+    config.quality = 18;
+    config.file_name = "quality_18".into();
+    let higher = harness.complete(&harness.submit(&video, config).id);
+    let video_case = |record: &JobRecord| {
+        json!({"path":record.output.as_ref().unwrap().locator,
+        "video_codec":"h264","width":320,"height":180,"audio_codecs":["aac"],"sample_rate":48000,
+        "channels":2,"tones":true,"duration":2.0})
+    };
+    let mut higher_case = video_case(&higher);
+    higher_case["quality_reference"] = json!(fixture("video.mp4"));
+    higher_case["lower_quality_output"] = json!(lower.output.as_ref().unwrap().locator);
+
+    let audio = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&audio, Operation::AudioConverter);
+    config.audio_codec = AudioCodec::Aac;
+    config.audio_bitrate = Some(128000);
+    config.file_name = "bitrate_128".into();
+    let lower_bitrate = harness.complete(&harness.submit(&audio, config.clone()).id);
+    config.audio_bitrate = Some(256000);
+    config.file_name = "bitrate_256".into();
+    let higher_bitrate = harness.complete(&harness.submit(&audio, config).id);
+    let mut higher_audio_case = expectation(&higher_bitrate, "aac", 2, 48000);
+    higher_audio_case["lower_bitrate_output"] =
+        json!(lower_bitrate.output.as_ref().unwrap().locator);
+    harness.expect(vec![
+        video_case(&lower),
+        higher_case,
+        expectation(&lower_bitrate, "aac", 2, 48000),
+        higher_audio_case,
+    ]);
+}

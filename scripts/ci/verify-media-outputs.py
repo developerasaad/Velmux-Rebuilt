@@ -125,6 +125,24 @@ def check_case(case):
          "-i", str(path), "-map", "0:v?", "-map", "0:a?", "-f", "null", "-"])
     if case.get("tones"):
         check_tones(path, case["channels"], case.get("tone_frequencies"))
+    if "quality_reference" in case:
+        def decoded_luma(media):
+            return run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(media), "-map", "0:v:0",
+                        "-pix_fmt", "gray", "-f", "rawvideo", "-"])
+        reference = decoded_luma(case["quality_reference"])
+        higher = decoded_luma(path)
+        lower_path = Path(case["lower_quality_output"])
+        lower = decoded_luma(lower_path)
+        assert len(reference) == len(higher) == len(lower) > 0, f"{path}: quality changed frame count/geometry"
+        higher_error = sum((a - b) ** 2 for a, b in zip(reference, higher)) / len(reference)
+        lower_error = sum((a - b) ** 2 for a, b in zip(reference, lower)) / len(reference)
+        assert higher_error < lower_error, f"{path}: the higher quality control did not improve decoded fidelity"
+        assert path.stat().st_size > lower_path.stat().st_size, f"{path}: quality control produced no measurable size difference"
+    if "lower_bitrate_output" in case:
+        lower_path = Path(case["lower_bitrate_output"])
+        lower_audio = [stream for stream in probe(lower_path)["streams"] if stream["codec_type"] == "audio"]
+        assert int(audio[0]["bit_rate"]) > int(lower_audio[0]["bit_rate"]) * 1.2, f"{path}: explicit AAC bitrate did not change measured output rate"
+        assert path.stat().st_size > lower_path.stat().st_size, f"{path}: bitrate control produced no measurable size difference"
     if case.get("source"):
         source = probe(FIXTURES / case["source"], packets=True)
         if case.get("preserve_video_packets"):
