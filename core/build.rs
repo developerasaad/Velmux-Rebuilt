@@ -70,7 +70,13 @@ fn emit_library(name: &str, prefix: &Path, android: bool, cpp_emitted: &mut bool
 }
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=VELMUX_FFMPEG_PREFIX");
+    for name in [
+        "VELMUX_FFMPEG_PREFIX",
+        "ANDROID_NDK_ROOT",
+        "ANDROID_NDK_HOME",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
     println!("cargo:rerun-if-changed=src/ffmpeg/wrapper.h");
     let target = env::var("TARGET").unwrap();
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
@@ -99,6 +105,13 @@ fn main() {
     let mut includes = Vec::new();
     let mut defines = BTreeMap::new();
     let android = target.ends_with("linux-android");
+    let ndk_root = android.then(|| {
+        PathBuf::from(
+            env::var_os("ANDROID_NDK_ROOT")
+                .or_else(|| env::var_os("ANDROID_NDK_HOME"))
+                .expect("Android builds require the pinned NDK"),
+        )
+    });
     let mut cpp_emitted = false;
     for name in [
         "libavfilter",
@@ -114,6 +127,14 @@ fn main() {
             .probe(name)
             .unwrap_or_else(|error| panic!("{name} in {}: {error}", prefix.display()));
         for directory in &library.link_paths {
+            // The NDK driver searches API-specific shared stubs before generic
+            // static SDK archives. An explicit -L into the SDK reverses that order.
+            if ndk_root
+                .as_ref()
+                .is_some_and(|root| directory.starts_with(root))
+            {
+                continue;
+            }
             println!("cargo:rustc-link-search=native={}", directory.display());
         }
         for name in &library.libs {
@@ -178,8 +199,6 @@ fn main() {
             .map(|entry| entry.path().join("sysroot"))
             .find(|path| path.is_dir())
             .expect("NDK sysroot");
-        let runtime = sysroot.join("usr/lib").join(&target);
-        println!("cargo:rustc-link-search=native={}", runtime.display());
         builder = builder
             .clang_arg(format!("--sysroot={}", sysroot.display()))
             .clang_arg(format!("--target={target}29"));
