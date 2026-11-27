@@ -378,6 +378,11 @@ ZPC
     sanitize_x265_pc "$SLICE_PREFIX"
     log "[$slice] x265 installed"
   fi
+  # x265's cross-generated pc omits libc++ from its static C link closure.
+  # FFmpeg probes through the C compiler, which does not add it implicitly.
+  # Repair reused prefixes too; adding it only during installation would
+  # leave a previously installed archive unusable after a configure failure.
+  append_pc_libs "$SLICE_PREFIX" x265 -lc++
 
   # --- lame (autoconf) -------------------------------------------------------------
   if [ ! -f "$SLICE_PREFIX/lib/libmp3lame.a" ]; then
@@ -664,7 +669,7 @@ ZPC
       die "[$slice] zimg autogen failed (log above)"
     fi
     (cd "$zimg_src" && \
-     CC="$CC" CXX="$CXX" \
+     STL_LIBS="-lc++ -lm" CC="$CC" CXX="$CXX" \
      CFLAGS="-arch $SLICE_ARCH $SLICE_MIN_FLAG -O3 -fPIC -I$SLICE_PREFIX/include" \
      CXXFLAGS="-arch $SLICE_ARCH $SLICE_MIN_FLAG -O3 -fPIC -I$SLICE_PREFIX/include" \
      LDFLAGS="-arch $SLICE_ARCH $SLICE_MIN_FLAG -L$SLICE_PREFIX/lib" \
@@ -675,6 +680,18 @@ ZPC
      make -j"$JOBS" >/dev/null && make install >/dev/null)
     log "[$slice] zimg installed"
   fi
+  # zimg defaults to GNU libstdc++, which is unavailable in current Apple
+  # SDKs. Normalize retained pc files as well as setting STL_LIBS above.
+  python3 - "$SLICE_PREFIX/lib/pkgconfig/zimg.pc" <<'ZIMG_PC'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+updated = text.replace("-lstdc++", "-lc++")
+if updated != text:
+    path.write_text(updated)
+ZIMG_PC
+  append_pc_libs "$SLICE_PREFIX" zimg -lc++ -lm
 
   # --- libwebp (cmake cross; still WebP output, mandate 29.3) --------------------------------
   if [ ! -f "$SLICE_PREFIX/lib/libwebp.a" ]; then

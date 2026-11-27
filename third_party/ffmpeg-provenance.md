@@ -94,3 +94,7 @@ The release archive's own `configure` confirms Android MediaCodec depends on
 The Apple branch explicitly enables VideoToolbox and probes the actual SDK
 framework. These flags enable compiled API support and do not establish
 physical hardware availability.
+
+## Apple static link closure correction
+
+The first new Apple CI build exposed missing C++ runtime declarations in x265's cross-generated pkg-config file. The Apple builder explicitly includes `-lc++`, and zimg uses `STL_LIBS=-lc++ -lm` rather than its GNU libstdc++ default. Retained-prefix repair is idempotent and runs outside installation guards. This correction is Apple-specific; previously verified Android/host artifacts remain identified by their original source revisions, without relabeling their cache identities.
