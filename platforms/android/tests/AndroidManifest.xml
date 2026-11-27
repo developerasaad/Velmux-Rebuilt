@@ -1,24 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <permission android:name="com.velmux.mobile.test.FIXTURE_ACCESS" android:protectionLevel="signature" />
-    <application>
-        <provider
-            android:name="com.velmux.mobile.testing.NativeSourceTestProvider"
-            android:authorities="com.velmux.mobile.test.sources"
-            android:exported="true"
-            android:grantUriPermissions="true"
-            android:readPermission="com.velmux.mobile.test.FIXTURE_ACCESS"
-            android:writePermission="com.velmux.mobile.test.FIXTURE_ACCESS" />
-        <provider
-            android:name="com.velmux.mobile.testing.FixtureDocumentsProvider"
-            android:authorities="com.velmux.mobile.test.documents"
-            android:label="Velmux Test Sources"
-            android:exported="true"
-            android:grantUriPermissions="true"
-            android:permission="android.permission.MANAGE_DOCUMENTS">
-            <intent-filter>
-                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
-            </intent-filter>
-        </provider>
-    </application>
+    <queries>
+        <provider android:authorities="com.velmux.mobile.test.sources;com.velmux.mobile.test.control;com.velmux.mobile.test.documents" />
+    </queries>
 </manifest>

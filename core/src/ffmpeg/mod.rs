@@ -1,5 +1,7 @@
 use std::{ffi::CStr, ptr};
 
+// These style allowances are confined to bindgen's unmodified C declarations
+// and bitfield helpers; handwritten resource and processing code remains linted.
 #[allow(
     dead_code,
     non_camel_case_types,

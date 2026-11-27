@@ -1,10 +1,7 @@
 package com.velmux.mobile.testing
 
-import android.content.Intent
 import android.database.Cursor
 import android.database.MatrixCursor
-import android.os.Binder
-import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
@@ -12,7 +9,7 @@ import android.provider.DocumentsProvider
 import java.io.File
 import java.io.FileNotFoundException
 
-/** Read-only sources exist only in the instrumentation APK, never in the product. */
+/** Read-only sources exist only in the standalone verification APK, never in the product. */
 class FixtureDocumentsProvider : DocumentsProvider() {
     override fun onCreate() = true
 
@@ -46,24 +43,6 @@ class FixtureDocumentsProvider : DocumentsProvider() {
         return ParcelFileDescriptor.open(fixture(documentId), ParcelFileDescriptor.MODE_READ_ONLY)
     }
 
-    override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
-        super.call(method, arg, extras)?.let { return it }
-        if (method !in setOf("grant-fixture", "revoke-fixture")) return null
-        val name = arg ?: throw FileNotFoundException("No fixture was selected")
-        fixture(name)
-        val uri = DocumentsContract.buildDocumentUri(AUTHORITY, name)
-        val identity = Binder.clearCallingIdentity()
-        try {
-            if (method == "grant-fixture") {
-                requireNotNull(context).grantUriPermission("com.velmux.mobile", uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-            } else {
-                requireNotNull(context).revokeUriPermission("com.velmux.mobile", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-        } finally { Binder.restoreCallingIdentity(identity) }
-        return Bundle().apply { putString("uri", uri.toString()) }
-    }
-
     private fun MatrixCursor.addDocument(id: String) {
         val directory = id == ROOT
         val file = if (directory) null else fixture(id)
@@ -78,19 +57,7 @@ class FixtureDocumentsProvider : DocumentsProvider() {
         addRow(columnNames.map { values[it] })
     }
 
-    private fun fixture(id: String): File {
-        if (id !in FIXTURES) throw FileNotFoundException("Unknown verification source")
-        val context = requireNotNull(context)
-        return synchronized(copyLock) {
-            val root = File(context.filesDir, "conversion-fixtures")
-            if (!root.isDirectory && !root.mkdirs()) throw FileNotFoundException("Fixture storage is unavailable")
-            val file = File(root, id)
-            if (!file.isFile) {
-                context.assets.open(id).use { input -> file.outputStream().use { input.copyTo(it) } }
-            }
-            file
-        }
-    }
+    private fun fixture(id: String): File = FixtureFiles.open(requireNotNull(context), id)
 
     private fun mime(name: String) = when (name.substringAfterLast('.')) {
         "mp4" -> "video/mp4"
@@ -103,8 +70,7 @@ class FixtureDocumentsProvider : DocumentsProvider() {
     private companion object {
         const val AUTHORITY = "com.velmux.mobile.test.documents"
         const val ROOT = "verification-media"
-        val copyLock = Any()
-        val FIXTURES = listOf("video.mp4", "stereo.wav", "stereo.flac", "video-large.mp4", "positive-origin.mkv", "vfr.mkv", "rotated-sar.mp4", "multi-track.mkv", "hdr.mkv", "truncated.mp4", "invalid.bin")
+        val FIXTURES = FixtureFiles.names
         val ROOT_COLUMNS = arrayOf(DocumentsContract.Root.COLUMN_ROOT_ID, DocumentsContract.Root.COLUMN_DOCUMENT_ID,
             DocumentsContract.Root.COLUMN_TITLE, DocumentsContract.Root.COLUMN_SUMMARY, DocumentsContract.Root.COLUMN_MIME_TYPES,
             DocumentsContract.Root.COLUMN_FLAGS, DocumentsContract.Root.COLUMN_ICON)

@@ -17,14 +17,11 @@ case "${1:-}" in
   ios-device|ios-simulator)
     bash scripts/ffmpeg/build-ios.sh
     if [ "$1" = ios-device ]; then
-      sdk=iphoneos; target=IosArm64; destination='generic/platform=iOS'
+      sdk=iphoneos; destination='generic/platform=iOS'
     else
-      sdk=iphonesimulator; target=IosSimulatorArm64; destination='generic/platform=iOS Simulator'
+      sdk=iphonesimulator; destination='generic/platform=iOS Simulator'
     fi
-    ./gradlew -PbindingsTarget=ios ":UI:linkReleaseFramework$target"
-    mkdir -p "build/ios/$sdk"
-    rm -rf "build/ios/$sdk/VelmuxUI.framework"
-    cp -R "UI/build/bin/$( [ "$sdk" = iphoneos ] && echo iosArm64 || echo iosSimulatorArm64 )/releaseFramework/VelmuxUI.framework" "build/ios/$sdk/"
+    bash scripts/ci/apple-framework.sh "$sdk" Release
     xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Release \
       -sdk "$sdk" -destination "$destination" -derivedDataPath "build/xcode/$sdk" \
       CODE_SIGNING_ALLOWED=NO build

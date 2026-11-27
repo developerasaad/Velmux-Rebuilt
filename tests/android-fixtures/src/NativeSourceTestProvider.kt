@@ -20,6 +20,7 @@ class NativeSourceTestProvider : ContentProvider() {
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
         val root = requireNotNull(context)
+        FixtureFiles.requireControlCaller(root)
         val key = requireNotNull(arg).also { require(it.matches(Regex("[a-f0-9-]{36}"))) }
         val file = File(root.cacheDir, "source-fixture-$key.bin")
         val uri = Uri.parse("content://com.velmux.mobile.test.sources/$key")
@@ -44,6 +45,7 @@ class NativeSourceTestProvider : ContentProvider() {
     }
 
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor {
+        requireNotNull(context).enforceCallingOrSelfUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION, "A fixture read grant is required")
         val columns = projection ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
         return MatrixCursor(columns).apply {
             addRow(columns.map {
@@ -57,6 +59,7 @@ class NativeSourceTestProvider : ContentProvider() {
     }
 
     override fun openAssetFile(uri: Uri, mode: String): AssetFileDescriptor {
+        requireNotNull(context).enforceCallingOrSelfUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION, "A fixture read grant is required")
         require(mode == "r")
         val key = requireNotNull(uri.lastPathSegment).also { require(it.matches(Regex("[a-f0-9-]{36}"))) }
         val file = File(requireNotNull(context).cacheDir, "source-fixture-$key.bin")

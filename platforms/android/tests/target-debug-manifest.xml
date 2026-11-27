@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Only the tested debug host can discover the standalone verification APK. -->
+    <queries><package android:name="com.velmux.mobile.fixtures" /></queries>
+</manifest>

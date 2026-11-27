@@ -48,7 +48,7 @@ class ConversionIntegrationTest {
     private val context get() = instrumentation.targetContext
     private val media get() = (context.applicationContext as VelmuxApplication).session.media
     private val resolver get() = context.contentResolver
-    private val provider = Uri.parse("content://$AUTHORITY")
+    private val provider = Uri.parse("content://com.velmux.mobile.test.control")
     private val device get() = UiDevice.getInstance(instrumentation)
 
     @Test

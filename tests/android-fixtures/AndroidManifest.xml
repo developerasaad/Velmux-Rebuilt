@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries><package android:name="com.velmux.mobile" /></queries>
+    <application android:label="Velmux Test Sources" android:allowBackup="false" android:testOnly="true">
+        <provider
+            android:name="com.velmux.mobile.testing.NativeSourceTestProvider"
+            android:authorities="com.velmux.mobile.test.sources"
+            android:exported="true"
+            android:grantUriPermissions="true" />
+        <provider
+            android:name="com.velmux.mobile.testing.FixtureControlProvider"
+            android:authorities="com.velmux.mobile.test.control"
+            android:exported="true" />
+        <provider
+            android:name="com.velmux.mobile.testing.FixtureDocumentsProvider"
+            android:authorities="com.velmux.mobile.test.documents"
+            android:label="Velmux Test Sources"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
+        </provider>
+    </application>
+</manifest>

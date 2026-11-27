@@ -25,16 +25,23 @@ case "${1:-}" in
     }
     trap capture_android EXIT
     adb logcat -c
+    ./gradlew :android-fixtures:assembleDebug
+    adb install -r -t tests/android-fixtures/build/outputs/apk/debug/android-fixtures-debug.apk
     bash scripts/ffmpeg/build-android.sh arm64-v8a x86_64
     ./gradlew -PbindingsTarget=android :android:connectedDebugAndroidTest
     ;;
   ios-simulator)
+    capture_ios() {
+      result=$?
+      if [ -d build/ios-tests.xcresult ]; then
+        xcrun xcresulttool export attachments --path build/ios-tests.xcresult --output-path build/ios-screenshots || true
+      fi
+      exit "$result"
+    }
+    trap capture_ios EXIT
     if [ ! -f build/media-fixtures/fixtures.json ]; then bash scripts/ci/prepare-media-fixtures.sh; fi
     bash scripts/ffmpeg/build-ios.sh
-    ./gradlew -PbindingsTarget=ios :UI:linkDebugFrameworkIosSimulatorArm64
-    mkdir -p build/ios/iphonesimulator
-    rm -rf build/ios/iphonesimulator/VelmuxUI.framework
-    cp -R UI/build/bin/iosSimulatorArm64/debugFramework/VelmuxUI.framework build/ios/iphonesimulator/
+    bash scripts/ci/apple-framework.sh iphonesimulator Debug
     device=$(python3 scripts/ci/ios-simulator.py)
     xcrun simctl boot "$device" || true
     xcrun simctl bootstatus "$device" -b

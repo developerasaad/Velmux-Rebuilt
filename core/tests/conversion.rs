@@ -1230,14 +1230,31 @@ fn canceled_and_obsolete_preview_requests_release_native_sources_and_scratch() {
         .unwrap();
     harness.provider.preview_gate.wait_entered();
     let replacement_token = CancellationToken::new();
-    let replacement = harness
-        .engine()
-        .prepare_preview(source.id.clone(), 500_000, replacement_token.clone())
-        .unwrap();
+    let replacement_engine = harness.engine().clone();
+    let replacement_source = source.id.clone();
+    let replacement_worker_token = replacement_token.clone();
+    let replacement_worker = thread::spawn(move || {
+        replacement_engine.prepare_preview(replacement_source, 500_000, replacement_worker_token)
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !obsolete.is_cancelled() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
     assert!(
         obsolete.is_cancelled(),
         "A superseded preview continued without cancellation"
     );
+    assert!(
+        !replacement_worker.is_finished(),
+        "The replacement bypassed bounded preview ownership while native access was in use"
+    );
+    // Native access must return before its worker can acknowledge cancellation.
+    harness.provider.preview_gate.release();
+    assert!(matches!(
+        preparation.join().unwrap(),
+        Err(EngineError::Cancelled)
+    ));
+    let replacement = replacement_worker.join().unwrap().unwrap();
     let replacement_path = cached_preview_path(&replacement.locator, &harness);
     let orphan = replacement_path
         .parent()
@@ -1253,11 +1270,6 @@ fn canceled_and_obsolete_preview_requests_release_native_sources_and_scratch() {
     harness.engine().release_inspection(source.id).unwrap();
     assert!(replacement_token.is_cancelled());
     assert!(!replacement_path.exists());
-    harness.provider.preview_gate.release();
-    assert!(matches!(
-        preparation.join().unwrap(),
-        Err(EngineError::Cancelled)
-    ));
     assert!(harness.provider.leases.lock().unwrap().is_empty());
     let remaining: Vec<_> = fs::read_dir(replacement_path.parent().unwrap())
         .unwrap()

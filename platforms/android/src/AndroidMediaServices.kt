@@ -67,16 +67,32 @@ class AndroidMediaServices(context: Context) : MediaServices {
                     require(it.mime == mimeType) { "The existing reservation belongs to a different output representation." }
                     return@synchronized it.reservation()
                 }
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, outputLocation())
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                    // The generated resource identity lets a retry find the same OS reservation.
-                    put(MediaStore.Downloads.DOWNLOAD_URI, marker)
+                var reservedUri: Uri? = null
+                var collisionDetail: String? = null
+                for (attempt in 0 until 8) {
+                    val reservedName = availableName(fileName, forceUnique = attempt > 0)
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, reservedName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, outputLocation())
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                        // The generated resource identity lets a retry find the same OS reservation.
+                        put(MediaStore.Downloads.DOWNLOAD_URI, marker)
+                    }
+                    // Another app's unpublished path may be invisible to this query.
+                    // A fresh candidate retries only failed reservations, never an existing file.
+                    val inserted = try { resolver.insert(downloads, values) }
+                    catch (error: android.database.sqlite.SQLiteConstraintException) {
+                        collisionDetail = error.message?.take(160)
+                        null
+                    }
+                    if (inserted != null) {
+                        reservedUri = inserted
+                        break
+                    }
                 }
-                val uri = resolver.insert(downloads, values)
-                    ?: throw PlatformFailure("Shared storage did not create an output destination.")
+                val uri = reservedUri ?: throw PlatformFailure("Shared storage did not create a unique output destination after bounded collision retries." +
+                    (collisionDetail?.let { " $it" } ?: ""))
                 val row = readRow(uri) ?: throw PlatformFailure("The reserved output could not be inspected.")
                 requireOwned(row)
                 row.reservation()
@@ -171,12 +187,39 @@ class AndroidMediaServices(context: Context) : MediaServices {
     private fun resourceMarker(jobId: String): String = RESOURCE_PREFIX +
         MessageDigest.getInstance("SHA-256").digest(jobId.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
+    @Suppress("DEPRECATION")
     private fun findReservation(marker: String): Row? = resolver.query(
-        downloads, PROJECTION,
+        MediaStore.setIncludePending(downloads), PROJECTION,
         "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ? AND ${MediaStore.Downloads.DOWNLOAD_URI} = ?",
         arrayOf(context.packageName, marker), "${MediaStore.MediaColumns._ID} ASC",
     )?.use { cursor ->
         if (!cursor.moveToFirst()) null else row(cursor, ContentUris.withAppendedId(downloads, cursor.getLong(0)))
+    }
+
+    @Suppress("DEPRECATION")
+    private fun availableName(requested: String, forceUnique: Boolean): String {
+        val dot = requested.lastIndexOf('.').takeIf { it > 0 } ?: requested.length
+        val stem = requested.substring(0, dot)
+        val extension = requested.substring(dot)
+        for (attempt in 0..100) {
+            // API 29 may reject a second pending row for the same path instead
+            // of allocating a collision suffix. Include our unpublished rows.
+            val candidate = if (attempt == 0 && !forceUnique) requested else {
+                val suffix = " (${UUID.randomUUID().toString().take(8)})"
+                var prefix = stem
+                while ((prefix + suffix + extension).toByteArray(Charsets.UTF_8).size > 240 && prefix.isNotEmpty()) {
+                    prefix = prefix.dropLast(1)
+                }
+                prefix + suffix + extension
+            }
+            val exists = resolver.query(
+                MediaStore.setIncludePending(downloads), arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                arrayOf(outputLocation(), candidate), null,
+            )?.use { it.moveToFirst() } ?: throw PlatformFailure("Shared storage could not check output name availability.")
+            if (!exists) return candidate
+        }
+        throw PlatformFailure("Shared storage could not allocate a distinct output filename.")
     }
 
     private fun reservationUri(locator: String): Uri {
@@ -226,8 +269,9 @@ class AndroidMediaServices(context: Context) : MediaServices {
         throw error
     } catch (error: IllegalArgumentException) {
         throw PlatformFailure(error.message?.take(240) ?: message)
-    } catch (_: Exception) {
-        throw PlatformFailure(message)
+    } catch (error: Exception) {
+        val detail = error.message?.replace(Regex("[\r\n]+"), " ")?.take(200)
+        throw PlatformFailure(if (detail.isNullOrBlank()) "$message (${error::class.simpleName})" else "$message ${error::class.simpleName}: $detail")
     }
 
     private data class Row(

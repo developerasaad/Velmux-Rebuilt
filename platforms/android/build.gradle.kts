@@ -23,6 +23,9 @@ android {
             java.setSrcDirs(listOf("src"))
             res.setSrcDirs(listOf("resources"))
         }
+        getByName("debug") {
+            manifest.srcFile("tests/target-debug-manifest.xml")
+        }
         getByName("androidTest") {
             java.setSrcDirs(listOf("tests"))
             manifest.srcFile("tests/AndroidManifest.xml")
