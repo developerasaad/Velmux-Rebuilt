@@ -1,7 +1,7 @@
 # Velmux engineering instructions
 
 Read PROGRESS.md first, then the relevant REQUIREMENTS.md and IMPLEMENTATION.md sections.
-Milestone 2 is explicitly authorized. Milestone 1 is verified; Milestones 3–7 require further authorization. Preserve all later requirements without implementing them early. Keep records current at integration points and before stopping.
+Milestones 1 and 2 are verified and accepted; Milestones 3–7 require further authorization. Do not begin Milestone 3 without explicit authorization. Preserve all later requirements without implementing them early. Keep records current at integration points and before stopping.
 
 - Develop exclusively in developerasaad/Velmux-Rebuilt, main, with independent history. Original developerasaad/Velmux is read-only reference; only its FFmpeg construction dependency closure may be reused. Never copy application code or import history.
 - Repository-local commit identity: developerasaad <developer.asaad@gmail.com>. No global Git changes, force pushes, releases, tags, store preparation, or project license changes. Preserve user changes and all original/published media. Keep credentials out of files and logs.

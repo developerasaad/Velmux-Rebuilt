@@ -2,7 +2,7 @@
 
 The full product and acceptance requirements are in REQUIREMENTS.md. Authorization currently ends at Milestone 2.
 
-Milestone 1 is complete; its inspected source, host, Android and Apple evidence is recorded in PROGRESS.md. Milestone 2 is in progress under explicit authorization; Milestones 3–7 remain pending.
+Milestones 1 and 2 are complete and accepted; their inspected host, Android and Apple evidence is recorded in PROGRESS.md. Authorization ends at Milestone 2. Milestones 3–7 remain pending and require further authorization.
 
 | Milestone | Dependency | Acceptance boundary |
 | --- | --- | --- |
@@ -75,3 +75,5 @@ The original orange action fill remains separate from light-theme foreground cop
 Native document selection accepts generic openable data, with operation-specific guidance. Provider MIME labels and OS UTI families cannot reliably describe every source the core can inspect. Rust remains responsible for identifying actual contents and required streams; the UI tests select a generated video through a generic-data document alias. Previews adapt to the available workspace height so native controls do not consume the entire landscape scroll viewport.
 
 Shared alerts extract the authoritative typed core error detail rather than the generated exception debug description. Accepted-request submission temporarily locks configuration controls while leaving unrelated UI and engine work responsive. Mobile acceptance also independently decodes retained published outputs with system FFmpeg tools; those tools belong only to CI verification, never production processing.
+
+The shared theme reports its resolved light/dark appearance to the native host. Android applies system-bar icon styles and the corresponding window background, including transparent-bar behavior on API35. Runtime checks require rendered content/bar colors as well as icon-mode flags and preserve the setting across Activity recreation. iOS sanitization retains the complete accepted 180-byte filename stem plus its actual extension and reserves bounded space for native collision suffixes.
