@@ -16,6 +16,28 @@ if len(sys.argv) > 1:
     subprocess.run([str(addr2line), '-f', '-C', '-e', str(library), *addresses], check=True)
     readelf = addr2line.with_name('llvm-readelf')
     subprocess.run([str(readelf), '-d', str(library)], check=True)
+    outputs = sorted(Path('core/target/x86_64-linux-android/debug/build').glob('velmux_core-*/output'), key=lambda path: path.stat().st_mtime)
+    if outputs:
+        print("Emitted Cargo native linkage:", flush=True)
+        for line in outputs[-1].read_text().splitlines():
+            if line.startswith('cargo:rustc-link'):
+                print(line, flush=True)
+    # A tiny independent link distinguishes SDK search-path behavior from
+    # Rust archive metadata without rebuilding FFmpeg or launching an emulator.
+    directory = Path('build/android-link-probes')
+    directory.mkdir(parents=True, exist_ok=True)
+    source = directory / 'platform.c'
+    source.write_text('#include <stdio.h>\nint probe(void) { return puts("link probe"); }\n')
+    compiler = addr2line.with_name('x86_64-linux-android29-clang')
+    base = addr2line.parent.parent / 'sysroot/usr/lib/x86_64-linux-android'
+    print(f"Base SDK libraries: {list(base.glob('libc.*'))}", flush=True)
+    for name, paths in [('default', []), ('base-first', [base]), ('api-first', [base / '29', base])]:
+        output = directory / (name + '.so')
+        command = [str(compiler), '-shared', '-fPIC', '-Wl,-t', *['-L' + str(path) for path in paths], str(source), '-o', str(output)]
+        print(f"Platform link probe: {name}", flush=True)
+        result = subprocess.run(command, check=False)
+        if result.returncode == 0:
+            subprocess.run([str(readelf), '-d', str(output)], check=True)
     raise SystemExit(0)
 
 apk_path = Path('platforms/android/build/outputs/apk/debug/android-debug.apk')
