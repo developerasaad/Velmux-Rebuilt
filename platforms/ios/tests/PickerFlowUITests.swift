@@ -199,6 +199,7 @@ final class PickerFlowUITests: XCTestCase {
         try tap(label: "Back")
         try tap(label: "Settings")
         try waitFor("Settings did not expose appearance controls") { self.element(label: "Appearance").exists }
+        XCTAssertTrue(element(label: "Files app → Velmux → Velmux").exists, "Settings must show the user-accessible Files location")
         let choices = ["System", "Light", "Dark"]
         guard let original = choices.first(where: { appearanceSelected($0) }) else {
             throw failure("Settings did not expose its selected appearance")

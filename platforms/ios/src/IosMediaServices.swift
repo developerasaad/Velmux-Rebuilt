@@ -71,7 +71,7 @@ final class IosMediaServices: NSObject, MediaServices {
             return cacheDirectory.path
         } catch { return "" }
     }
-    func outputLocation() -> String { outputDirectory.path }
+    func outputLocation() -> String { "Files app → Velmux → Velmux" }
 
     static func resolveSource(_ locator: String) throws -> URL {
         if locator.hasPrefix("bookmark:") {
