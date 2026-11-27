@@ -8,6 +8,6 @@ for path in pathlib.Path('scripts').rglob('*.py'):
         ast.parse(path.read_text(), filename=str(path))
 CHECK
 while IFS= read -r script; do bash -n "$script"; done < <(git ls-files '*.sh')
-python3 tests/build/test_native_identity.py
+python3 tests/infrastructure/test_native_identity.py
 cargo fmt --manifest-path core/Cargo.toml -- --check
 git diff --check
