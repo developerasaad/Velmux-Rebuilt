@@ -2020,3 +2020,32 @@ fn exposed_quality_and_bitrate_controls_change_real_encoded_media() {
         higher_audio_case,
     ]);
 }
+
+#[test]
+fn basic_conversion_preserves_compatible_tracks_metadata_and_chapters() {
+    let harness = Harness::new("chaptered-streams");
+    let source = harness.inspect("chaptered.mkv", Operation::VideoConverter);
+    assert_eq!(source.info.chapters.len(), 2);
+    let config = harness.defaults(&source, Operation::VideoConverter);
+    assert_eq!(config.format, OutputFormat::Matroska);
+    let catalog = harness
+        .engine()
+        .media_catalog_for_source(source.id.clone(), Operation::VideoConverter)
+        .unwrap();
+    assert_eq!(catalog.len(), 1);
+    let mut incompatible = config.clone();
+    incompatible.format = OutputFormat::Mp4;
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), incompatible),
+        Err(EngineError::Configuration { .. })
+    ));
+    let output = harness.complete(&harness.submit(&source, config).id);
+    harness.expect(vec![
+        json!({"path":output.output.unwrap().locator,"source":"chaptered.mkv",
+        "video_codec":"h264","width":320,"height":180,"audio_codecs":["aac","aac"],
+        "sample_rate":48000,"channels":2,"tones":true,"duration":2.0,
+        "preserve_video_packets":true,"preserve_auxiliary_tracks_and_chapters":true}),
+    ]);
+}

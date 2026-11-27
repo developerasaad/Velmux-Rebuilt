@@ -19,7 +19,7 @@ def run(arguments):
 
 
 def probe(path, packets=False):
-    command = ["ffprobe", "-v", "error", "-show_streams", "-show_format"]
+    command = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-show_chapters"]
     if packets:
         command += ["-show_packets", "-show_data_hash", "sha256"]
     return json.loads(run(command + ["-of", "json", str(path)]))
@@ -165,6 +165,27 @@ def check_case(case):
             def offset(document):
                 return min(float(packet["pts_time"]) for packet in media_packets(document, "audio")) - min(float(packet["pts_time"]) for packet in media_packets(document, "video"))
             assert_close(offset(info), offset(source), 0.05, f"{path}: audio/video offset")
+        if case.get("preserve_auxiliary_tracks_and_chapters"):
+            assert [(stream["codec_type"], stream["codec_name"]) for stream in info["streams"]] == [
+                (stream["codec_type"], stream["codec_name"]) for stream in source["streams"]], f"{path}: preserved track identities changed"
+            shift = float(media_packets(info, "video")[0]["pts_time"]) - float(media_packets(source, "video")[0]["pts_time"])
+            for original, result in zip(source["streams"], info["streams"]):
+                for key in ["language", "title"]:
+                    assert result.get("tags", {}).get(key) == original.get("tags", {}).get(key), f"{path}: track {key} changed"
+                for key in ["default", "forced", "hearing_impaired", "visual_impaired"]:
+                    assert result.get("disposition", {}).get(key) == original.get("disposition", {}).get(key), f"{path}: disposition {key} changed"
+                if original["codec_type"] in {"audio", "subtitle"}:
+                    before = [packet for packet in source["packets"] if packet["stream_index"] == original["index"]]
+                    after = [packet for packet in info["packets"] if packet["stream_index"] == result["index"]]
+                    assert len(before) == len(after) > 0, f"{path}: copied auxiliary packet count changed"
+                    assert [packet["data_hash"] for packet in before] == [packet["data_hash"] for packet in after], f"{path}: copied auxiliary payload changed"
+                    for old, new in zip(before, after):
+                        assert_close(float(new["pts_time"]) - shift, float(old["pts_time"]), 0.002, f"{path}: auxiliary timing changed")
+            assert len(info["chapters"]) == len(source["chapters"]) == 2, f"{path}: chapters lost"
+            for original, result in zip(source["chapters"], info["chapters"]):
+                assert original.get("tags") == result.get("tags"), f"{path}: chapter metadata changed"
+                for key in ["start_time", "end_time"]:
+                    assert_close(float(result[key]) - shift, float(original[key]), 0.002, f"{path}: chapter {key} changed")
         if "preview_source_seek" in case:
             actual = first_rgb(path, case["width"], case["height"])
             reference = first_rgb(FIXTURES / case["source"], case["width"], case["height"], case["preview_source_seek"])

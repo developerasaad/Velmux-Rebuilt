@@ -54,6 +54,7 @@ final class PickerFlowUITests: XCTestCase {
         try tap(label: "Convert")
         try waitForCompletedOutput(stem + ".mp4")
         capture("Jobs — actual picker video conversion completed")
+        try verifySettingsPersistenceAndRestore()
     }
 
     func testActualFilesPickerAudioConversion() throws {
@@ -172,6 +173,57 @@ final class PickerFlowUITests: XCTestCase {
         XCTAssertTrue(card.descendants(matching: .any).matching(NSPredicate(format: "label == 'Open'")).firstMatch.exists)
         XCTAssertTrue(card.descendants(matching: .any).matching(NSPredicate(format: "label == 'Share'")).firstMatch.exists)
         XCTAssertFalse(card.descendants(matching: .any).matching(NSPredicate(format: "label == 'Failed'")).firstMatch.exists)
+    }
+
+    private func verifySettingsPersistenceAndRestore() throws {
+        try tap(label: "Back")
+        try tap(label: "Settings")
+        try waitFor("Settings did not expose appearance controls") { self.element(label: "Appearance").exists }
+        let choices = ["System", "Light", "Dark"]
+        guard let original = choices.first(where: { appearanceSelected($0) }) else {
+            throw failure("Settings did not expose its selected appearance")
+        }
+        capture("Settings — original appearance and output location")
+        let changed = original == "Dark" ? "Light" : "Dark"
+        defer {
+            // Restore the actual prior preference even when a persistence
+            // assertion fails. A cleanup failure remains a test failure.
+            do {
+                if !element(label: "Appearance").exists {
+                    app.terminate()
+                    app.launch()
+                    try waitForHome()
+                    try tap(label: "Settings")
+                }
+                try tap(label: original)
+                try waitFor("The original appearance preference was not restored") { self.appearanceSelected(original) }
+            } catch {
+                XCTFail("Unable to restore the original appearance: \(error)")
+            }
+        }
+        try tap(label: changed)
+        try waitFor("The selected appearance was not applied") { self.appearanceSelected(changed) }
+        capture("Settings — \(changed.lowercased()) appearance applied")
+        app.terminate()
+        app.launch()
+        try waitForHome()
+        try tap(label: "Settings")
+        try waitFor("Appearance did not persist across application relaunch") { self.appearanceSelected(changed) }
+        capture("Settings — \(changed.lowercased()) appearance persisted after relaunch")
+    }
+
+    private func appearanceSelected(_ label: String) -> Bool {
+        let option = app.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch
+        guard option.exists else { return false }
+        return option.isSelected || (option.value as? String) == "1" || (option.value as? NSNumber)?.boolValue == true
+    }
+
+    private func waitForHome() throws {
+        try waitFor("The shared Home screen did not become ready after relaunch", timeout: 45) {
+            self.element(label: "Video Converter").isHittable
+                && !self.element(label: "Restoring the workspace…").exists
+                && !self.element(label: "Media engine unavailable").exists
+        }
     }
 
     private func element(label: String) -> XCUIElement {

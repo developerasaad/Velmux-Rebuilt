@@ -56,6 +56,21 @@ run_ffmpeg -i "$fixtures/video.mp4" -i "$fixtures/stereo.wav" -i "$fixtures/capt
   -metadata:s:a:0 language=eng -metadata:s:a:1 language=fra \
   -metadata:s:a:0 title='First tone track' -metadata:s:a:1 title='Second tone track' \
   "$fixtures/multi-track.mkv"
+cat > "$fixtures/chapters.txt" <<'CHAPTERS'
+;FFMETADATA1
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=1000
+title=Opening
+[CHAPTER]
+TIMEBASE=1/1000
+START=1000
+END=2000
+title=Closing
+CHAPTERS
+run_ffmpeg -i "$fixtures/multi-track.mkv" -f ffmetadata -i "$fixtures/chapters.txt" \
+  -map 0 -map_metadata 0 -map_chapters 1 -c copy "$fixtures/chaptered.mkv"
 run_ffmpeg -f lavfi -i 'testsrc2=size=160x90:rate=12:duration=1' \
   -vf format=yuv420p10le -c:v ffv1 -level 3 -threads:v 1 \
   -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc "$fixtures/hdr.mkv"
