@@ -5,7 +5,10 @@ use std::{ffi::CStr, ptr};
     non_camel_case_types,
     non_snake_case,
     non_upper_case_globals,
-    unnecessary_transmutes
+    unnecessary_transmutes,
+    clippy::ptr_offset_with_cast,
+    clippy::upper_case_acronyms,
+    clippy::type_complexity
 )]
 pub(crate) mod sys {
     include!(concat!(env!("OUT_DIR"), "/ffmpeg.rs"));

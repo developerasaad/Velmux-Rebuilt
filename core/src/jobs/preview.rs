@@ -81,6 +81,12 @@ impl Runtime {
             );
         }
         let result = (|| {
+            // One bounded preview conversion may accompany the job worker.
+            // Obsolete queued requests acquire no descriptors or frame buffers.
+            let _slot = self.preview_slot.lock().map_err(internal)?;
+            if token.is_cancelled() {
+                return Err(EngineError::Cancelled);
+            }
             let opened = self.provider.open_source(source.locator.clone())?;
             let input = Input::open(opened, self.provider.clone(), token.clone())?;
             if input.source_identity()? != source.info.source_identity {

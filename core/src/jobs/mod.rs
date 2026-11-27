@@ -126,6 +126,7 @@ pub(crate) struct Runtime {
     submission: Mutex<()>,
     health: Mutex<Option<String>>,
     previews: Mutex<HashMap<String, preview::PreviewWork>>,
+    preview_slot: Mutex<()>,
 }
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -186,6 +187,7 @@ impl Runtime {
             submission: Mutex::new(()),
             health: Mutex::new(None),
             previews: Mutex::new(HashMap::new()),
+            preview_slot: Mutex::new(()),
         });
         runtime.restore()?;
         let owned = runtime.clone();

@@ -534,7 +534,7 @@ fn stage_nonseekable(reader: &mut Reader, cache: &std::path::Path) -> Result<(),
     if !cache.is_absolute() {
         return Err(EngineError::InvalidStorageRoot);
     }
-    fs::create_dir_all(&cache).map_err(access_error)?;
+    fs::create_dir_all(cache).map_err(access_error)?;
     let directory = cache
         .canonicalize()
         .map_err(access_error)?

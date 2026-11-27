@@ -495,7 +495,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                     .channels
                     .or(audio.channels)
                     .ok_or_else(|| invalid("The source channel layout is unknown."))?;
-                if channels == 0 || channels > 8 || rate < 8000 || rate > 192000 {
+                if channels == 0 || channels > 8 || !(8000..=192000).contains(&rate) {
                     return Err(invalid("The selected sampling or channel layout is outside this route's supported range."));
                 }
                 if desired == "aac"

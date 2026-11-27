@@ -43,6 +43,8 @@ fun JobsScreen(
     modifier: Modifier = Modifier,
 ) {
     var actionFailure by remember { mutableStateOf<String?>(null) }
+    var discardId by remember { mutableStateOf<String?>(null) }
+    var restartId by remember { mutableStateOf<String?>(null) }
     LazyColumn(
         modifier = modifier,
         contentPadding = PaddingValues(20.dp),
@@ -98,14 +100,15 @@ fun JobsScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        if ((active && job.state != JobState.CANCELING) || job.state == JobState.QUEUED) {
+                        if ((active && job.state != JobState.CANCELING) || job.state == JobState.QUEUED || job.state == JobState.PAUSED) {
                             OutlinedButton(onClick = { onCancel(job.id) }) { Text("Cancel") }
                         }
                         if (job.state == JobState.FAILED || job.state == JobState.INTERRUPTED) {
-                            if (job.state == JobState.FAILED && job.verified) {
+                            if (job.verified) {
                                 Button(onClick = { onRetryPublication(job.id) }) { Text("Retry saving") }
                             }
-                            OutlinedButton(onClick = { onRestart(job.id) }) { Text("Restart from beginning") }
+                            OutlinedButton(onClick = { restartId = job.id }) { Text("Restart from beginning") }
+                            TextButton(onClick = { discardId = job.id }) { Text("Discard") }
                         }
                         if (job.state == JobState.COMPLETED) {
                             job.output?.let { output ->
@@ -132,6 +135,14 @@ fun JobsScreen(
             title = "Result unavailable", detail = detail,
             onConfirm = { actionFailure = null }, onDismiss = { actionFailure = null },
         )
+    }
+    discardId?.let { id ->
+        VelmuxAlert("Discard this unfinished job?", "Its unpublished working output will be removed. Original media and published files are kept.", "Discard",
+            onConfirm = { discardId = null; onDismiss(id) }, onDismiss = { discardId = null }, dismissLabel = "Keep job")
+    }
+    restartId?.let { id ->
+        VelmuxAlert("Restart from the beginning?", "Unpublished work will be replaced and the accepted conversion will run again. Use Retry saving when a verified result is ready to publish.", "Restart",
+            onConfirm = { restartId = null; onRestart(id) }, onDismiss = { restartId = null }, dismissLabel = "Keep job")
     }
 }
 

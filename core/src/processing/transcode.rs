@@ -200,17 +200,28 @@ unsafe fn copy_side_data(
     Ok(())
 }
 
+struct TransformContext<'a> {
+    config: &'a crate::ConversionConfig,
+    global: bool,
+    origin_us: Option<i64>,
+    preview: Option<&'a super::PreviewRange>,
+    deadline: Option<Instant>,
+}
+
 unsafe fn make_transform(
     input: *mut sys::AVStream,
     out: *mut sys::AVStream,
     encoder_name: &str,
     plan: &super::StreamPlan,
-    config: &crate::ConversionConfig,
-    global: bool,
-    origin_us: Option<i64>,
-    preview: Option<&super::PreviewRange>,
-    deadline: Option<Instant>,
+    context: &TransformContext<'_>,
 ) -> Result<Transform, EngineError> {
+    let TransformContext {
+        config,
+        global,
+        origin_us,
+        preview,
+        deadline,
+    } = *context;
     let decoder_codec = sys::avcodec_find_decoder((*(*input).codecpar).codec_id);
     if decoder_codec.is_null() {
         return Err(EngineError::UnsupportedMedia {
@@ -879,11 +890,13 @@ pub(crate) fn convert(
                     dest,
                     encoder,
                     item,
-                    &plan.config,
-                    (*(*out).oformat).flags & sys::AVFMT_GLOBALHEADER as i32 != 0,
-                    origin_us,
-                    plan.preview_range.as_ref(),
-                    deadline,
+                    &TransformContext {
+                        config: &plan.config,
+                        global: (*(*out).oformat).flags & sys::AVFMT_GLOBALHEADER as i32 != 0,
+                        origin_us,
+                        preview: plan.preview_range.as_ref(),
+                        deadline,
+                    },
                 )?));
             } else {
                 check(

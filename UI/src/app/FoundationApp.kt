@@ -18,6 +18,7 @@ import com.velmux.ui.theme.VelmuxTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import uniffi.velmux_core.EngineException
 import uniffi.velmux_core.ConversionConfig
 import uniffi.velmux_core.JobRecord
@@ -82,7 +83,7 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
             appearance = media.appearance()
             outputLocation = media.outputLocation()
             jobs = media.jobs()
-            media.runtimeError()?.let { banner = it }
+            media.runtimeError()?.let { alert = Alert("Job worker unavailable", it) }
             cacheBytes = media.cacheBytes()
             ready = true
         } catch (error: Exception) { showFailure(error, "Media engine unavailable") }
@@ -90,10 +91,14 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null) 
     LaunchedEffect(media) {
         media.jobsRevision.collectLatest {
             if (ready) {
-                try { jobs = media.jobs(); media.runtimeError()?.let { banner = it } }
+                try { jobs = media.jobs(); media.runtimeError()?.let { alert = Alert("Job worker unavailable", it) } }
                 catch (error: Exception) { showFailure(error, "Jobs unavailable") }
             }
         }
+    }
+    LaunchedEffect(banner) {
+        val current = banner
+        if(current != null) { delay(8_000); if(banner == current) banner = null }
     }
     DisposableEffect(media) {
         onDispose { selectionGeneration += 1; preparation?.cancel(); source?.let { old -> try { media.releaseNative(old.id) } catch (_: Exception) { /* Engine shutdown already owns cleanup. */ } } }
