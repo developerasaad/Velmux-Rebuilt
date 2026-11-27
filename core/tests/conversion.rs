@@ -520,6 +520,10 @@ fn real_video_encoding_copy_and_immutable_idempotent_submission() {
     let mut copy = harness.defaults(&source, Operation::VideoConverter);
     copy.video_codec = VideoCodec::Copy;
     copy.audio_codec = AudioCodec::Copy;
+    // Explicit equal values are no-ops; these must remain eligible for copying.
+    copy.video_size = VideoSize::Hd720;
+    copy.sample_rate = Some(48_000);
+    copy.channels = Some(2);
     copy.file_name = "copied_video".into();
     let copied = harness.complete(&harness.submit(&source, copy).id);
     assert_eq!(harness.engine().jobs().unwrap().len(), 2);
@@ -609,6 +613,39 @@ fn original_vfr_and_positive_origin_preserve_real_packet_timing() {
 #[test]
 fn real_inspection_and_invalid_direct_core_requests() {
     let harness = Harness::new("inspection");
+    let source = harness.inspect("stereo.flac", Operation::AudioConverter);
+    let options = harness
+        .engine()
+        .media_catalog_for_source(source.id.clone(), Operation::AudioConverter)
+        .unwrap();
+    assert!(!options
+        .iter()
+        .find(|option| option.format == OutputFormat::Mp3)
+        .unwrap()
+        .audio_codecs
+        .contains(&AudioCodec::Copy));
+    assert!(options
+        .iter()
+        .find(|option| option.format == OutputFormat::Flac)
+        .unwrap()
+        .audio_codecs
+        .contains(&AudioCodec::Copy));
+    for name in [
+        " reserved ",
+        "bad*name",
+        "bad?name",
+        "bad\"name",
+        "bad|name",
+    ] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.file_name = name.into();
+        assert!(matches!(
+            harness
+                .engine()
+                .validate_configuration(source.id.clone(), config),
+            Err(EngineError::Configuration { .. })
+        ));
+    }
     let rotated = harness.inspect("rotated-sar.mp4", Operation::VideoConverter);
     let video = rotated
         .info

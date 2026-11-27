@@ -105,6 +105,7 @@ impl Drop for Output {
     }
 }
 struct Transform {
+    constant_video_rate: bool,
     decoder: *mut sys::AVCodecContext,
     encoder: *mut sys::AVCodecContext,
     graph: *mut sys::AVFilterGraph,
@@ -224,6 +225,7 @@ unsafe fn make_transform(
         });
     }
     let mut transform = Transform {
+        constant_video_rate: config.frame_rate == FrameRate::Fps30,
         decoder: sys::avcodec_alloc_context3(decoder_codec),
         encoder: sys::avcodec_alloc_context3(encoder_codec),
         graph: ptr::null_mut(),
@@ -593,6 +595,22 @@ impl Transform {
                     (*self.encoder).time_base,
                 );
             }
+            // libx264 retains each frame's duration in its reordered packet.
+            // Rescale that field together with PTS; a chosen CFR has exactly
+            // one encoder tick even when the fps filter's final duration is 0.
+            (*frame.0).duration = if (*self.encoder).codec_type == sys::AVMEDIA_TYPE_VIDEO
+                && self.constant_video_rate
+            {
+                1
+            } else if (*frame.0).duration > 0 {
+                sys::av_rescale_q(
+                    (*frame.0).duration,
+                    sys::av_buffersink_get_time_base(self.sink),
+                    (*self.encoder).time_base,
+                )
+            } else {
+                0
+            };
             if self.tone_map {
                 for kind in [
                     sys::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,

@@ -187,19 +187,13 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
         ));
     }
     if config.video_codec == VideoCodec::Copy
-        && (config.video_size != VideoSize::Original
-            || config.frame_rate != FrameRate::Original
-            || config.quality != 23)
+        && (config.frame_rate != FrameRate::Original || config.quality != 23)
     {
         return Err(invalid(
             "Stream copying cannot change video size, timing or encoding quality.",
         ));
     }
-    if config.audio_codec == AudioCodec::Copy
-        && (config.sample_rate.is_some()
-            || config.channels.is_some()
-            || config.audio_bitrate.is_some())
-    {
+    if config.audio_codec == AudioCodec::Copy && config.audio_bitrate.is_some() {
         return Err(invalid(
             "Stream copying cannot change audio sampling, channels or bitrate.",
         ));

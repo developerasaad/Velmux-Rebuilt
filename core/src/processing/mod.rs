@@ -323,9 +323,40 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 .video
                 .as_ref()
                 .ok_or_else(|| invalid("Video geometry could not be inspected."))?;
-            let transform = config.video_size != VideoSize::Original
-                || config.frame_rate != FrameRate::Original
-                || config.quality != 23;
+            let size_change = match config.video_size {
+                VideoSize::Original => false,
+                size => {
+                    let width = video
+                        .width
+                        .ok_or_else(|| invalid("The source width is unknown."))?;
+                    let height = video
+                        .height
+                        .ok_or_else(|| invalid("The source height is unknown."))?;
+                    let sar = video
+                        .sample_aspect_ratio
+                        .as_ref()
+                        .map_or(1.0, |r| f64::from(r.numerator) / f64::from(r.denominator));
+                    if !sar.is_finite() || sar <= 0.0 {
+                        return Err(invalid("The source pixel aspect ratio is invalid."));
+                    }
+                    let display_width = f64::from(width) * sar;
+                    let display_height = f64::from(height);
+                    let (long, short) = if size == VideoSize::Hd720 {
+                        (1280.0, 720.0)
+                    } else {
+                        (854.0, 480.0)
+                    };
+                    display_width.max(display_height) > long
+                        || display_width.min(display_height) > short
+                }
+            };
+            let transform =
+                size_change || config.frame_rate != FrameRate::Original || config.quality != 23;
+            if config.video_codec == VideoCodec::Copy && transform {
+                return Err(invalid(
+                    "The selected video settings require encoding; use Automatic or H.264.",
+                ));
+            }
             let copy_compatible =
                 unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
             let encode = config.video_codec == VideoCodec::H264
@@ -436,11 +467,20 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 || config.audio_bitrate.is_some();
             let compatible =
                 unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
+            if config.audio_codec == AudioCodec::Copy && transform {
+                return Err(invalid(
+                    "The selected audio settings require encoding; choose a compatible encoder.",
+                ));
+            }
+            let explicit_target = config.audio_codec != AudioCodec::Automatic
+                && config.audio_codec != AudioCodec::Copy;
+            let codec_change = stream.codec != desired
+                || (desired == "aac" && explicit_target && stream.profile.as_deref() != Some("LC"));
             let encode = config.audio_codec != AudioCodec::Copy
-                && (!matches!(config.audio_codec, AudioCodec::Automatic | AudioCodec::Copy)
-                    || transform
+                && (transform
                     || !compatible
-                    || (config.operation == Operation::AudioConverter && stream.codec != desired));
+                    || ((config.operation == Operation::AudioConverter || explicit_target)
+                        && codec_change));
             if encode {
                 if !stream.decoder_available {
                     return Err(invalid(
