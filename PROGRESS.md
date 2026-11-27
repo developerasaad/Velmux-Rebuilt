@@ -1,54 +1,46 @@
 # Progress
 
-## Authorization and status
+## Authorization
 
-Milestone 1 — Engineering foundation: in progress. Milestones 2–7 are pending and unauthorized.
+Milestone 1 — Engineering foundation is in progress. Milestones 2–7 remain pending and unauthorized. No processing tools are presented as complete.
 
-## Verified
+## Verified foundation
 
-- Workspace initially contained only .DS_Store and no Git history or configuration.
-- New GitHub repository was empty; local main has independent history and only the Velmux-Rebuilt origin.
-- Effective author/committer are developerasaad <developer.asaad@gmail.com>, configured locally.
-- Git push and Actions dispatch independently succeeded. Initial native dependency run: [45926113131](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45926113131), source `9421523`.
-- The original repository is an ignored read-only filtered clone, inspected through Git objects.
-- REQUIREMENTS.md preserves the full authoritative mandate verbatim.
+- Independent history on main, origin developerasaad/Velmux-Rebuilt, repository-local author/committer developerasaad <developer.asaad@gmail.com>. Push, Actions inspection and dispatch work independently. Original Velmux is read-only reference.
+- REQUIREMENTS.md matches the full supplied specification byte-for-byte. The required responsibility layout, identity and palette are established; see IMPLEMENTATION.md and docs/reference-findings.md.
+- Pinned FFmpeg 7.1.5 archive digest and official detached signature checked. Complete authorized construction closure retained, including cross-toolchain fixes; no original application implementation imported.
+- Target-specific native identity isolation, shared-input invalidation and generated-PATH/tool-version tests pass locally and in CI. Public build/test entry points require the selected clean compiler environment; Android commands require Bash 5.
 
-## In progress
+| Evidence | Source | Inspected result |
+| --- | --- | --- |
+| [Source checks 45931075236](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931075236) | `662af3d` | Passed script parsing, nine cache-identity regressions, Rust formatting and custom Gradle configuration |
+| [Native dependencies 45927805349](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45927805349) | `ef805cc` | Android arm64-v8a/x86_64 and Apple arm64 device/simulator construction and compiled-component validation passed; host C probe also passed |
+| [Host integration 45930002333](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45930002333) | `c16faf5` | Corrected host SVT recipe constructed and saved; four real Rust/FFmpeg integration tests and Clippy passed |
+| [Android integration 45930005832](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45930005832) | `c16faf5` | Generated bindings, release/debug builds, both ABI closures and ELF/APK 16 KiB alignment passed; API 29 process crashed before tests |
+| [Apple integration 45929262928](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45929262928) | `c9aab29` | Rust/Kotlin static framework and Swift host compiled; final app link failed on libass iconv dependency |
 
-- Reference audit complete; decisions recorded in IMPLEMENTATION.md and docs/reference-findings.md.
-- Retrieved the authorized native dependency closure, updated FFmpeg to signed 7.1.5, strengthened identities/filter validation, and retained cross-compilation fixes. No local FFmpeg build.
-- Rust diagnostic library, generated binding configuration, native providers, shared shell and focused host/mobile tests implemented but not yet compiled or run.
-- Independent source review found and corrected activity-scoped engine ownership and unannotated Swift exception propagation; runtime regression tests remain pending.
-- Initial Android CI selected the hosted default NDK 27.3 rather than the required 27.2. Identity validation rejected it before construction. CI now explicitly resolves the pinned NDK; host/Apple construction continues without an unchanged rerun.
-- Local source checks passed: full specification byte equality, shell/Python parsing, Xcode project/plist syntax and Rust formatting. These do not prove linking or runtime correctness.
+The host Rust tests demonstrate linked FFmpeg registries, record values, native-provider calls, shared engine lifetime, typed cancellation/access errors and concurrent cursor isolation. Native build-tree manifests are not physical hardware or actual accelerated-processing evidence.
 
-## CI evidence
+## Implemented, pending mobile runtime acceptance
 
-- [Source checks 45926839454](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45926839454), `3814f83`: passed on attempt 2. Attempt 1 failed Maven plugin resolution; the published pinned POM was independently reachable and the unchanged retry passed.
-- [Android native dependencies 45926413147](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45926413147), `baed2e9`: both arm64-v8a and x86_64 construction/compiled-component validation passed. x86_64 reported 512 decoders, 195 encoders, 177 muxers and 350 demuxers. These are build-tree capability checks, not mobile runtime or hardware-processing proof.
-- Initial Apple job in run 45926113131 failed x265 C linking because its pkg-config closure omitted libc++. A focused x265/zimg Apple runtime correction is implemented; Apple construction/link/runtime evidence is pending.
-- Host native construction in [45926113131](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45926113131), `9421523`: passed its actual runtime registry probe and validation. The overall run failed because of the separately recorded Android environment and Apple link errors.
+- Gobley/UniFFI bindings, one process-owned engine per native host, shared Compose diagnostics shell, custom source roots and native storage providers.
+- Android lifecycle recreation, native callbacks, typed errors and cancellation instrumentation tests; Swift worker-thread/provider/error/host tests.
+- Apple libass iconv system dependency is now explicitly linked. Apple compiler/dependency caches and Android tombstones/symbolication are retained for focused diagnosis.
 
-- Host and Android integration have been dispatched against `8e29cf7` before the unrelated Apple-builder correction, preserving exact matching native artifact identities. Source revisions remain explicit; no cached artifact is relabeled.
+## Active verification and defects
 
-- First host/Android integration attempts reached Rust compilation and found omitted opaque-type declarations in the generated bindgen output. The function allowlist now explicitly includes the four required opaque types. Neither attempt established runtime correctness.
-- The superseded Apple integration attempt was canceled before its known Rust compile failure, so dependency construction can be saved independently before app verification.
-- Native identity schema 3 hashes each complete target recipe rather than unrelated builders, plus both host C/C++ compilers. This deliberately invalidates initial keys once; artifacts are rebuilt, never relabeled. Subsequent target-only recipe edits preserve other targets' caches.
+- Android [45931078568](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931078568), `662af3d`: running with full native-crash evidence capture. Earlier logcat confirms SIGSEGV during Application startup before test execution. Cause remains under investigation; no successful Android runtime claim.
+- Apple [45931075511](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45931075511), `662af3d`: running corrected device-host linkage, followed by simulator integration.
+- Host GCC IPO was incompatible with Rust native-archive bundling. SVT host LTO is explicitly disabled; the successful test run establishes this correction. Mobile recipes are unchanged by that fix.
+- Earlier failures corrected: hosted default NDK mismatch, missing bindgen opaque declarations, Apple x265/zimg C++ closure, activity-owned engine lifetime and unannotated Swift error propagation. A test-directory collision with the build ignore rule was corrected; source checks now pass.
+- No external access/runner blocker currently prevents work. Remaining failures are integration defects to resolve within Milestone 1.
 
-- Independently reran all nine identity isolation/tool-version/PATH regression assertions locally after inspecting the fixture script. These are cache-rule tests with tool stubs, not native compiler verification. They now run in Source checks.
-- Public build/test entry points and CI setup enforce the selected clean compiler environment. Android commands require Bash 5; unverified custom compiler flag environments are not supported.
+## Acceptance remaining
 
-## Acceptance still pending
+Demonstrate real Android and iOS host-to-Rust-to-FFmpeg calls and provider callbacks at runtime, cancellation/errors/lifetime behavior, Android API 29/newer launch and iOS simulator launch, plus successful unsigned Apple device-target linkage. Inspect final workflow evidence and review the integrated result before accepting Milestone 1.
 
-Dependency construction and target capability verification; Android/iOS linking, launch, callbacks, cancellation and lifetime tests; host tests; actual CI run inspection. No product tools or physical-device behavior are claimed.
+Physical devices are unavailable. Hardware-specific behavior, accelerated processing, media correctness and performance are unverified. The inherited x265 build does not establish 10-bit HEVC encoding. Product catalog, SQLite operational state and processing workflows belong to subsequent authorized milestones.
 
 ## Next authorized action
 
-Continue Milestone 1 integration and verification. Do not begin Milestone 2.
-
-## Current integration defects
-
-- Current native construction [45927805349](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45927805349), `ef805cc`: host, both Android ABIs and both Apple slices passed.
-- Android [45928769529](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45928769529), `c9aab29`: generated bindings, release build and ELF/APK alignment/closure checks passed; API 29 instrumentation crashed before tests. Added in-emulator logcat capture; runtime is not verified.
-- Host Rust linkage exposed SVT's default slim GCC LTO objects. Switching back to GCC's linker did not fix Rust archive bundling. The host recipe now explicitly disables SVT LTO; the unsuccessful linker override was removed. Only host artifacts are invalidated.
-- Apple integration [45929262928](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/45929262928), `c9aab29`: running device host build.
+Resolve the Android native startup crash, complete Apple linking/simulator verification, and finish the Milestone 1 acceptance gate. Do not begin Milestone 2.
