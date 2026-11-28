@@ -575,9 +575,26 @@ final class ConversionIntegrationTests: XCTestCase {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         let picker = try XCTUnwrap(host.presentedViewController as? UIDocumentPickerViewController)
+        // UIKit attaches presentedViewController before its presentation has
+        // finished. Canceling at that point can tear down DocumentManager's
+        // remote host while the service is still installing its controls.
+        while (picker.isBeingPresented || picker.transitionCoordinator != nil || picker.viewIfLoaded?.window == nil),
+              ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(picker.isBeingPresented)
+        XCTAssertNil(picker.transitionCoordinator)
+        XCTAssertNotNil(picker.viewIfLoaded?.window)
         XCTAssertFalse(picker.allowsMultipleSelection)
         actions.documentPickerWasCancelled(picker); actions.documentPickerWasCancelled(picker)
-        picker.dismiss(animated: false)
+        // Keep the picker and its delegate alive through UIKit's actual
+        // dismissal acknowledgement, rather than just issuing dismissal.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            picker.dismiss(animated: false) {
+                withExtendedLifetime(actions) { continuation.resume() }
+            }
+        }
+        XCTAssertNil(host.presentedViewController)
         await fulfillment(of: [canceled], timeout: 5)
         XCTAssertEqual(calls, 1)
     }
