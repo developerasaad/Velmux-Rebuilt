@@ -251,6 +251,27 @@ def check_case(case):
         actual = described_aiff['s32'] if described_aiff is not None else decoded_audio(path)
         expected = decoded_audio(FIXTURES / case['exact_audio_source'])
         assert actual and actual == expected, f'{path}: lossless encoding changed sample values, speaker order or duration'
+    if 'adjusted_audio_source' in case:
+        actual = float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
+        original = float_samples(decoded_audio(FIXTURES / case['adjusted_audio_source'], 'f64le', 'pcm_f64le'))
+        assert len(actual) == len(original) > 0, f'{path}: gain/fades or limiter lookahead changed sample count'
+        gain = 10 ** (case['gain_centidb'] / 2000)
+        if case['gain_centidb'] == 2400:
+            peak = max(abs(value) for value in actual)
+            assert 0.8 < peak <= 0.95005, f'{path}: positive gain did not apply bounded peak protection: {peak}'
+            assert max(abs(value * gain) for value in original) > 1.5, 'The peak-protection fixture must actually exceed full scale'
+        else:
+            channels, rate = case['channels'], case['sample_rate']
+            frames = len(original) // channels
+            fade_in = case['fade_in_us'] * rate / 1_000_000
+            fade_out = case['fade_out_us'] * rate / 1_000_000
+            def reference(index, value):
+                frame = index // channels
+                envelope = min(1, frame / fade_in if fade_in else 1,
+                               (frames - frame) / fade_out if fade_out else 1)
+                return value * gain * max(0, envelope)
+            error = max(abs(value - reference(index, original[index])) for index, value in enumerate(actual))
+            assert error <= 2 / 32768, f'{path}: decoded gain/fade envelope, timing or channel order differs: {error}'
     if 'pcm_precision_source' in case:
         actual = described_aiff['values'] if described_aiff is not None else float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
         expected = float_samples(decoded_audio(FIXTURES / case['pcm_precision_source'], 'f64le', 'pcm_f64le'))

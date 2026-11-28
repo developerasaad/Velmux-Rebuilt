@@ -1,3 +1,4 @@
+mod adjustments;
 mod compression;
 pub(crate) mod encoding;
 mod execution;
@@ -31,6 +32,8 @@ pub(crate) struct StreamPlan {
     pub encoding: Option<encoding::EncodingSettings>,
     #[serde(default)]
     pub frame_rate: Option<crate::Rational>,
+    #[serde(default)]
+    pub audio_filters: Option<adjustments::AudioFilterPlan>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -190,6 +193,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             bit_depth: None,
             encoding: None,
             frame_rate: None,
+            audio_filters: None,
         });
     }
     if let Some(stream) = audio {
@@ -225,6 +229,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             bit_depth: None,
             encoding: None,
             frame_rate: None,
+            audio_filters: None,
         });
     }
     if streams.is_empty() {
@@ -270,6 +275,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
         audio_precision: None,
         channel_layout: None,
         compression: None,
+        audio_adjustments: None,
     };
     Ok(Plan {
         output: Some(OutputRepresentation::from_format(config.format)),
@@ -326,6 +332,7 @@ pub(crate) fn validate_operation(
 pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, EngineError> {
     validate_fields(config)?;
     validate_operation(info, config.operation)?;
+    let audio_filters = adjustments::audio_plan(info, config.audio_adjustments.as_ref())?;
     let accepted = config;
     let effective = compression::effective_config(info, config)?;
     let config = &effective;
@@ -391,6 +398,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             bit_depth: None,
             encoding: None,
             frame_rate: None,
+            audio_filters: None,
         };
         if stream.kind == StreamKind::Video
             && !stream
@@ -447,6 +455,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 item.encoding = Some(settings);
             }
         } else if stream.kind == StreamKind::Audio {
+            item.audio_filters = audio_filters.clone();
             compression::validate_audio_copy(stream, config)?;
             let audio = stream
                 .audio

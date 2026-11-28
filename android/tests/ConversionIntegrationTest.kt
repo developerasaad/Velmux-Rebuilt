@@ -43,6 +43,7 @@ import org.junit.rules.TestWatcher
 import org.junit.runner.Description
 import org.junit.runner.RunWith
 import uniffi.velmux_core.AudioCodec
+import uniffi.velmux_core.AudioAdjustments
 import uniffi.velmux_core.EngineException
 import uniffi.velmux_core.OutputFormat
 import java.io.ByteArrayOutputStream
@@ -286,6 +287,47 @@ class ConversionIntegrationTest {
         } finally {
             media.releaseNative(inspected.id)
             acceptedIds.forEach { cleanupJob(it) }
+            revoke("stereo.wav")
+        }
+    }
+
+    @Test
+    fun audioGainAndFadesTransformSamplesWithoutChangingTheirTimeline() {
+        media.beginNative()
+        val uri = grant("stereo.wav")
+        val beforeHash = hash(uri)
+        val source = media.inspectNative(uri.toString(), "stereo.wav", false)
+        var acceptedId: String? = null
+        try {
+            val configuration = media.defaultsNative(source.id, false).copy(
+                format = OutputFormat.WAV, audioCodec = AudioCodec.PCM,
+                fileName = "native-adjustments-${UUID.randomUUID()}",
+                audioAdjustments = AudioAdjustments(-602, 500_000uL, 500_000uL),
+            )
+            try {
+                media.submitNative(source.id, UUID.randomUUID().toString(), configuration.copy(audioAdjustments = AudioAdjustments(2401, 0uL, 0uL)))
+                fail("Rust accepted an invalid gain submitted without UI constraints")
+            } catch (_: EngineException.Configuration) { }
+            val accepted = media.submitNative(source.id, UUID.randomUUID().toString(), configuration)
+            acceptedId = accepted.id
+            val completed = awaitJob(accepted.id)
+            val output = Uri.parse(requireNotNull(completed.outputLocator))
+            val actual = ByteBuffer.wrap(decodeAudio(output)).order(ByteOrder.LITTLE_ENDIAN)
+            val original = ByteBuffer.wrap(instrumentation.context.assets.open("stereo.wav").use { wavPcm(it.readBytes()) }).order(ByteOrder.LITTLE_ENDIAN)
+            assertEquals("Sample-domain adjustments changed duration or channels", original.remaining(), actual.remaining())
+            var sample = 0
+            while (original.hasRemaining()) {
+                val frame = sample / 2
+                val envelope = minOf(1.0, frame / 24_000.0, (96_000 - frame) / 24_000.0)
+                val expected = original.short * Math.pow(10.0, -6.02 / 20.0) * envelope
+                assertEquals("Gain/fade sample $sample differs from its independently calculated envelope", expected, actual.short.toDouble(), 2.0)
+                sample++
+            }
+            assertEquals(192_000, sample)
+            assertEquals(beforeHash, hash(uri))
+        } finally {
+            media.releaseNative(source.id)
+            acceptedId?.let { cleanupJob(it) }
             revoke("stereo.wav")
         }
     }

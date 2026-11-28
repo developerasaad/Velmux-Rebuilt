@@ -420,6 +420,40 @@ final class ConversionIntegrationTests: XCTestCase {
     }
 
     @MainActor
+    func testAudioGainAndFadesReachRealNativeDecodedSamples() async throws {
+        let session = try await applicationSession()
+        let original = try fixture("stereo.wav")
+        originalHashes[original] = try digest(original)
+        let inspected = try await session.inspect(IosMediaServices.selectedSource(url: original), operation: .audioConverter)
+        ownedInspections.insert(inspected.id)
+        var configuration = try await session.defaults(sourceId: inspected.id, operation: .audioConverter)
+        configuration.format = .wav; configuration.audioCodec = .pcm
+        configuration.fileName = "ios-adjustments-" + UUID().uuidString.lowercased()
+        configuration.audioAdjustments = AudioAdjustments(gainCentidb: -602, fadeInUs: 500_000, fadeOutUs: 500_000)
+        let choices = try session.choices(sourceId: inspected.id, configuration: configuration)
+        XCTAssertEqual(choices.audioAdjustmentLimits?.minimumGainCentidb, -6000)
+        var invalid = configuration
+        invalid.audioAdjustments = AudioAdjustments(gainCentidb: 2401, fadeInUs: 0, fadeOutUs: 0)
+        do { try await session.validate(sourceId: inspected.id, configuration: invalid); XCTFail("Rust accepted invalid audio gain") }
+        catch EngineError.Configuration {}
+        let accepted = try await session.submit(sourceId: inspected.id, key: configuration.fileName, configuration: configuration)
+        ownedJobs[accepted.id] = configuration.fileName + ".wav"
+        let completed = try await waitForTerminal(session, id: accepted.id)
+        let output = try completedURL(completed)
+        ownedOutputs.insert(output)
+        let proof = try await onWorker { try self.decodeAudio(output) }
+        XCTAssertEqual(proof.frames, 96_000)
+        XCTAssertEqual(proof.sampleRate, 48_000)
+        XCTAssertEqual(proof.channels, 2)
+        XCTAssertEqual(proof.leftHz, 440, accuracy: 1)
+        XCTAssertEqual(proof.rightHz, 660, accuracy: 1)
+        XCTAssertEqual(proof.duration, 2, accuracy: 0.01)
+        let expectedRms = 0.15 / sqrt(2) * pow(10, -6.02 / 20) * sqrt(2.0 / 3)
+        XCTAssertEqual(proof.rms, expectedRms, accuracy: 0.001,
+                       "Real sample energy must reflect gain and both linear fade envelopes")
+    }
+
+    @MainActor
     func testCoreValidationAndCancellationKeepOriginalsAndOtherRequestsResponsive() async throws {
         let session = try await applicationSession()
         let sourceURL = try fixture("long-preview.mp4"), invalidURL = try fixture("invalid.bin")

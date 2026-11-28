@@ -1,7 +1,10 @@
 use crate::{EngineError, MediaInfo};
 use serde::{Deserialize, Serialize};
 
+mod adjustments;
 mod audio;
+pub(crate) use adjustments::duration as audio_duration;
+pub use adjustments::{AudioAdjustmentLimits, AudioAdjustments};
 mod catalog;
 mod compression;
 pub(crate) use compression::{
@@ -60,6 +63,8 @@ pub struct ConversionConfig {
     pub channel_layout: Option<AudioLayout>,
     #[serde(default)]
     pub compression: Option<CompressionSettings>,
+    #[serde(default)]
+    pub audio_adjustments: Option<AudioAdjustments>,
 }
 
 pub(crate) fn invalid(detail: impl Into<String>) -> EngineError {
@@ -72,6 +77,14 @@ pub(crate) fn invalid(detail: impl Into<String>) -> EngineError {
 /// or constructing a processing pipeline. Final submission additionally checks
 /// the actual source streams and bundled codec support.
 pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineError> {
+    if let Some(settings) = &config.audio_adjustments {
+        settings.validate()?;
+        if config.operation != Operation::AudioConverter && settings.active() {
+            return Err(invalid(
+                "These sample adjustments apply to Audio Converter.",
+            ));
+        }
+    }
     if let Some(compression) = &config.compression {
         compression.validate(config.operation)?;
         if config.quality != 23 || config.audio_bitrate.is_some() {
@@ -282,6 +295,7 @@ pub(crate) fn default_config(
         audio_precision: None,
         channel_layout: None,
         compression: Some(CompressionSettings::default()),
+        audio_adjustments: None,
     };
     let has_audio = source
         .streams
@@ -329,6 +343,7 @@ pub struct FormatOption {
 /// sampling/layout or automatic bitrate; no source probing or pipeline planning.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ConfigurationChoices {
+    pub audio_adjustment_limits: Option<AudioAdjustmentLimits>,
     pub video_sizes: Vec<VideoSize>,
     pub frame_rates: Vec<FrameRate>,
     pub sample_rates: Vec<u32>,
@@ -819,6 +834,17 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
     let (default_custom_width, default_custom_height, default_custom_frame_rate) =
         custom_geometry_defaults(video_facts);
     let mut result = ConfigurationChoices {
+        audio_adjustment_limits: (config.operation == Operation::AudioConverter
+            && info
+                .streams
+                .iter()
+                .any(|stream| stream.kind == StreamKind::Audio)
+            && info
+                .streams
+                .iter()
+                .filter(|stream| stream.kind == StreamKind::Audio)
+                .all(|stream| stream.decoder_available))
+        .then(|| adjustments::limits(info)),
         video_sizes: Vec::new(),
         frame_rates: vec![FrameRate::Original],
         sample_rates: Vec::new(),

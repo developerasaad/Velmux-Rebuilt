@@ -159,6 +159,10 @@ pub(crate) fn audio_transform_requested(stream: &StreamInfo, config: &Conversion
         || layout_change
         || precision_change
         || config.audio_bitrate.is_some()
+        || config
+            .audio_adjustments
+            .as_ref()
+            .is_some_and(|settings| settings.active())
 }
 
 pub(crate) fn audio_encoding_required(

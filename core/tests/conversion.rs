@@ -17,11 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 use velmux_core::{
-    AudioCodec, AudioLayout, AudioPrecision, AudioRateControl, CancellationToken, CompressionMode,
-    CompressionSettings, ConversionConfig, Engine, EngineError, FrameRate, InspectedSource,
-    JobObserver, JobRecord, JobState, MediaProvider, NativeProvider, OpenedSource, Operation,
-    OutputFormat, OutputReservation, PublishedOutput, StreamKind, TargetSize, TargetSizeUnit,
-    VideoCodec, VideoRateControl, VideoSize,
+    AudioAdjustments, AudioCodec, AudioLayout, AudioPrecision, AudioRateControl, CancellationToken,
+    CompressionMode, CompressionSettings, ConversionConfig, Engine, EngineError, FrameRate,
+    InspectedSource, JobObserver, JobRecord, JobState, MediaProvider, NativeProvider, OpenedSource,
+    Operation, OutputFormat, OutputReservation, PublishedOutput, StreamKind, TargetSize,
+    TargetSizeUnit, VideoCodec, VideoRateControl, VideoSize,
 };
 
 fn repository() -> PathBuf {
@@ -750,12 +750,14 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         "audio_precision",
         "channel_layout",
         "compression",
+        "audio_adjustments",
     ] {
         accepted.remove(field);
     }
     for stream in legacy["plan"]["streams"].as_array_mut().unwrap() {
         stream.as_object_mut().unwrap().remove("encoding");
         stream.as_object_mut().unwrap().remove("frame_rate");
+        stream.as_object_mut().unwrap().remove("audio_filters");
     }
     let legacy_bytes = serde_json::to_string(&legacy).unwrap();
     connection
@@ -3107,6 +3109,83 @@ fn accepted_request_text(harness: &Harness, id: &str) -> String {
             row.get(0)
         })
         .unwrap()
+}
+
+#[test]
+fn audio_gain_fades_and_peak_protection_transform_real_samples_without_changing_duration() {
+    let harness = Harness::new("audio-adjustments");
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let before = digest(&fixture("stereo.wav"));
+    let mut cases = Vec::new();
+    for (gain_centidb, fade_in_us, fade_out_us) in [
+        (-602, 0, 0),
+        (602, 0, 0),
+        (0, 500_000, 750_000),
+        (-300, 250_000, 500_000),
+        (2400, 0, 0),
+    ] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_adjustments = Some(AudioAdjustments {
+            gain_centidb,
+            fade_in_us,
+            fade_out_us,
+        });
+        let job = harness.complete(&harness.submit(&source, config).id);
+        let accepted: Value =
+            serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+        let stream = &accepted["plan"]["streams"][0];
+        assert_eq!(
+            stream["encoder"], "pcm_s16le",
+            "Adjustments must decode and encode samples rather than copy the source"
+        );
+        assert_eq!(stream["audio_filters"]["gain_centidb"], gain_centidb);
+        let mut expected = expectation(&job, "pcm_s16le", 2, 48000);
+        expected["tones"] = json!(false);
+        expected["decoded_samples"] = json!(96_000);
+        expected["adjusted_audio_source"] = json!("stereo.wav");
+        expected["gain_centidb"] = json!(gain_centidb);
+        expected["fade_in_us"] = json!(fade_in_us);
+        expected["fade_out_us"] = json!(fade_out_us);
+        cases.push(expected);
+    }
+    let mut invalid = harness.defaults(&source, Operation::AudioConverter);
+    invalid.audio_adjustments = Some(AudioAdjustments {
+        gain_centidb: 0,
+        fade_in_us: 1_500_000,
+        fade_out_us: 1_000_000,
+    });
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), invalid.clone()),
+        Err(EngineError::Configuration { .. })
+    ));
+    invalid.audio_adjustments = Some(AudioAdjustments {
+        gain_centidb: 2401,
+        ..Default::default()
+    });
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), invalid.clone()),
+        Err(EngineError::Configuration { .. })
+    ));
+    invalid.audio_adjustments = Some(AudioAdjustments {
+        gain_centidb: 100,
+        ..Default::default()
+    });
+    invalid.audio_codec = AudioCodec::Copy;
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), invalid),
+        Err(EngineError::Configuration { .. })
+    ));
+    assert_eq!(digest(&fixture("stereo.wav")), before);
+    harness.engine().release_inspection(source.id).unwrap();
+    harness.expect(cases);
 }
 
 fn assert_compatible_stereo_pcm_is_copied(harness: &Harness, record: &JobRecord) {

@@ -3,6 +3,7 @@ use crate::{
     ffmpeg::sys, media::input::Input, CancellationToken, EngineError, FrameRate, MediaInfo,
 };
 use std::{
+    collections::VecDeque,
     ffi::{CStr, CString},
     fs::{File, OpenOptions},
     os::unix::fs::OpenOptionsExt,
@@ -167,6 +168,154 @@ impl Drop for Frame {
     }
 }
 
+struct Decoder(*mut sys::AVCodecContext);
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        unsafe { sys::avcodec_free_context(&mut self.0) }
+    }
+}
+
+unsafe fn retained_packet_bytes(packet: &Packet) -> Option<usize> {
+    let mut bytes = usize::try_from((*packet.0).size).ok()?;
+    let count = usize::try_from((*packet.0).side_data_elems).ok()?;
+    if count > 1024 || count > 0 && (*packet.0).side_data.is_null() {
+        return None;
+    }
+    for index in 0..count {
+        bytes = bytes.checked_add((*(*packet.0).side_data.add(index)).size)?;
+    }
+    Some(bytes)
+}
+
+/// x265 consumes static HDR metadata when opened, while some demuxers expose
+/// elementary SEI only on decoded frames. Retain every compressed packet for
+/// exact replay by the processing decoder; never seek or discard another track.
+unsafe fn prime_hdr_metadata(
+    input: &Input,
+    stream: *mut sys::AVStream,
+    retained: &mut VecDeque<Packet>,
+    token: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<Frame, EngineError> {
+    let limit = (Instant::now() + Duration::from_secs(10))
+        .min(deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(10)));
+    let exceeded = || {
+        EngineError::UnsupportedMedia {
+        detail: concat!(
+            "The first HDR frame could not be decoded within the bounded preparation budget. ",
+            "Use compatible stream copying or another source; HDR metadata cannot be silently discarded."
+        ).into(),
+    }
+    };
+    let codec = sys::avcodec_find_decoder((*(*stream).codecpar).codec_id);
+    if codec.is_null() {
+        return Err(exceeded());
+    }
+    let decoder = Decoder(sys::avcodec_alloc_context3(codec));
+    if decoder.0.is_null() {
+        return Err(failure(-libc::ENOMEM, "Decode"));
+    }
+    check(
+        sys::avcodec_parameters_to_context(decoder.0, (*stream).codecpar),
+        "Decode",
+    )?;
+    (*decoder.0).pkt_timebase = (*stream).time_base;
+    (*decoder.0).thread_count = 1;
+    (*decoder.0).max_pixels = 64 * 1024 * 1024;
+    check(
+        sys::avcodec_open2(decoder.0, codec, ptr::null_mut()),
+        "Decode",
+    )?;
+    let frame = Frame::new()?;
+    let mut position = 0;
+    let mut bytes = retained
+        .iter()
+        .try_fold(0usize, |sum, packet| {
+            retained_packet_bytes(packet).and_then(|size| sum.checked_add(size))
+        })
+        .ok_or_else(exceeded)?;
+    let mut eof = false;
+    loop {
+        input.check_cancelled()?;
+        check_work(token, None)?;
+        if Instant::now() >= limit {
+            return Err(exceeded());
+        }
+        let result = sys::avcodec_receive_frame(decoder.0, frame.0);
+        if result >= 0 {
+            return Ok(frame);
+        }
+        if result == EOF || eof {
+            return Err(exceeded());
+        }
+        if result != AGAIN {
+            check(result, "Decode")?;
+        }
+        if position == retained.len() {
+            if retained.len() >= 256 || bytes >= 16 * 1024 * 1024 {
+                return Err(exceeded());
+            }
+            let packet = Packet::new()?;
+            let result = sys::av_read_frame(input.format(), packet.0);
+            if result == EOF {
+                check(sys::avcodec_send_packet(decoder.0, ptr::null()), "Decode")?;
+                eof = true;
+                continue;
+            }
+            input.check_result(result, "Unable to read HDR preparation packets")?;
+            bytes = bytes
+                .checked_add(retained_packet_bytes(&packet).ok_or_else(exceeded)?)
+                .filter(|size| *size <= 16 * 1024 * 1024)
+                .ok_or_else(exceeded)?;
+            retained.push_back(packet);
+        }
+        let packet = &retained[position];
+        position += 1;
+        if (*packet.0).stream_index == (*stream).index {
+            check(sys::avcodec_send_packet(decoder.0, packet.0), "Decode")?;
+        }
+    }
+}
+
+unsafe fn copy_hdr_frame_side_data(
+    frame: &Frame,
+    encoder: *mut sys::AVCodecContext,
+) -> Result<(), EngineError> {
+    for (frame_kind, packet_kind) in [
+        (
+            sys::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+            sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
+        ),
+        (
+            sys::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+            sys::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+        ),
+    ] {
+        let side = sys::av_frame_get_side_data(frame.0, frame_kind);
+        if side.is_null()
+            || !sys::av_frame_side_data_get_c(
+                (*encoder).decoded_side_data.cast(),
+                (*encoder).nb_decoded_side_data,
+                frame_kind,
+            )
+            .is_null()
+        {
+            continue;
+        }
+        // This temporary view borrows the decoded frame only during validation
+        // and copying. The existing helper allocates encoder-owned buffers.
+        let mut packet_side: sys::AVPacketSideData = std::mem::zeroed();
+        packet_side.type_ = packet_kind;
+        packet_side.data = (*side).data;
+        packet_side.size = (*side).size;
+        let mut parameters: sys::AVCodecParameters = std::mem::zeroed();
+        parameters.coded_side_data = &mut packet_side;
+        parameters.nb_coded_side_data = 1;
+        copy_hdr_encoder_side_data(&parameters, encoder, false)?;
+    }
+    Ok(())
+}
+
 unsafe fn copy_side_data(
     from: *const sys::AVCodecParameters,
     to: *mut sys::AVCodecParameters,
@@ -321,6 +470,7 @@ struct TransformContext<'a> {
     origin_us: Option<i64>,
     preview: Option<&'a super::PreviewRange>,
     deadline: Option<Instant>,
+    hdr_frame: Option<&'a Frame>,
 }
 
 unsafe fn make_transform(
@@ -336,6 +486,7 @@ unsafe fn make_transform(
         origin_us,
         preview,
         deadline,
+        hdr_frame,
     } = *context;
     let decoder_codec = sys::avcodec_find_decoder((*(*input).codecpar).codec_id);
     if decoder_codec.is_null() {
@@ -643,6 +794,11 @@ unsafe fn make_transform(
     }
     if is_video {
         copy_hdr_encoder_side_data((*input).codecpar, enc, transform.tone_map)?;
+        if !transform.tone_map {
+            if let Some(frame) = hdr_frame {
+                copy_hdr_frame_side_data(frame, enc)?;
+            }
+        }
     }
     let opened = sys::avcodec_open2(enc, encoder_codec, ptr::null_mut());
     if opened < 0 {
@@ -785,12 +941,18 @@ unsafe fn make_transform(
                 range.duration_us as f64 / 1_000_000.0
             )
         });
+        let adjustments = plan
+            .audio_filters
+            .as_ref()
+            .map(|filters| filters.filters())
+            .transpose()?
+            .unwrap_or_default();
         (
             "abuffer",
             "abuffersink",
             args,
             format!(
-                "{trim}aresample={},aformat=sample_fmts={}:sample_rates={}:channel_layouts={}",
+                "{trim}{adjustments}aresample={},aformat=sample_fmts={}:sample_rates={}:channel_layouts={}",
                 (*enc).sample_rate,
                 CStr::from_ptr(output_sample).to_string_lossy(),
                 (*enc).sample_rate,
@@ -1156,6 +1318,11 @@ pub(crate) fn convert(
             }
         }
         let out = output.context;
+        let mut retained_packets = VecDeque::new();
+        let hdr_deadline = Some(
+            (Instant::now() + Duration::from_secs(10))
+                .min(deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(10))),
+        );
         let mut transforms = Vec::new();
         let mut copy_packets = vec![0u64; plan.streams.len()];
         check(
@@ -1211,6 +1378,29 @@ pub(crate) fn convert(
                 "Mux",
             )?;
             if let Some(encoder) = &item.encoder {
+                let video = source.streams[item.index as usize].video.as_ref();
+                let needs_hdr_frame = plan.preview_range.is_none()
+                    && encoder == "libx265"
+                    && video.is_some_and(|video| {
+                        video.mastering_display.is_some()
+                            || video.content_light.is_some()
+                            || video.color_transfer.as_deref().is_some_and(|transfer| {
+                                matches!(transfer, "smpte2084" | "arib-std-b67")
+                            })
+                    });
+                // Keep at most one temporary decoded frame/decoder alive.
+                // Packet replay storage is shared across all target streams.
+                let hdr_frame = if needs_hdr_frame {
+                    Some(prime_hdr_metadata(
+                        &input,
+                        src,
+                        &mut retained_packets,
+                        &token,
+                        hdr_deadline,
+                    )?)
+                } else {
+                    None
+                };
                 transforms.push(Some(make_transform(
                     src,
                     dest,
@@ -1222,6 +1412,7 @@ pub(crate) fn convert(
                         origin_us,
                         preview: plan.preview_range.as_ref(),
                         deadline,
+                        hdr_frame: hdr_frame.as_ref(),
                     },
                 )?));
             } else {
@@ -1256,7 +1447,12 @@ pub(crate) fn convert(
             if plan.preview_range.is_some() && packets_read >= 50_000 {
                 return Err(EngineError::Platform { detail: "This source requires too much scanning for a bounded preview. Try another position.".into() });
             }
-            let result = sys::av_read_frame(inf, packet.0);
+            let result = if let Some(retained) = retained_packets.pop_front() {
+                sys::av_packet_move_ref(packet.0, retained.0);
+                0
+            } else {
+                sys::av_read_frame(inf, packet.0)
+            };
             if result == EOF {
                 break;
             }
@@ -1462,6 +1658,41 @@ mod timestamp_tests {
             let light = ptr::read_unaligned((*copied).data.cast::<sys::AVContentLightMetadata>());
             assert_eq!((light.MaxCLL, light.MaxFALL), (1000, 400));
             // Cleanup also exercises an encoder context that was never opened.
+        }
+    }
+
+    #[test]
+    fn decoded_hdr_metadata_is_copied_before_encoder_open_without_borrowing() {
+        let fixture = HdrFixture::new();
+        let frame = Frame::new().unwrap();
+        unsafe {
+            (*fixture.encoder).codec_id = sys::AV_CODEC_ID_HEVC;
+            let side = sys::av_frame_new_side_data(
+                frame.0,
+                sys::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+                std::mem::size_of::<sys::AVContentLightMetadata>(),
+            );
+            assert!(!side.is_null());
+            ptr::write_unaligned(
+                (*side).data.cast::<sys::AVContentLightMetadata>(),
+                sys::AVContentLightMetadata {
+                    MaxCLL: 1000,
+                    MaxFALL: 400,
+                },
+            );
+            copy_hdr_frame_side_data(&frame, fixture.encoder).unwrap();
+            copy_hdr_frame_side_data(&frame, fixture.encoder).unwrap();
+            assert_eq!((*fixture.encoder).nb_decoded_side_data, 1);
+            let copied = sys::av_frame_side_data_get_c(
+                (*fixture.encoder).decoded_side_data.cast(),
+                (*fixture.encoder).nb_decoded_side_data,
+                sys::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+            );
+            assert!(!copied.is_null());
+            assert_ne!((*copied).data, (*side).data);
+            drop(frame);
+            let light = ptr::read_unaligned((*copied).data.cast::<sys::AVContentLightMetadata>());
+            assert_eq!((light.MaxCLL, light.MaxFALL), (1000, 400));
         }
     }
 

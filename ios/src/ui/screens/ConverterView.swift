@@ -24,6 +24,10 @@ struct ConverterView: View {
     @State private var submissionKey = UUID().uuidString
     @State private var jobsActive = false
     @State private var advanced = false
+    @State private var adjustmentsExpanded = false
+    @State private var gainText: String
+    @State private var fadeInText: String
+    @State private var fadeOutText: String
     @State private var width = ""
     @State private var height = ""
     @State private var numerator = ""
@@ -44,6 +48,10 @@ struct ConverterView: View {
         self.actions = actions
         _isPresented = isPresented
         _configuration = State(initialValue: seed.configuration)
+        let adjustments = seed.configuration.audioAdjustments
+        _gainText = State(initialValue: String(Double(adjustments?.gainCentidb ?? 0) / 100))
+        _fadeInText = State(initialValue: String(Double(adjustments?.fadeInUs ?? 0) / 1_000_000))
+        _fadeOutText = State(initialValue: String(Double(adjustments?.fadeOutUs ?? 0) / 1_000_000))
     }
 
     private var video: Bool { seed.operation == .videoConverter }
@@ -53,6 +61,7 @@ struct ConverterView: View {
     private var validNumbers: Bool {
         (configuration.videoSize != .custom || UInt32(width) != nil && UInt32(height) != nil)
         && (configuration.frameRate != .custom || Int32(numerator) != nil && Int32(denominator) != nil)
+        && (video || parsedAdjustments != nil)
     }
 
     var body: some View {
@@ -95,6 +104,30 @@ struct ConverterView: View {
                     }
                 }.disabled(submitting)
             }
+            if !video, let limits = choices?.audioAdjustmentLimits {
+                Section {
+                    DisclosureGroup("Audio adjustments", isExpanded: $adjustmentsExpanded) {
+                        HStack {
+                            Text("Gain")
+                            TextField("dB", text: $gainText).keyboardType(.numbersAndPunctuation)
+                                .multilineTextAlignment(.trailing).focused($focusedField, equals: "gain")
+                                .accessibilityIdentifier("audio-gain")
+                            Text("dB").foregroundColor(.secondary)
+                        }
+                        Slider(value: Binding(get: { Double(configuration.audioAdjustments?.gainCentidb ?? 0) }, set: { value in
+                            gainText = String(format: "%.2f", value.rounded() / 100)
+                        }), in: Double(limits.minimumGainCentidb)...Double(limits.maximumGainCentidb), step: 10)
+                            .accessibilityLabel("Audio gain")
+                        if limits.maximumFadeUs != nil {
+                            decimalSeconds("Fade in", text: $fadeInText)
+                            decimalSeconds("Fade out", text: $fadeOutText)
+                        }
+                        Text("Positive gain includes peak protection. Fades use a linear envelope and preserve duration.")
+                            .font(.footnote).foregroundColor(.secondary)
+                        if parsedAdjustments == nil { Text("Enter a signed gain and nonnegative fade durations.").font(.footnote).foregroundColor(.red) }
+                    }
+                }.disabled(submitting)
+            }
             Section {
                 Button(action: submit) { HStack { Spacer(); if submitting { ProgressView() }; Text(submitting ? "Submitting" : "Convert"); Spacer() } }
                     .disabled(submitting || !validNumbers || compatibility != nil)
@@ -127,6 +160,9 @@ struct ConverterView: View {
         .onChange(of: height) { _ in commitNumbers() }
         .onChange(of: numerator) { _ in commitNumbers() }
         .onChange(of: denominator) { _ in commitNumbers() }
+        .onChange(of: gainText) { _ in commitAdjustments() }
+        .onChange(of: fadeInText) { _ in commitAdjustments() }
+        .onChange(of: fadeOutText) { _ in commitAdjustments() }
     }
 
     private var sourceSection: some View {
@@ -173,6 +209,32 @@ struct ConverterView: View {
 
     private func numeric(_ title: String, text: Binding<String>) -> some View {
         HStack { Text(title); TextField(title, text: text).keyboardType(.numberPad).multilineTextAlignment(.trailing).focused($focusedField, equals: title) }
+    }
+
+    private func decimalSeconds(_ title: String, text: Binding<String>) -> some View {
+        HStack { Text(title); TextField("Seconds", text: text).keyboardType(.decimalPad).multilineTextAlignment(.trailing).focused($focusedField, equals: title); Text("s").foregroundColor(.secondary) }
+    }
+
+    private var parsedAdjustments: AudioAdjustments? {
+        guard let gain = decimalValue(gainText, precision: 2, signed: true),
+              let centidb = Int32(exactly: (gain * 100).rounded()),
+              let fadeIn = decimalValue(fadeInText, precision: 6, signed: false),
+              let inUs = UInt64(exactly: (fadeIn * 1_000_000).rounded()),
+              let fadeOut = decimalValue(fadeOutText, precision: 6, signed: false),
+              let outUs = UInt64(exactly: (fadeOut * 1_000_000).rounded()) else { return nil }
+        return AudioAdjustments(gainCentidb: centidb, fadeInUs: inUs, fadeOutUs: outUs)
+    }
+
+    private func decimalValue(_ text: String, precision: Int, signed: Bool) -> Double? {
+        let pattern = (signed ? "^[+-]?" : "^") + "[0-9]+(?:\\.[0-9]{1,\(precision)})?$"
+        guard text.count <= 24, text.range(of: pattern, options: .regularExpression) != nil,
+              let value = Double(text), value.isFinite else { return nil }
+        return value
+    }
+
+    private func commitAdjustments() {
+        guard !video, let parsedAdjustments else { return }
+        change { $0.audioAdjustments = parsedAdjustments }
     }
 
     @ViewBuilder private func choiceSheet(_ field: ConverterChoice) -> some View {
