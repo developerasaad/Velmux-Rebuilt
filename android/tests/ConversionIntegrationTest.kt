@@ -10,6 +10,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.graphics.Rect
 import android.graphics.Color
+import android.database.sqlite.SQLiteDatabase
 import android.view.View
 import android.view.ViewGroup
 import android.os.SystemClock
@@ -42,6 +43,7 @@ import org.junit.Rule
 import org.junit.rules.TestWatcher
 import org.junit.runner.Description
 import org.junit.runner.RunWith
+import org.json.JSONObject
 import uniffi.velmux_core.AudioCodec
 import uniffi.velmux_core.AudioAdjustments
 import uniffi.velmux_core.EngineException
@@ -226,6 +228,98 @@ class ConversionIntegrationTest {
             runCatching { media.setAppearanceNative(originalAppearance) }
             cleanupNewJobs(before)
             revoke(PICKER_VIDEO)
+        }
+    }
+
+    @Test
+    fun audioPickerSubmitsCustomDraftThatBecomesApplicableAfterSampleRateChanges() {
+        media.beginNative()
+        val before = media.jobsNative().map { it.id }.toSet()
+        val uri = grant("stereo.wav")
+        val sourceHash = hash(uri)
+        revoke("stereo.wav")
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                awaitText("Audio Converter")
+                clickText("Audio Converter")
+                chooseDocument("stereo.wav")
+                awaitText("stereo.wav", exact = true)
+                awaitText("Convert", exact = true)
+                assertTrue("The actual audio picker must supply durable original access",
+                    resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission })
+                clickText("Format")
+                clickText("MP3", exact = true)
+                clickText("Audio codec")
+                clickText("MP3", exact = true)
+                clickText("Sample rate")
+                clickText("8000 Hz", exact = true)
+                reachableText("Reduce File Size", exact = true)
+                val reduce = requireNotNull(device.findObject(By.desc("Reduce File Size")))
+                assertFalse("The new audio workspace must preserve the disabled compression default", reduce.isChecked)
+                reduce.click()
+                reachableText("Compression")
+                requireNotNull(device.findObject(By.desc("Compression"))).click()
+                clickText("Custom", exact = true)
+                reachableText("Audio rate control")
+                requireNotNull(device.findObject(By.desc("Audio rate control"))).click()
+                clickText("Average bitrate", exact = true)
+                fun audioValue() = device.findObject(By.desc("Audio compression value").clazz("android.widget.EditText"))
+                fun showAudioValue(): UiObject2 {
+                    if (audioValue() == null) {
+                        UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6).scrollIntoView(
+                            UiSelector().description("Audio compression value").className("android.widget.EditText"))
+                    }
+                    return requireNotNull(audioValue()) { "The actual Custom audio value field is not reachable" }
+                }
+                showAudioValue().text = "32000"
+                waitUntil("The initial valid Custom draft was not reflected by the workspace") {
+                    audioValue()?.text == "32000" && device.findObject(By.text("Convert"))?.isEnabled == true
+                }
+                requireNotNull(audioValue()).text = "128000"
+                waitUntil("The incompatible Custom draft must disable conversion") {
+                    audioValue()?.text == "128000" && device.findObject(By.text("Convert"))?.isEnabled == false
+                }
+                assertEquals("Editing an incompatible draft created a job", before, media.jobsNative().map { it.id }.toSet())
+                capture("ui-audio-custom-invalid-draft.png")
+                // Do not edit the bitrate again. The new sampling makes that
+                // visible draft applicable, so acceptance must use 128000,
+                // rather than the prior representable 32000 configuration.
+                clickText("Sample rate")
+                clickText("48000 Hz", exact = true)
+                waitUntil("Changing sampling did not make the retained Custom draft applicable") {
+                    device.findObject(By.text("Convert"))?.isEnabled == true
+                }
+                assertEquals("Changing sampling replaced the explicit Custom draft", "128000", showAudioValue().text)
+                assertEquals(before, media.jobsNative().map { it.id }.toSet())
+                capture("ui-audio-custom-applicable-draft.png")
+                clickText("Convert", exact = true)
+                val submitted = awaitNewJob(before)
+                val accepted = acceptedRequestJson(submitted.id)
+                val config = JSONObject(accepted).getJSONObject("plan").getJSONObject("config")
+                assertEquals(48_000, config.getInt("sample_rate"))
+                val compression = config.getJSONObject("compression")
+                assertTrue(compression.getBoolean("reduce_file_size"))
+                assertEquals("Custom", compression.getString("mode"))
+                assertEquals("Acceptance used an obsolete Custom bitrate", 128_000L,
+                    compression.getJSONObject("custom_audio").getJSONObject("AverageBitrate").getLong("bits_per_second"))
+                retainText("android-audio-custom-accepted.json", config.toString(2))
+                val completed = awaitJob(submitted.id)
+                assertEquals("completed", completed.state)
+                assertEquals("Accepted configuration changed during processing", accepted, acceptedRequestJson(submitted.id))
+                val output = Uri.parse(requireNotNull(completed.outputLocator))
+                val track = tracks(output).single()
+                assertEquals("audio/mpeg", track.getString(MediaFormat.KEY_MIME))
+                assertEquals(48_000, track.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                assertEquals(2, track.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                assertDuration(track)
+                verifyTones(decodeAudio(output))
+                retainOutput("android-audio-custom.mp3", output)
+                assertEquals("The native converter altered its original", sourceHash, hash(uri))
+                assertEquals("One Convert action created duplicate jobs", 1, media.jobsNative().count { it.id !in before })
+            }
+        } finally {
+            cleanupNewJobs(before)
+            revoke("stereo.wav")
         }
     }
 
@@ -861,6 +955,18 @@ class ConversionIntegrationTest {
             result != null
         }
         return requireNotNull(result)
+    }
+
+    private fun acceptedRequestJson(id: String): String {
+        val path = File(context.filesDir, "operations.sqlite3").absolutePath
+        return SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY).use { database ->
+            database.rawQuery("SELECT request FROM jobs WHERE id = ?", arrayOf(id)).use { cursor ->
+                assertTrue("The accepted request was not durably recorded", cursor.moveToFirst())
+                val request = cursor.getString(0)
+                assertFalse("A job identity matched multiple persisted requests", cursor.moveToNext())
+                request
+            }
+        }
     }
 
     private fun cleanupNewJobs(previous: Set<String>) = media.jobsNative().filter { it.id !in previous }.forEach { cleanupJob(it.id) }

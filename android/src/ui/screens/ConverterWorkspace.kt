@@ -31,7 +31,7 @@ private fun scaledDecimal(text: String, precision: Int, signed: Boolean): Long? 
 @Composable
 fun ConverterWorkspace(
     media: MediaSession, source: SourceSnapshot, config: ConversionConfig, video: Boolean,
-    submitting: Boolean, onChange: (ConversionConfig) -> Unit, onConvert: () -> Unit,
+    submitting: Boolean, onChange: (ConversionConfig) -> Unit, onConvert: (ConversionConfig) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val formats = remember(media, source.id, video) { media.catalogForSource(source.id, video) }
@@ -59,6 +59,10 @@ fun ConverterWorkspace(
     val compressionEditor = remember(source.id) { CompressionEditorState(config.compression) }
     val compression = compressionEditor.settings
     val compressionEdit = compressionEditor.evaluate(media, compression, choices.compressionChoices)
+    // A draft may become applicable after another selector changes. Use its
+    // freshly resolved value for both sizing and acceptance, never an older
+    // representable value retained while that draft was invalid.
+    val visibleConfig = config.copy(compression = compressionEdit.settings, quality = 23u, audioBitrate = null)
     var customWidthText by remember(source.id, config.videoSize, config.customWidth) { mutableStateOf(config.customWidth?.toString().orEmpty()) }
     var customHeightText by remember(source.id, config.videoSize, config.customHeight) { mutableStateOf(config.customHeight?.toString().orEmpty()) }
     var customRateNumeratorText by remember(source.id, config.frameRate, config.customFrameRate) { mutableStateOf(config.customFrameRate?.numerator?.toString().orEmpty()) }
@@ -72,9 +76,9 @@ fun ConverterWorkspace(
     val estimateInputsValid = customSizeValid && customRateValid && adjustmentsValid && compressionEdit.error == null
     // Compare all media intent while excluding filename-only edits. The core
     // receives the actual configuration and owns estimation applicability.
-    val estimateKey = config.copy(fileName = "")
+    val estimateKey = visibleConfig.copy(fileName = "")
     val estimate = remember(media, source.id, estimateKey, estimateInputsValid) {
-        if (estimateInputsValid) runCatching { media.estimateOutput(source.id, config) } else null
+        if (estimateInputsValid) runCatching { media.estimateOutput(source.id, visibleConfig) } else null
     }
     val selectedLayout = config.channelLayout ?: when (config.channels) {
         null -> AudioLayout.ORIGINAL
@@ -208,7 +212,10 @@ fun ConverterWorkspace(
                 Spacer(Modifier.height(12.dp))
             }
             Surface(shadowElevation = 3.dp) {
-                Button(onClick = onConvert, enabled = !submitting && config.fileName.isNotBlank() && compressionEdit.error == null && customSizeValid && customRateValid && adjustmentsValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
+                Button(onClick = {
+                    val current = compressionEditor.evaluate(media, compressionEditor.settings, choices.compressionChoices)
+                    if (current.error == null) onConvert(config.copy(compression = current.settings, quality = 23u, audioBitrate = null))
+                }, enabled = !submitting && config.fileName.isNotBlank() && compressionEdit.error == null && customSizeValid && customRateValid && adjustmentsValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
                     if(submitting) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)) }
                     Text(if(submitting) "Validating request…" else "Convert")
                 }

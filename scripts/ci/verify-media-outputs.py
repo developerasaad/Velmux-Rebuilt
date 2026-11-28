@@ -209,6 +209,8 @@ def check_case(case):
     for stream in audio:
         assert int(stream["sample_rate"]) == case["sample_rate"], path
         assert stream["channels"] == case["channels"], path
+        if 'audio_bit_rate' in case:
+            assert int(stream.get('bit_rate', 0)) == case['audio_bit_rate'], f'{path}: encoded audio bitrate differs from the visible accepted control'
         if 'channel_layout' in case:
             if described_aiff is None:
                 assert stream.get('channel_layout') == case['channel_layout'], f'{path}: speaker layout changed'

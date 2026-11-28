@@ -203,7 +203,8 @@ private fun ControlEditor(
             supportingText = { Text(if (option.values.isEmpty()) "${option.minimum}–${option.maximum}" else option.values.joinToString(", ")) },
             singleLine = true, enabled = enabled, isError = !valid,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth().testTag(if (title == "Video") "custom-video-value" else "custom-audio-value"))
+            modifier = Modifier.fillMaxWidth().testTag(if (title == "Video") "custom-video-value" else "custom-audio-value")
+                .semantics { contentDescription = if (title == "Video") "Video compression value" else "Audio compression value" })
     }
 }
 

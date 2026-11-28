@@ -206,9 +206,8 @@ fun FoundationApp(session: FoundationSession, actions: PlatformActions? = null, 
                     }
                     Destination.Workspace -> {
                         val selected = source; val settings = config
-                        if (selected != null && settings != null) ConverterWorkspace(media, selected, settings, video, submitting, onChange = { config = it }, onConvert = {
+                        if (selected != null && settings != null) ConverterWorkspace(media, selected, settings, video, submitting, onChange = { config = it }, onConvert = { acceptedConfig ->
                             if (!submitting) {
-                                val acceptedConfig = settings
                                 submitting = true
                                 val request = media.beginRequest(); preparation = request
                                 scope.launch {

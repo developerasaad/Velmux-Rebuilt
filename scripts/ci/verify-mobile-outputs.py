@@ -46,7 +46,7 @@ def video_case(path):
 
 
 def audio_case(path, codec):
-    return {"path": str(path), "container": "flac" if codec == "flac" else "mp4", "audio_codecs": [codec], "sample_rate": 48000,
+    return {"path": str(path), "container": {"flac": "flac", "mp3": "mp3"}.get(codec, "mp4"), "audio_codecs": [codec], "sample_rate": 48000,
             "channels": 2, "duration": 2.0, "tones": True}
 
 
@@ -69,7 +69,7 @@ def main():
         destination.mkdir(parents=True, exist_ok=True)
         outputs = {}
         with tarfile.open(location) as archive:
-            for name in ["android-video-converted.mp4", "android-audio.m4a", "android-audio.flac"]:
+            for name in ["android-video-converted.mp4", "android-audio.m4a", "android-audio.flac", "android-audio-custom.mp3"]:
                 member_name = f"evidence/api-{api}-{name}"
                 members = [member for member in archive.getmembers() if member.name == member_name]
                 assert len(members) == 1 and members[0].isfile(), f"Missing regular output evidence: {member_name}"
@@ -85,7 +85,9 @@ def main():
                 outputs[name] = target
         cases = [video_case(outputs["android-video-converted.mp4"]),
                  audio_case(outputs["android-audio.m4a"], "aac"),
-                 audio_case(outputs["android-audio.flac"], "flac")]
+                 audio_case(outputs["android-audio.flac"], "flac"),
+                 {**audio_case(outputs["android-audio-custom.mp3"], "mp3"),
+                  "audio_bit_rate": 128000, "decoded_samples": 96000}]
     else:
         raise AssertionError(f"Unknown verification platform: {platform}")
     media.OUTPUTS = destination
