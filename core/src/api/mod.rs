@@ -169,6 +169,14 @@ impl Engine {
     pub fn media_catalog(&self, operation: crate::Operation) -> Vec<crate::FormatOption> {
         crate::configuration::catalog(operation)
     }
+    /// Native text fields delegate exact decimal/SI target semantics to Rust.
+    pub fn parse_target_size(
+        &self,
+        value: String,
+        unit: crate::TargetSizeUnit,
+    ) -> Result<crate::TargetSize, EngineError> {
+        crate::TargetSize::parse_decimal(&value, unit)
+    }
     pub fn media_catalog_for_source(
         &self,
         id: String,

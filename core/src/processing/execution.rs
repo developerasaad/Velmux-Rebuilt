@@ -67,6 +67,10 @@ fn run(
                     .into(),
         });
     }
+    canceled(&token)?;
+    // Native access and source verification are preparation, including when
+    // reopening the source for a corrective attempt.
+    progress(ProcessingProgress::Started)?;
     convert(
         input,
         source,

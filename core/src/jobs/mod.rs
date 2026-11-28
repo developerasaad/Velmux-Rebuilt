@@ -1211,8 +1211,6 @@ impl Runtime {
         }
         if !record.verified {
             self.prepare_workdir(&record)?;
-            record.state = JobState::Processing;
-            self.update(&record)?;
             let mut reported = Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now);
@@ -1224,10 +1222,16 @@ impl Runtime {
                 &path,
                 token.clone(),
                 |event| {
+                    if token.is_cancelled() {
+                        return Err(EngineError::Cancelled);
+                    }
                     let transition = !matches!(event, processing::ProcessingProgress::Timestamp(_));
                     if transition || reported.elapsed() >= Duration::from_millis(250) {
                         let mut latest = self.store.get(id)?;
                         match event {
+                            processing::ProcessingProgress::Started => {
+                                latest.state = JobState::Processing;
+                            }
                             processing::ProcessingProgress::Timestamp(position) => {
                                 latest.processed_us = position
                             }
@@ -1236,7 +1240,7 @@ impl Runtime {
                             }
                             processing::ProcessingProgress::Restarted => {
                                 latest.processed_us = 0;
-                                latest.state = JobState::Processing;
+                                latest.state = JobState::Preparing;
                             }
                             processing::ProcessingProgress::Validating => {
                                 latest.state = JobState::Validating;

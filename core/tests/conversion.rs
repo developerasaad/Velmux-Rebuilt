@@ -1410,9 +1410,11 @@ fn real_process_kill_restores_interrupted_and_queued_jobs() {
     }
     let mut child = KillOnDrop(
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST_NAME, "--test-threads=1"])
+            .args(["--exact", TEST_NAME, "--test-threads=1", "--nocapture"])
             .env(CHILD_ENV, "1")
-            .stdout(std::process::Stdio::null())
+            // Preserve the actual child panic in CI if it fails before the
+            // durable phase marker; libtest capture otherwise hides it.
+            .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn()
             .unwrap(),
@@ -1420,9 +1422,10 @@ fn real_process_kill_restores_interrupted_and_queued_jobs() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let phase_path = root.join("phase.json");
     while !phase_path.exists() {
+        let status = child.0.try_wait().unwrap();
         assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "Durability child exited before accepting both jobs"
+            status.is_none(),
+            "Durability child exited before accepting both jobs: {status:?}; see child output"
         );
         assert!(
             Instant::now() < deadline,

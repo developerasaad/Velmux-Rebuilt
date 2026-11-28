@@ -13,8 +13,8 @@ case "$sdk" in
   *) echo 'Expected iphoneos or iphonesimulator.' >&2; exit 2 ;;
 esac
 case "$configuration" in
-  Debug) profile=debug; profile_args=() ;;
-  Release) profile=release; profile_args=(--release) ;;
+  Debug) profile=debug ;;
+  Release) profile=release ;;
   *) echo 'Expected Debug or Release.' >&2; exit 2 ;;
 esac
 destination="$root/build/ios/$sdk/$configuration"
@@ -29,8 +29,11 @@ export CARGO_TERM_COLOR=never
 # core/build.rs selects and validates the existing managed Apple FFmpeg prefix.
 # Native archives are bundled into libvelmux_core.a; SDK/system libraries remain
 # external and their actual linker requirements are captured for Swift/Xcode.
-cargo rustc --locked --manifest-path core/Cargo.toml --lib --target "$target" \
-  "${profile_args[@]}" -- --print=native-static-libs 2>&1 | tee "$destination/rust-build.log"
+# macOS ships Bash 3.2, where an empty array is unbound under nounset.
+# Keep the complete argument vector nonempty in both configurations.
+cargo_args=(rustc --locked --manifest-path core/Cargo.toml --lib --target "$target")
+if [ "$configuration" = Release ]; then cargo_args+=(--release); fi
+cargo "${cargo_args[@]}" -- --print=native-static-libs 2>&1 | tee "$destination/rust-build.log"
 archive="$root/core/target/$target/$profile/libvelmux_core.a"
 [ -s "$archive" ] || { echo 'The Apple Rust staticlib was not produced.' >&2; exit 1; }
 cp "$archive" "$destination/libvelmux_core.a"

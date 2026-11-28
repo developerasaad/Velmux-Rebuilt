@@ -9,6 +9,7 @@ root="$PWD"
   echo 'Direct Swift verification requires an actual arm64 macOS runner.' >&2; exit 1;
 }
 bash scripts/check-build-environment.sh
+python3 scripts/interop/test-build-apple.py
 evidence="$root/build/swift-interop"
 mkdir -p "$evidence"
 rustc -vV > "$evidence/rust-toolchain.txt"
