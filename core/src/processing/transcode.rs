@@ -786,6 +786,7 @@ pub(crate) fn convert(
     token: Arc<CancellationToken>,
     mut progress: impl FnMut(super::ProcessingProgress) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
+    let representation = plan.output()?;
     let deadline = plan
         .preview_range
         .as_ref()
@@ -800,7 +801,7 @@ pub(crate) fn convert(
             detail: format!("Unable to reserve the working output: {e}"),
         })?;
     drop(reserved);
-    let muxer = text(plan.config.format.muxer())?;
+    let muxer = text(&representation.muxer)?;
     let path_text = text(path.to_str().ok_or_else(|| EngineError::Storage {
         detail: "The working path is not valid Unicode.".into(),
     })?)?;
@@ -902,7 +903,7 @@ pub(crate) fn convert(
         )?;
         // Chapters are copied only to an explicitly compatible representation.
         if (*inf).nb_chapters > 0 && plan.preview_range.is_none() {
-            if plan.config.format != crate::OutputFormat::Matroska {
+            if representation.format != crate::OutputFormat::Matroska {
                 return Err(EngineError::Configuration {
                     detail: "Choose Matroska to preserve source chapters in this foundation."
                         .into(),

@@ -27,7 +27,22 @@ pub(crate) struct Plan {
     pub config: ConversionConfig,
     pub streams: Vec<StreamPlan>,
     #[serde(default)]
+    pub output: Option<OutputRepresentation>,
+    #[serde(default)]
     pub preview_range: Option<PreviewRange>,
+}
+
+impl Plan {
+    pub(crate) fn output(&self) -> Result<OutputRepresentation, EngineError> {
+        // M2 accepted plans always stored an explicit format. Retaining that
+        // exact representation does not invoke newer configuration defaults.
+        let output = self
+            .output
+            .clone()
+            .unwrap_or_else(|| OutputRepresentation::from_format(self.config.format));
+        output.validate()?;
+        Ok(output)
+    }
 }
 
 /// Logical elapsed source time; conversion adds the common inspected source
@@ -234,6 +249,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
         custom_frame_rate: None,
     };
     Ok(Plan {
+        output: Some(OutputRepresentation::from_format(config.format)),
         config,
         streams,
         preview_range: Some(PreviewRange {
@@ -483,6 +499,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
         streams.push(item);
     }
     Ok(Plan {
+        output: Some(OutputRepresentation::from_format(config.format)),
         config: config.clone(),
         streams,
         preview_range: None,

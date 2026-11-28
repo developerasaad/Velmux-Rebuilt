@@ -99,9 +99,17 @@ pub struct JobRecord {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AcceptedRequest {
+    #[serde(default = "legacy_accepted_request_version")]
+    version: u32,
     submission_key: String,
     source: InspectedSource,
     plan: Plan,
+}
+
+const CURRENT_ACCEPTED_REQUEST_VERSION: u32 = 2;
+
+fn legacy_accepted_request_version() -> u32 {
+    1
 }
 
 #[uniffi::export(callback_interface)]
@@ -609,7 +617,7 @@ impl Runtime {
         let record = JobRecord {
             id: uuid::Uuid::new_v4().to_string(),
             source_name: source.display_name.clone(),
-            file_name: format!("{}.{}", config.file_name, config.format.extension()),
+            file_name: format!("{}.{}", config.file_name, plan.output()?.extension),
             state: JobState::Queued,
             processed_us: 0,
             duration_us: source.info.duration_us,
@@ -645,6 +653,7 @@ impl Runtime {
         let insertion = self.store.insert(
             &record,
             &AcceptedRequest {
+                version: CURRENT_ACCEPTED_REQUEST_VERSION,
                 submission_key: key,
                 source: source.source.clone(),
                 plan,
@@ -765,11 +774,12 @@ impl Runtime {
     }
     fn work_path(&self, record: &JobRecord) -> Result<PathBuf, EngineError> {
         let request = self.store.request(&record.id)?;
+        let output = request.plan.output()?;
         Ok(self
             .root
             .join("jobs")
             .join(&record.id)
-            .join(format!("output.{}", request.plan.config.format.extension())))
+            .join(format!("output.{}", output.extension)))
     }
     fn cleanup(&self, record: &JobRecord) {
         if let Some(reservation) = &record.reservation {
@@ -1066,7 +1076,7 @@ impl Runtime {
             let reservation = self.provider.reserve_output(
                 record.id.clone(),
                 record.file_name.clone(),
-                request.plan.config.format.mime_type(),
+                request.plan.output()?.mime_type,
             )?;
             record.reservation = Some(reservation);
             self.update(&record)?;

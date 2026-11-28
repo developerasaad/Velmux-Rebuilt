@@ -707,6 +707,7 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         .store(1, Ordering::SeqCst);
     let source = harness.inspect("video.mp4", Operation::VideoConverter);
     let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.format = OutputFormat::Mp4;
     config.video_codec = VideoCodec::H264;
     config.frame_rate = FrameRate::Fps30;
     config.quality = 21;
@@ -723,6 +724,10 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         })
         .unwrap();
     let mut legacy: Value = serde_json::from_str(&request).unwrap();
+    assert_eq!(legacy["version"], 2);
+    assert_eq!(legacy["plan"]["output"]["format"], "Mp4");
+    legacy.as_object_mut().unwrap().remove("version");
+    legacy["plan"].as_object_mut().unwrap().remove("output");
     let accepted = legacy["plan"]["config"].as_object_mut().unwrap();
     for field in ["custom_width", "custom_height", "custom_frame_rate"] {
         accepted.remove(field);
@@ -756,6 +761,79 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
     assert_eq!(completed.file_name, "legacy_accepted.mp4");
     harness.expect(vec![json!({"path":completed.output.unwrap().locator,"video_codec":"h264","width":320,"height":180,
         "frame_rate":30,"audio_codecs":["aac"],"channels":2,"sample_rate":48000,"duration":2.0,"tones":true})]);
+}
+
+#[test]
+fn unsupported_accepted_request_version_preserves_operational_records_and_work() {
+    let mut harness = Harness::new("m3-future-accepted-request");
+    harness
+        .provider
+        .fail_publications
+        .store(1, Ordering::SeqCst);
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let original_hash = digest(&fixture("video.mp4"));
+    let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.format = OutputFormat::Mp4;
+    config.video_codec = VideoCodec::H264;
+    config.file_name = "future_accepted".into();
+    let job = harness.submit(&source, config);
+    let record = harness.finished(&job.id);
+    assert_eq!(record.state, JobState::Failed);
+    assert!(record.verified);
+    harness.close();
+
+    let database = harness.root.join("operational/operations.sqlite3");
+    let working = harness
+        .root
+        .join("operational/jobs")
+        .join(&job.id)
+        .join("output.mp4");
+    let working_hash = digest(&working);
+    let connection = Connection::open(&database).unwrap();
+    let (request, record_bytes): (String, String) = connection
+        .query_row(
+            "SELECT request,record FROM jobs WHERE id=?1",
+            [&job.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let mut future: Value = serde_json::from_str(&request).unwrap();
+    future["version"] = json!(99);
+    // Refuse the version before trying to interpret a newer enum vocabulary.
+    future["plan"]["config"]["format"] = json!("FutureContainer");
+    let future_bytes = serde_json::to_string(&future).unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET request=?1 WHERE id=?2",
+            params![future_bytes, job.id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let engine = Engine::new(Box::new(HostNativeProvider(
+        harness.root.join("operational"),
+    )));
+    let error = engine.initialize_media(Box::new(FilesystemProvider(harness.provider.clone())));
+    assert!(
+        matches!(error, Err(EngineError::Recovery { detail }) if detail.contains("unsupported version 99"))
+    );
+    drop(engine);
+
+    let connection = Connection::open(&database).unwrap();
+    let retained: (String, String) = connection
+        .query_row(
+            "SELECT request,record FROM jobs WHERE id=?1",
+            [&job.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(retained, (future_bytes, record_bytes));
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema_version, 1);
+    assert_eq!(digest(&working), working_hash);
+    assert_eq!(digest(&fixture("video.mp4")), original_hash);
 }
 
 #[test]

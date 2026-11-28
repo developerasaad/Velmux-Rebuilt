@@ -55,7 +55,7 @@ impl Runtime {
         let generation = uuid::Uuid::new_v4().to_string();
         let path = self
             .preview_directory()?
-            .join(format!("{generation}.{}", plan.config.format.extension()));
+            .join(format!("{generation}.{}", plan.output()?.extension));
         {
             let mut previews = self.previews.lock().map_err(internal)?;
             previews.retain(|_, old| {

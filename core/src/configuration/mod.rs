@@ -2,12 +2,14 @@ use crate::{EngineError, MediaInfo};
 use serde::{Deserialize, Serialize};
 
 mod geometry;
+mod representation;
 pub(crate) use geometry::{
     configured_h264_dimensions, configured_video_dimensions, h264_dimensions,
     scaled_video_dimensions,
 };
 use geometry::{custom_geometry_defaults, FRAME_RATES, VIDEO_SIZES};
 pub use geometry::{FrameRate, VideoSize};
+pub use representation::OutputRepresentation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Operation {

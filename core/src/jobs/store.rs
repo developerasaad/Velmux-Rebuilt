@@ -18,6 +18,30 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
         detail: error.to_string(),
     }
 }
+
+#[derive(serde::Deserialize)]
+struct AcceptedRequestVersion {
+    #[serde(default = "super::legacy_accepted_request_version")]
+    version: u32,
+}
+
+fn accepted_request(value: &str) -> Result<AcceptedRequest, EngineError> {
+    // Check the version before interpreting configuration enums or plan fields
+    // that a newer application may have written. Reading never rewrites JSON.
+    let header: AcceptedRequestVersion =
+        serde_json::from_str(value).map_err(|error| EngineError::Recovery {
+            detail: format!("The saved processing request's version cannot be read: {error}"),
+        })?;
+    if !(1..=super::CURRENT_ACCEPTED_REQUEST_VERSION).contains(&header.version) {
+        return Err(EngineError::Recovery {
+            detail: format!("This accepted processing request uses unsupported version {}. Its job and working resources have been preserved.", header.version),
+        });
+    }
+    let request: AcceptedRequest = serde_json::from_str(value).map_err(storage)?;
+    request.plan.output()?;
+    Ok(request)
+}
+
 impl Store {
     pub fn open(root: &Path) -> Result<Self, EngineError> {
         std::fs::create_dir_all(root).map_err(storage)?;
@@ -86,7 +110,7 @@ impl Store {
         let value: String = connection
             .query_row("SELECT request FROM jobs WHERE id=?1", [id], |r| r.get(0))
             .map_err(storage)?;
-        serde_json::from_str(&value).map_err(storage)
+        accepted_request(&value)
     }
     pub fn by_submission(
         &self,
@@ -103,10 +127,8 @@ impl Store {
             .map_err(storage)?;
         value
             .map(|(record, request)| {
-                Ok((
-                    serde_json::from_str(&record).map_err(storage)?,
-                    serde_json::from_str(&request).map_err(storage)?,
-                ))
+                let request = accepted_request(&request)?;
+                Ok((serde_json::from_str(&record).map_err(storage)?, request))
             })
             .transpose()
     }
@@ -310,5 +332,41 @@ mod schema_tests {
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .unwrap();
         assert_eq!(retained_mode, journal_mode);
+    }
+
+    #[test]
+    fn future_accepted_requests_are_refused_by_both_read_paths_without_rewriting() {
+        let root = OwnedRoot::new();
+        let store = Store::open(&root.0).unwrap();
+        let request = r#"{"version":99,"plan":{"config":{"format":"FutureContainer"}}}"#;
+        let record = r#"{"state":"FutureWaiting"}"#;
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO jobs VALUES('future-job','future-submission',?1,?2,'future',10,20)",
+                params![request, record],
+            )
+            .unwrap();
+
+        assert!(
+            matches!(store.request("future-job"), Err(EngineError::Recovery { detail }) if detail.contains("unsupported version 99"))
+        );
+        assert!(
+            matches!(store.by_submission("future-submission"), Err(EngineError::Recovery { detail }) if detail.contains("unsupported version 99"))
+        );
+
+        let retained: (String, String) = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT request,record FROM jobs WHERE id='future-job'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, (request.into(), record.into()));
     }
 }
