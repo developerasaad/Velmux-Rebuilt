@@ -3317,7 +3317,7 @@ fn invalid_compression_and_infeasible_targets_are_rejected_by_rust() {
     });
     invalid.push(config);
     let mut config = base.clone();
-    config.video_size = VideoSize::P720;
+    config.video_size = VideoSize::Hd720;
     config.compression = Some(CompressionSettings {
         optimize_resolution: true,
         ..compression_settings(CompressionMode::Balanced)
