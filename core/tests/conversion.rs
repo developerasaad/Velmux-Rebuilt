@@ -17,10 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 use velmux_core::{
-    AudioCodec, AudioLayout, AudioPrecision, CancellationToken, ConversionConfig, Engine,
-    EngineError, FrameRate, InspectedSource, JobObserver, JobRecord, JobState, MediaProvider,
-    NativeProvider, OpenedSource, Operation, OutputFormat, OutputReservation, PublishedOutput,
-    StreamKind, VideoCodec, VideoSize,
+    AudioCodec, AudioLayout, AudioPrecision, AudioRateControl, CancellationToken, CompressionMode,
+    CompressionSettings, ConversionConfig, Engine, EngineError, FrameRate, InspectedSource,
+    JobObserver, JobRecord, JobState, MediaProvider, NativeProvider, OpenedSource, Operation,
+    OutputFormat, OutputReservation, PublishedOutput, StreamKind, TargetSize, TargetSizeUnit,
+    VideoCodec, VideoRateControl, VideoSize,
 };
 
 fn repository() -> PathBuf {
@@ -439,7 +440,8 @@ impl Harness {
             .engine()
             .default_configuration(source.id.clone(), operation)
             .unwrap();
-        // Keep regression conversions explicit when product defaults evolve.
+        // Keep legacy regression controls explicit when product defaults evolve.
+        config.compression = None;
         config.format = match operation {
             Operation::VideoConverter => OutputFormat::Mp4,
             Operation::AudioConverter => OutputFormat::M4a,
@@ -736,6 +738,10 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
     assert_eq!(legacy["plan"]["output"]["format"], "Mp4");
     legacy.as_object_mut().unwrap().remove("version");
     legacy["plan"].as_object_mut().unwrap().remove("output");
+    legacy["plan"]
+        .as_object_mut()
+        .unwrap()
+        .remove("target_size_bytes");
     let accepted = legacy["plan"]["config"].as_object_mut().unwrap();
     for field in [
         "custom_width",
@@ -743,11 +749,13 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         "custom_frame_rate",
         "audio_precision",
         "channel_layout",
+        "compression",
     ] {
         accepted.remove(field);
     }
     for stream in legacy["plan"]["streams"].as_array_mut().unwrap() {
         stream.as_object_mut().unwrap().remove("encoding");
+        stream.as_object_mut().unwrap().remove("frame_rate");
     }
     let legacy_bytes = serde_json::to_string(&legacy).unwrap();
     connection
@@ -762,6 +770,18 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
     record.verified_size = None;
     record.verified_hash = None;
     harness.persist_record(&record, "interrupted");
+    let mut legacy_record = serde_json::to_value(&record).unwrap();
+    legacy_record
+        .as_object_mut()
+        .unwrap()
+        .remove("keep_target_miss");
+    Connection::open(&database)
+        .unwrap()
+        .execute(
+            "UPDATE jobs SET record=?1 WHERE id=?2",
+            params![serde_json::to_string(&legacy_record).unwrap(), job.id],
+        )
+        .unwrap();
     harness.reopen();
     harness.engine().restart_job(job.id.clone()).unwrap();
     let completed = harness.complete(&job.id);
@@ -776,6 +796,7 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         "An immutable legacy accepted request was rewritten"
     );
     assert_eq!(completed.file_name, "legacy_accepted.mp4");
+    assert!(!completed.keep_target_miss);
     harness.expect(vec![json!({"path":completed.output.unwrap().locator,"video_codec":"h264","width":320,"height":180,
         "frame_rate":30,"audio_codecs":["aac"],"channels":2,"sample_rate":48000,"duration":2.0,"tones":true})]);
 }
@@ -1017,7 +1038,10 @@ fn real_inspection_and_invalid_direct_core_requests() {
         .unwrap();
     assert_eq!(video.bit_depth, Some(10));
     assert_eq!(video.color_transfer.as_deref(), Some("smpte2084"));
-    let mut config = harness.engine().default_configuration(hdr.id.clone(),Operation::VideoConverter).unwrap();
+    let mut config = harness
+        .engine()
+        .default_configuration(hdr.id.clone(), Operation::VideoConverter)
+        .unwrap();
     assert_eq!(config.format, OutputFormat::Original);
     harness
         .engine()
@@ -2970,4 +2994,375 @@ fn every_advertised_explicit_codec_and_container_pair_produces_verified_media() 
         "An unconditional audio encoder lacks actual coverage: {audio_codecs:?}"
     );
     harness.expect(cases);
+}
+
+fn compression_settings(mode: CompressionMode) -> CompressionSettings {
+    CompressionSettings {
+        reduce_file_size: true,
+        mode,
+        ..Default::default()
+    }
+}
+
+fn accepted_request_text(harness: &Harness, id: &str) -> String {
+    Connection::open(harness.root.join("operational/operations.sqlite3"))
+        .unwrap()
+        .query_row("SELECT request FROM jobs WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+fn after_worker_ack(mut action: impl FnMut() -> Result<(), EngineError>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match action() {
+            Ok(()) => return,
+            Err(EngineError::Configuration { detail })
+                if detail.starts_with("Wait for") && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5));
+            }
+            result => panic!("Worker-acknowledged decision failed: {result:?}"),
+        }
+    }
+}
+
+fn target_miss(harness: &Harness, source: &InspectedSource) -> JobRecord {
+    let mut config = harness.defaults(source, Operation::VideoConverter);
+    config.video_codec = VideoCodec::Mjpeg;
+    config.compression = Some(CompressionSettings {
+        target: Some(TargetSize::parse_decimal("8", TargetSizeUnit::Kilobytes).unwrap()),
+        ..compression_settings(CompressionMode::TargetSize)
+    });
+    let before = harness.provider.open_calls.load(Ordering::SeqCst);
+    let job = harness.submit(source, config);
+    let result = harness.wait(&job.id, |record| {
+        matches!(
+            record.state,
+            JobState::TargetNotMet | JobState::Failed | JobState::Completed
+        )
+    });
+    assert_eq!(result.state, JobState::TargetNotMet, "{result:?}");
+    assert!(result.verified && result.verified_size.unwrap() > 8_000);
+    assert!(result.reservation.is_none() && result.output.is_none());
+    assert_eq!(result.error_category.as_deref(), Some("target_not_met"));
+    assert!(!result.keep_target_miss);
+    assert!(
+        harness.provider.open_calls.load(Ordering::SeqCst) - before <= 3,
+        "Submission plus processing must use at most two real conversion source opens"
+    );
+    let parent = harness.work(&result).parent().unwrap().to_path_buf();
+    assert!(
+        fs::read_dir(parent).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("corrective-")),
+        "Corrective scratch survived worker return"
+    );
+    result
+}
+
+#[test]
+fn shared_compression_presets_custom_controls_and_copying_process_real_media() {
+    let harness = Harness::new("m3-compression-controls");
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let original_hash = digest(&fixture("video.mp4"));
+    let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.compression = Some(CompressionSettings::default());
+    config.file_name = "compression_disabled_copy".into();
+    let copied = harness.complete(&harness.submit(&source, config.clone()).id);
+    config.compression = Some(compression_settings(CompressionMode::HighQuality));
+    config.file_name = "compression_high".into();
+    let higher = harness.complete(&harness.submit(&source, config.clone()).id);
+    config.compression = Some(compression_settings(CompressionMode::SmallerFile));
+    config.file_name = "compression_smaller".into();
+    let smaller = harness.complete(&harness.submit(&source, config.clone()).id);
+    assert!(smaller.verified_size < higher.verified_size);
+    config.compression = Some(CompressionSettings {
+        custom_audio: Some(AudioRateControl::AverageBitrate {
+            bits_per_second: 96_000,
+        }),
+        ..compression_settings(CompressionMode::Custom)
+    });
+    config.file_name = "custom_audio_preserves_video".into();
+    let audio_edit = harness.complete(&harness.submit(&source, config).id);
+    let video_case = |record: &JobRecord| {
+        json!({"path":record.output.as_ref().unwrap().locator,
+        "video_codec":"h264","width":320,"height":180,"audio_codecs":["aac"],
+        "channels":2,"sample_rate":48000,"tones":true,"duration":2.0})
+    };
+    let mut copy_case = video_case(&copied);
+    copy_case["source"] = json!("video.mp4");
+    copy_case["preserve_video_packets"] = json!(true);
+    copy_case["preserve_audio_packets"] = json!(true);
+    let mut high_case = video_case(&higher);
+    high_case["quality_reference"] = json!(fixture("video.mp4"));
+    high_case["lower_quality_output"] = json!(smaller.output.as_ref().unwrap().locator);
+    let mut audio_edit_case = video_case(&audio_edit);
+    audio_edit_case["source"] = json!("video.mp4");
+    audio_edit_case["preserve_video_packets"] = json!(true);
+
+    let audio = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&audio, Operation::AudioConverter);
+    config.format = OutputFormat::Opus;
+    config.audio_codec = AudioCodec::Opus;
+    config.compression = Some(CompressionSettings {
+        custom_audio: Some(AudioRateControl::AverageBitrate {
+            bits_per_second: 32_000,
+        }),
+        ..compression_settings(CompressionMode::Custom)
+    });
+    config.file_name = "custom_opus_32".into();
+    let lower = harness.complete(&harness.submit(&audio, config.clone()).id);
+    config.compression.as_mut().unwrap().custom_audio = Some(AudioRateControl::AverageBitrate {
+        bits_per_second: 128_000,
+    });
+    config.file_name = "custom_opus_128".into();
+    let upper = harness.complete(&harness.submit(&audio, config).id);
+    assert!(lower.verified_size < upper.verified_size);
+    let lossless = harness.inspect("stereo.flac", Operation::AudioConverter);
+    let mut config = harness.defaults(&lossless, Operation::AudioConverter);
+    config.format = OutputFormat::Flac;
+    config.compression = Some(CompressionSettings {
+        custom_audio: Some(AudioRateControl::FlacLevel { value: 12 }),
+        ..compression_settings(CompressionMode::Custom)
+    });
+    let flac = harness.complete(&harness.submit(&lossless, config).id);
+    let accepted: Value = serde_json::from_str(&accepted_request_text(&harness, &flac.id)).unwrap();
+    assert_eq!(
+        accepted["plan"]["streams"][0]["encoder"], "flac",
+        "Explicit lossless effort must not be ignored by copying"
+    );
+    assert!(accepted["plan"]["streams"][0]["encoding"]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|option| option["key"] == "compression_level" && option["value"] == "12"));
+    let mut flac_case = expectation(&flac, "flac", 2, 48000);
+    flac_case["exact_audio_source"] = json!("stereo.flac");
+    assert_eq!(digest(&fixture("video.mp4")), original_hash);
+    harness.expect(vec![
+        copy_case,
+        high_case,
+        video_case(&smaller),
+        audio_edit_case,
+        expectation(&lower, "opus", 2, 48000),
+        expectation(&upper, "opus", 2, 48000),
+        flac_case,
+    ]);
+}
+
+#[test]
+fn target_size_audio_encoding_publishes_only_verified_actual_bytes() {
+    let harness = Harness::new("m3-target-audio");
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.format = OutputFormat::Mp3;
+    config.audio_codec = AudioCodec::Mp3;
+    config.compression = Some(CompressionSettings {
+        target: Some(TargetSize::parse_decimal("32", TargetSizeUnit::Kilobytes).unwrap()),
+        ..compression_settings(CompressionMode::TargetSize)
+    });
+    let result = harness.complete(&harness.submit(&source, config).id);
+    assert!(result.verified_size.unwrap() <= 32_000);
+    assert!(!result.keep_target_miss);
+    assert_eq!(
+        fs::metadata(&result.output.as_ref().unwrap().locator)
+            .unwrap()
+            .len(),
+        result.verified_size.unwrap()
+    );
+    let mut expected = expectation(&result, "mp3", 2, 48000);
+    expected["gapless_duration"] = json!(true);
+    expected["decoded_samples"] = json!(96_000);
+    harness.expect(vec![expected]);
+}
+
+#[test]
+fn target_not_met_survives_restart_and_keep_requires_explicit_verified_save() {
+    let mut harness = Harness::new("m3-target-keep");
+    let source = harness.inspect("video-large.mp4", Operation::VideoConverter);
+    let original_hash = digest(&fixture("video-large.mp4"));
+    let miss = target_miss(&harness, &source);
+    let work = harness.work(&miss);
+    let verified_hash = digest(&work);
+    let accepted = accepted_request_text(&harness, &miss.id);
+    harness.engine().release_inspection(source.id).unwrap();
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 0);
+    assert!(harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&source.locator));
+    harness.close();
+    harness.reopen();
+    assert_eq!(harness.record(&miss.id).state, JobState::TargetNotMet);
+    assert_eq!(digest(&work), verified_hash);
+    assert_eq!(accepted_request_text(&harness, &miss.id), accepted);
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 0);
+    after_worker_ack(|| harness.engine().keep_target_output(miss.id.clone()));
+    harness
+        .engine()
+        .keep_target_output(miss.id.clone())
+        .unwrap();
+    let saved = harness.complete(&miss.id);
+    assert!(saved.keep_target_miss);
+    assert!(saved.verified_size.unwrap() > 8_000);
+    assert_eq!(accepted_request_text(&harness, &miss.id), accepted);
+    assert_eq!(
+        digest(Path::new(&saved.output.as_ref().unwrap().locator)),
+        verified_hash
+    );
+    assert!(!work.exists());
+    assert!(!harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&source.locator));
+    assert_eq!(digest(&fixture("video-large.mp4")), original_hash);
+    harness.expect(vec![
+        json!({"path":saved.output.unwrap().locator,"video_codec":"mjpeg",
+        "width":960,"height":540,"audio_codecs":[],"duration":1.0}),
+    ]);
+}
+
+#[test]
+fn adjusted_target_is_a_new_idempotent_request_and_old_output_requires_discard() {
+    let harness = Harness::new("m3-target-adjust");
+    let source = harness.inspect("video-large.mp4", Operation::VideoConverter);
+    let miss = target_miss(&harness, &source);
+    let old_request = accepted_request_text(&harness, &miss.id);
+    let old_work = harness.work(&miss);
+    let old_hash = digest(&old_work);
+    let key = uuid::Uuid::new_v4().to_string();
+    let target = Some(TargetSize::parse_decimal("100", TargetSizeUnit::Megabytes).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let new_job = loop {
+        match harness.engine().resubmit_target(
+            miss.id.clone(),
+            target,
+            key.clone(),
+            CancellationToken::new(),
+        ) {
+            Ok(record) => break record,
+            Err(EngineError::Configuration { detail })
+                if detail.starts_with("Wait for") && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(5))
+            }
+            result => panic!("Target retry failed: {result:?}"),
+        }
+    };
+    assert_ne!(new_job.id, miss.id);
+    let repeated = harness
+        .engine()
+        .resubmit_target(
+            miss.id.clone(),
+            target,
+            key.clone(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(repeated.id, new_job.id);
+    assert_eq!(accepted_request_text(&harness, &miss.id), old_request);
+    assert_eq!(digest(&old_work), old_hash);
+    let completed = harness.complete(&new_job.id);
+    let published = completed.output.as_ref().unwrap().locator.clone();
+    assert_eq!(harness.record(&miss.id).state, JobState::TargetNotMet);
+    harness
+        .engine()
+        .discard_target_output(miss.id.clone())
+        .unwrap();
+    harness
+        .engine()
+        .discard_target_output(miss.id.clone())
+        .unwrap();
+    assert_eq!(harness.record(&miss.id).state, JobState::Canceled);
+    assert!(!old_work.exists());
+    assert!(Path::new(&published).is_file());
+    assert_eq!(accepted_request_text(&harness, &miss.id), old_request);
+    assert_eq!(
+        harness
+            .engine()
+            .resubmit_target(miss.id, target, key, CancellationToken::new())
+            .unwrap()
+            .id,
+        new_job.id
+    );
+    assert!(
+        harness
+            .provider
+            .maximum_worker_sources
+            .load(Ordering::SeqCst)
+            <= 1
+    );
+    harness.expect(vec![json!({"path":published,"video_codec":"mjpeg","width":960,"height":540,"audio_codecs":[],"duration":1.0})]);
+}
+
+#[test]
+fn invalid_compression_and_infeasible_targets_are_rejected_by_rust() {
+    let harness = Harness::new("m3-compression-validation");
+    let video = harness.inspect("video.mp4", Operation::VideoConverter);
+    let base = harness.defaults(&video, Operation::VideoConverter);
+    let mut invalid = Vec::new();
+    let mut config = base.clone();
+    config.video_codec = VideoCodec::H264;
+    config.compression = Some(CompressionSettings {
+        custom_video: Some(VideoRateControl::HevcCrf { value: 20 }),
+        ..compression_settings(CompressionMode::Custom)
+    });
+    invalid.push(config);
+    let mut config = base.clone();
+    config.video_size = VideoSize::P720;
+    config.compression = Some(CompressionSettings {
+        optimize_resolution: true,
+        ..compression_settings(CompressionMode::Balanced)
+    });
+    invalid.push(config);
+    let mut config = base.clone();
+    config.quality = 28;
+    config.compression = Some(compression_settings(CompressionMode::Balanced));
+    invalid.push(config);
+    let mut config = base.clone();
+    config.video_codec = VideoCodec::Copy;
+    config.compression = Some(compression_settings(CompressionMode::SmallerFile));
+    invalid.push(config);
+    let mut config = base;
+    config.compression = Some(CompressionSettings {
+        target: Some(TargetSize::parse_decimal("1", TargetSizeUnit::Kilobytes).unwrap()),
+        ..compression_settings(CompressionMode::TargetSize)
+    });
+    invalid.push(config);
+    for config in invalid {
+        assert!(matches!(
+            harness.engine().submit_conversion(
+                video.id.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                config,
+                CancellationToken::new()
+            ),
+            Err(EngineError::Configuration { .. })
+        ));
+    }
+    let audio = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&audio, Operation::AudioConverter);
+    config.audio_codec = AudioCodec::Aac;
+    config.compression = Some(CompressionSettings {
+        custom_audio: Some(AudioRateControl::Mp3VbrQuality { value: 2 }),
+        ..compression_settings(CompressionMode::Custom)
+    });
+    assert!(matches!(
+        harness.engine().submit_conversion(
+            audio.id,
+            uuid::Uuid::new_v4().to_string(),
+            config,
+            CancellationToken::new()
+        ),
+        Err(EngineError::Configuration { .. })
+    ));
+    assert!(harness.engine().jobs().unwrap().is_empty());
 }

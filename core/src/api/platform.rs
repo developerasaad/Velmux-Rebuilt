@@ -25,6 +25,33 @@ pub struct PublishedOutput {
     pub size: u64,
 }
 
+/// A concrete video representation for an execution-time native capability
+/// query. This is not a configuration negotiation or evidence of encoding.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct NativeVideoRequest {
+    pub codec: crate::VideoCodec,
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate: crate::Rational,
+    pub bit_rate: u64,
+    pub pixel_format: String,
+    pub bit_depth: u32,
+    pub hdr: bool,
+    pub color_space: Option<String>,
+    pub color_range: Option<String>,
+    pub color_primaries: Option<String>,
+    pub color_transfer: Option<String>,
+}
+
+/// OS-reported capability only. Preparing a session does not encode a frame or
+/// prove that a later session uses hardware or preserves the accepted output.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct NativeVideoCandidate {
+    pub identifier: String,
+    pub os_reports_hardware: Option<bool>,
+    pub session_prepared: bool,
+}
+
 #[uniffi::export(callback_interface)]
 pub trait MediaProvider: Send + Sync {
     fn cache_root(&self) -> String;
@@ -62,4 +89,13 @@ pub trait MediaProvider: Send + Sync {
     ) -> Result<Option<PublishedOutput>, EngineError>;
     /// Remove only a still-unpublished reservation, never a published user file.
     fn discard_reservation(&self, reservation: OutputReservation);
+    /// Called only for a bounded accepted/executing request, never on selector
+    /// changes. Providers without native video support return no candidates.
+    fn native_video_candidates(
+        &self,
+        request: NativeVideoRequest,
+    ) -> Result<Vec<NativeVideoCandidate>, EngineError> {
+        drop(request);
+        Ok(Vec::new())
+    }
 }

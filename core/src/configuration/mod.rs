@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 
 mod audio;
 mod catalog;
+mod compression;
+pub(crate) use compression::{
+    apply_compression, compression_copy_policy, target_budget, CompressionCopyPolicy,
+    CompressionMedia, RetainedPayload, TargetBudget, TargetBudgetInput,
+};
+pub use compression::{
+    AudioRateControl, CompressionMode, CompressionSettings, TargetSize, TargetSizeUnit,
+    VideoRateControl,
+};
 mod geometry;
 pub(crate) use audio::{
     audio_copy_allowed, audio_encoding_required, audio_transform_requested,
@@ -49,6 +58,8 @@ pub struct ConversionConfig {
     pub audio_precision: Option<AudioPrecision>,
     #[serde(default)]
     pub channel_layout: Option<AudioLayout>,
+    #[serde(default)]
+    pub compression: Option<CompressionSettings>,
 }
 
 pub(crate) fn invalid(detail: impl Into<String>) -> EngineError {
@@ -61,6 +72,18 @@ pub(crate) fn invalid(detail: impl Into<String>) -> EngineError {
 /// or constructing a processing pipeline. Final submission additionally checks
 /// the actual source streams and bundled codec support.
 pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineError> {
+    if let Some(compression) = &config.compression {
+        compression.validate(config.operation)?;
+        if config.quality != 23 || config.audio_bitrate.is_some() {
+            return Err(invalid("Use the applicable Custom compression control instead of combining it with retained legacy quality or bitrate settings."));
+        }
+        if compression.reduce_file_size
+            && (compression.optimize_resolution && config.video_size != VideoSize::Original
+                || compression.optimize_frame_rate && config.frame_rate != FrameRate::Original)
+        {
+            return Err(invalid("Automatic optimization cannot replace an explicit resolution or frame rate. Choose Original or disable the corresponding optimization."));
+        }
+    }
     if config.format != OutputFormat::Original
         && (config.operation == Operation::VideoConverter) != config.format.is_video()
     {
@@ -258,6 +281,7 @@ pub(crate) fn default_config(
         custom_frame_rate: None,
         audio_precision: None,
         channel_layout: None,
+        compression: Some(CompressionSettings::default()),
     };
     let has_audio = source
         .streams
@@ -605,6 +629,47 @@ fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
     }
 }
 
+fn compression_allows_copy(config: &ConversionConfig, video: bool, lossless: bool) -> bool {
+    let Some(settings) = config
+        .compression
+        .as_ref()
+        .filter(|settings| settings.reduce_file_size)
+    else {
+        return true;
+    };
+    if settings.mode == CompressionMode::Custom {
+        return if video {
+            settings.custom_video.is_none()
+        } else {
+            settings.custom_audio.is_none()
+        };
+    }
+    let explicit_copy = if video {
+        config.video_codec == VideoCodec::Copy
+    } else {
+        config.audio_codec == AudioCodec::Copy
+    };
+    lossless || explicit_copy && settings.mode == CompressionMode::TargetSize
+}
+
+fn compression_profile_supported(
+    profile: &crate::processing::encoding::EncodingSettings,
+    kind: CompressionMedia,
+    config: &ConversionConfig,
+) -> bool {
+    let Some(settings) = &config.compression else {
+        return true;
+    };
+    let mut projected = settings.clone();
+    // Ordinary selectors do not allocate target bytes or construct a plan.
+    // Final submission performs the complete composition/duration budget.
+    if projected.mode == CompressionMode::TargetSize {
+        projected.mode = CompressionMode::HighQuality;
+        projected.target = None;
+    }
+    apply_compression(profile, kind, &projected, None).is_ok()
+}
+
 fn audio_choice_supported(
     stream: &crate::StreamInfo,
     format: OutputFormat,
@@ -632,7 +697,14 @@ fn audio_choice_supported(
     }
     let compatible = copy_compatible(format, stream);
     if projected.audio_codec == AudioCodec::Copy {
-        return compatible && !audio_transform_requested(stream, &projected);
+        return compatible
+            && !audio_transform_requested(stream, &projected)
+            && compression_allows_copy(
+                &projected,
+                false,
+                stream.codec.starts_with("pcm_")
+                    || matches!(stream.codec.as_str(), "flac" | "alac" | "wavpack"),
+            );
     }
     if !audio_encoding_required(stream, &projected, compatible)
         && !audio_encoding_required(stream, config, compatible)
@@ -717,8 +789,18 @@ fn audio_choice_supported(
                     *precision,
                     projected.audio_bitrate,
                 )
-                .is_ok_and(|settings| encoder_accepted(format, &settings.encoder))
-                {
+                .is_ok_and(|settings| {
+                    encoder_accepted(format, &settings.encoder)
+                        && compression_profile_supported(
+                            &settings,
+                            CompressionMedia::Audio {
+                                codec,
+                                sample_rate: rate,
+                                channels: *channels,
+                            },
+                            &projected,
+                        )
+                }) {
                     return true;
                 }
             }
@@ -780,12 +862,34 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
                             settings.pixel_format.as_deref().is_some_and(|pixel| {
                                 configured_encoding_dimensions(source, candidate, pixel).is_ok()
                             }) && encoder_accepted(format, &settings.encoder)
+                                && [
+                                    VideoCodec::H264,
+                                    VideoCodec::Hevc,
+                                    VideoCodec::Av1,
+                                    VideoCodec::Vp8,
+                                    VideoCodec::Vp9,
+                                    VideoCodec::Mpeg4,
+                                    VideoCodec::Ffv1,
+                                    VideoCodec::Mjpeg,
+                                ]
+                                .into_iter()
+                                .find(|codec| codec.codec_name() == Some(settings.codec.as_str()))
+                                .is_some_and(|codec| {
+                                    compression_profile_supported(
+                                        &settings,
+                                        CompressionMedia::Video { codec },
+                                        candidate,
+                                    )
+                                })
                         })
                     })
                 })
         };
         let can_copy = option.video_codecs.contains(&VideoCodec::Copy)
-            && matches!(config.video_codec, VideoCodec::Automatic | VideoCodec::Copy);
+            && matches!(config.video_codec, VideoCodec::Automatic | VideoCodec::Copy)
+            && video
+                .iter()
+                .all(|stream| compression_allows_copy(config, true, stream.codec == "ffv1"));
         for size in VIDEO_SIZES {
             let mut candidate = config.clone();
             candidate.video_size = size;

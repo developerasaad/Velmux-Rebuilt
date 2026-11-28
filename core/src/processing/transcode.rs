@@ -351,7 +351,7 @@ unsafe fn make_transform(
         });
     }
     let mut transform = Transform {
-        constant_video_rate: config.frame_rate != FrameRate::Original,
+        constant_video_rate: plan.frame_rate.is_some() || config.frame_rate != FrameRate::Original,
         decoder: sys::avcodec_alloc_context3(decoder_codec),
         encoder: sys::avcodec_alloc_context3(encoder_codec),
         graph: ptr::null_mut(),
@@ -457,9 +457,9 @@ unsafe fn make_transform(
                 })?,
             },
         );
-        let requested_rate = config
+        let requested_rate = plan.frame_rate.clone().or(config
             .frame_rate
-            .rational(config.custom_frame_rate.as_ref())?;
+            .rational(config.custom_frame_rate.as_ref())?);
         (*enc).time_base =
             requested_rate
                 .as_ref()
@@ -697,9 +697,12 @@ unsafe fn make_transform(
             sar.num,
             sar.den
         );
-        let fps = config
+        let fps = plan
             .frame_rate
-            .rational(config.custom_frame_rate.as_ref())?
+            .clone()
+            .or(config
+                .frame_rate
+                .rational(config.custom_frame_rate.as_ref())?)
             .map_or_else(String::new, |rate| {
                 format!(",fps=fps={}/{}", rate.numerator, rate.denominator)
             });

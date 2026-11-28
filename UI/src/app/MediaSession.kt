@@ -21,6 +21,9 @@ import uniffi.velmux_core.JobObserver
 import uniffi.velmux_core.JobRecord
 import uniffi.velmux_core.MediaInfo
 import uniffi.velmux_core.MediaProvider
+import uniffi.velmux_core.NativeVideoCandidate as CoreNativeVideoCandidate
+import uniffi.velmux_core.NativeVideoRequest as CoreNativeVideoRequest
+import uniffi.velmux_core.VideoCodec
 import uniffi.velmux_core.OpenedSource
 import uniffi.velmux_core.Operation
 import uniffi.velmux_core.OutputReservation
@@ -232,7 +235,9 @@ class MediaSession(private val engine: Engine) {
 
     @Throws(EngineException::class, IllegalStateException::class)
     fun defaultsNative(id: String, video: Boolean): ConversionConfig = ready {
-        engine.defaultConfiguration(id, operation(video))
+        // Temporary old-bridge adapter: its retained M2 quality/bitrate
+        // controls use the supported legacy configuration until retirement.
+        engine.defaultConfiguration(id, operation(video)).copy(compression = null)
     }
 
     /** Explicit encoding intent for native callers; final validation remains in Rust. */
@@ -447,6 +452,35 @@ private class NativeMediaAdapter(private val native: MediaServices) : MediaProvi
 
     override fun discardReservation(reservation: OutputReservation) {
         runCatching { native.discardReservation(reservation.native()) }
+    }
+
+    override fun nativeVideoCandidates(request: CoreNativeVideoRequest): List<CoreNativeVideoCandidate> {
+        val codec = when (request.codec) {
+            VideoCodec.H264 -> "h264"
+            VideoCodec.HEVC -> "hevc"
+            else -> return emptyList()
+        }
+        // These guards protect the signed native ABI; route eligibility and
+        // acceptance remain core policy. Neither provider enables Main10 here.
+        if (request.width > Int.MAX_VALUE.toUInt() || request.height > Int.MAX_VALUE.toUInt() ||
+            request.bitDepth > Int.MAX_VALUE.toUInt() || request.bitRate > Long.MAX_VALUE.toULong()) return emptyList()
+        val candidates = try {
+            native.nativeVideoCandidates(NativeVideoRequest(
+                codec, request.width.toInt(), request.height.toInt(),
+                request.frameRate.numerator, request.frameRate.denominator,
+                request.bitRate.toLong(), request.pixelFormat, request.bitDepth.toInt(), request.hdr,
+                request.colorSpace, request.colorRange, request.colorPrimaries, request.colorTransfer,
+            ))
+        } catch (error: Throwable) {
+            throw EngineException.Platform(error.boundedMessage("Native encoder capabilities could not be inspected."))
+        }
+        // Native codec identifiers are opaque OS names, not paths or options.
+        return candidates.asSequence().filter { candidate ->
+            candidate.identifier.isNotEmpty() && candidate.identifier.length <= 256 &&
+                candidate.identifier.all { it.code in 32..126 }
+        }.distinctBy { it.identifier }.take(16).map { candidate ->
+            CoreNativeVideoCandidate(candidate.identifier, candidate.osReportsHardware, candidate.sessionPrepared)
+        }.toList()
     }
 
     private fun OutputReservation.native() = NativeReservation(locator, displayName, mimeType)

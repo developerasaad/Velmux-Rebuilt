@@ -10,6 +10,29 @@ data class NativePublished(val locator: String, val displayName: String, val siz
 /** A non-null result separates "not published" from NSError failure in Swift/ObjC. */
 data class NativePublicationStatus(val output: NativePublished?)
 
+/** Narrow native encoder query; Rust has already selected the requested representation. */
+data class NativeVideoRequest(
+    val codec: String,
+    val width: Int,
+    val height: Int,
+    val frameRateNumerator: Int,
+    val frameRateDenominator: Int,
+    val bitRate: Long,
+    val pixelFormat: String,
+    val bitDepth: Int,
+    val hdr: Boolean,
+    val colorSpace: String?,
+    val colorRange: String?,
+    val colorPrimaries: String?,
+    val colorTransfer: String?,
+)
+/** Preparation/classification is diagnostic evidence; no frame has been encoded. */
+data class NativeVideoCandidate(
+    val identifier: String,
+    val osReportsHardware: Boolean?,
+    val sessionPrepared: Boolean,
+)
+
 class PlatformFailure(message: String) : Exception(message)
 
 /** Native implementations own OS handles, not media rules or job state. */
@@ -30,6 +53,8 @@ interface MediaServices {
     @Throws(PlatformFailure::class)
     fun publicationStatus(reservation: NativeReservation): NativePublicationStatus
     fun discardReservation(reservation: NativeReservation)
+    @Throws(PlatformFailure::class)
+    fun nativeVideoCandidates(request: NativeVideoRequest): List<NativeVideoCandidate> = emptyList()
 }
 
 /** Picker cancellation returns null; failures are scoped to the current action. */

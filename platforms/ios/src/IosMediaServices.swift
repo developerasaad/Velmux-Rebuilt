@@ -2,6 +2,9 @@ import CryptoKit
 import Darwin
 import Foundation
 import VelmuxUI
+import VideoToolbox
+import CoreVideo
+import CoreMedia
 
 /** Security scope belongs to the lease; the descriptor itself belongs to Rust. */
 final class IosSourceLease: NSObject, NSFilePresenter {
@@ -72,6 +75,107 @@ final class IosMediaServices: NSObject, MediaServices {
         } catch { return "" }
     }
     func outputLocation() -> String { "Files app → Velmux → Velmux" }
+
+    /// Prepare one real native session for a bounded concrete request. This
+    /// neither encodes a frame nor establishes the route used by a later job.
+    func nativeVideoCandidates(request: NativeVideoRequest) throws -> [NativeVideoCandidate] {
+        guard !request.hdr, request.bitDepth == 8,
+              (2...4096).contains(request.width), (2...4096).contains(request.height),
+              request.width.isMultiple(of: 2), request.height.isMultiple(of: 2),
+              Int64(request.width) * Int64(request.height) <= 4096 * 2160,
+              (1...Int64(Int32.max)).contains(request.bitRate),
+              request.frameRateNumerator > 0, request.frameRateDenominator > 0 else { return [] }
+        let rate = Double(request.frameRateNumerator) / Double(request.frameRateDenominator)
+        guard rate.isFinite, (1...120).contains(rate) else { return [] }
+        let codec: CMVideoCodecType
+        let profile: CFString
+        switch request.codec {
+        case "h264":
+            codec = kCMVideoCodecType_H264
+            profile = kVTProfileLevel_H264_High_AutoLevel
+        case "hevc":
+            codec = kCMVideoCodecType_HEVC
+            profile = kVTProfileLevel_HEVC_Main_AutoLevel
+        default: return []
+        }
+        guard request.colorRange == nil || request.colorRange == "tv" || request.colorRange == "pc" else { return [] }
+        let fullRange = request.colorRange == "pc"
+        let pixelFormat: OSType
+        switch request.pixelFormat {
+        case "nv12": pixelFormat = fullRange ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        case "yuv420p": pixelFormat = fullRange ? kCVPixelFormatType_420YpCbCr8PlanarFullRange : kCVPixelFormatType_420YpCbCr8Planar
+        default: return []
+        }
+        var properties: [String: Any] = [
+            kVTCompressionPropertyKey_ProfileLevel as String: profile,
+            kVTCompressionPropertyKey_AverageBitRate as String: NSNumber(value: request.bitRate),
+            kVTCompressionPropertyKey_ExpectedFrameRate as String: NSNumber(value: rate),
+            kVTCompressionPropertyKey_AllowFrameReordering as String: false,
+            kVTCompressionPropertyKey_RealTime as String: false,
+        ]
+        switch request.colorSpace {
+        case nil: break
+        case "bt709": properties[kVTCompressionPropertyKey_YCbCrMatrix as String] = kCVImageBufferYCbCrMatrix_ITU_R_709_2
+        case "smpte170m", "bt470bg": properties[kVTCompressionPropertyKey_YCbCrMatrix as String] = kCVImageBufferYCbCrMatrix_ITU_R_601_4
+        default: return []
+        }
+        switch request.colorPrimaries {
+        case nil: break
+        case "bt709": properties[kVTCompressionPropertyKey_ColorPrimaries as String] = kCVImageBufferColorPrimaries_ITU_R_709_2
+        case "smpte170m": properties[kVTCompressionPropertyKey_ColorPrimaries as String] = kCVImageBufferColorPrimaries_SMPTE_C
+        case "bt470bg": properties[kVTCompressionPropertyKey_ColorPrimaries as String] = kCVImageBufferColorPrimaries_EBU_3213
+        default: return []
+        }
+        switch request.colorTransfer {
+        case nil: break
+        case "bt709", "smpte170m": properties[kVTCompressionPropertyKey_TransferFunction as String] = kCVImageBufferTransferFunction_ITU_R_709_2
+        default: return []
+        }
+        var specification: [String: Any] = [:]
+        // These encoder-selection/classification keys were introduced on iOS
+        // in 17.4. Keep 15.0 support and report unknown rather than infer hardware.
+        if #available(iOS 17.4, *) {
+            specification[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String] = true
+        }
+        let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: NSNumber(value: pixelFormat),
+            kCVPixelBufferWidthKey as String: NSNumber(value: request.width),
+            kCVPixelBufferHeightKey as String: NSNumber(value: request.height),
+        ]
+        var created: VTCompressionSession?
+        let status = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault, width: request.width, height: request.height,
+            codecType: codec, encoderSpecification: specification as CFDictionary,
+            imageBufferAttributes: attributes as CFDictionary, compressedDataAllocator: nil,
+            outputCallback: nil, refcon: nil, compressionSessionOut: &created
+        )
+        guard let session = created else { return [] }
+        defer { VTCompressionSessionInvalidate(session) }
+        guard status == noErr,
+              VTSessionSetProperties(session, propertyDictionary: properties as CFDictionary) == noErr,
+              VTCompressionSessionPrepareToEncodeFrames(session) == noErr else { return [] }
+        // CopyProperty uses a raw output pointer, so adopt its retained CF
+        // result explicitly instead of relying on an implicit bridging lifetime.
+        var encoderValue: Unmanaged<CFTypeRef>?
+        let encoderStatus = VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_EncoderID,
+                                                  allocator: kCFAllocatorDefault, valueOut: &encoderValue)
+        let encoderProperty = encoderValue?.takeRetainedValue()
+        guard encoderStatus == noErr,
+              let identifier = encoderProperty as? String, !identifier.isEmpty,
+              identifier.utf8.count <= 256,
+              identifier.unicodeScalars.allSatisfy({ (32...126).contains($0.value) }) else { return [] }
+        var hardware: KotlinBoolean?
+        if #available(iOS 17.4, *) {
+            var retained: Unmanaged<CFTypeRef>?
+            let hardwareStatus = VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                                                        allocator: kCFAllocatorDefault, valueOut: &retained)
+            if let value = retained?.takeRetainedValue(), hardwareStatus == noErr,
+               CFGetTypeID(value) == CFBooleanGetTypeID(), let reported = value as? Bool {
+                hardware = KotlinBoolean(bool: reported)
+            }
+        }
+        return [NativeVideoCandidate(identifier: identifier, osReportsHardware: hardware, sessionPrepared: true)]
+    }
 
     static func resolveSource(_ locator: String) throws -> URL {
         if locator.hasPrefix("bookmark:") {

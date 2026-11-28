@@ -3,7 +3,7 @@ mod store;
 pub use preview::PreviewResult;
 
 use crate::{
-    configuration::{self, ConversionConfig, Operation},
+    configuration::{self, CompressionMode, ConversionConfig, Operation, TargetSize},
     media::{self, input::Input},
     processing::{self, Plan},
     CancellationToken, EngineError, MediaInfo, MediaProvider, OutputReservation, PublishedOutput,
@@ -43,6 +43,7 @@ pub enum JobState {
     Canceled,
     Interrupted,
     Paused,
+    TargetNotMet,
 }
 impl JobState {
     fn as_str(self) -> &'static str {
@@ -59,6 +60,7 @@ impl JobState {
             Self::Canceled => "canceled",
             Self::Interrupted => "interrupted",
             Self::Paused => "paused",
+            Self::TargetNotMet => "target_not_met",
         }
     }
     pub(crate) fn terminal(self) -> bool {
@@ -95,6 +97,10 @@ pub struct JobRecord {
     pub verified_hash: Option<String>,
     pub reservation: Option<OutputReservation>,
     pub output: Option<PublishedOutput>,
+    /// Explicit consent to publish this retained verified output despite its
+    /// missed target. The accepted request itself remains immutable.
+    #[serde(default)]
+    pub keep_target_miss: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -580,16 +586,28 @@ impl Runtime {
         config: ConversionConfig,
         token: Arc<CancellationToken>,
     ) -> Result<JobRecord, EngineError> {
+        let _submit = self.submission.lock().map_err(internal)?;
+        self.submit_asset(self.asset(id)?, key, config, token)
+    }
+
+    /// Callers hold submission ownership through acceptance. A transient asset
+    /// allows an explicit target retry to reuse inspected source facts without
+    /// adding a hidden workspace or mutating the old immutable request.
+    fn submit_asset(
+        &self,
+        source: SourceAsset,
+        key: String,
+        config: ConversionConfig,
+        token: Arc<CancellationToken>,
+    ) -> Result<JobRecord, EngineError> {
         if key.len() < 16 || key.len() > 128 {
             return Err(configuration::invalid(
                 "The submission identifier is invalid.",
             ));
         }
-        let _submit = self.submission.lock().map_err(internal)?;
         if let Some(detail) = self.runtime_error() {
             return Err(EngineError::Storage{detail:format!("The job worker stopped safely: {detail}. Restart the application after resolving storage access.")});
         }
-        let source = self.asset(id)?;
         let plan = processing::plan(&source.info, &config)?;
         if let Some((record, previous)) = self.store.by_submission(&key)? {
             if previous.source.info.source_identity != source.info.source_identity
@@ -631,6 +649,7 @@ impl Runtime {
             verified_hash: None,
             reservation: None,
             output: None,
+            keep_target_miss: false,
         };
         let (access, availability) = self.source_access.claim(&source.locator, true)?;
         if let Err(error) = availability {
@@ -670,6 +689,156 @@ impl Runtime {
     pub fn jobs(&self) -> Result<Vec<JobRecord>, EngineError> {
         self.store.list()
     }
+
+    pub fn keep_target_output(&self, id: &str) -> Result<(), EngineError> {
+        let _submit = self.submission.lock().map_err(internal)?;
+        let control = self.control.lock().map_err(internal)?;
+        let mut record = self.store.get(id)?;
+        // A repeated acknowledgement must never schedule another worker.
+        if record.keep_target_miss
+            && matches!(
+                record.state,
+                JobState::Queued
+                    | JobState::Preparing
+                    | JobState::Processing
+                    | JobState::Finalizing
+                    | JobState::Validating
+                    | JobState::Publishing
+                    | JobState::Completed
+            )
+        {
+            return Ok(());
+        }
+        if record.state != JobState::TargetNotMet {
+            return Err(configuration::invalid("Only an output awaiting a target-size decision can be kept. Use Save Again for a failed publication."));
+        }
+        if control
+            .active
+            .as_ref()
+            .is_some_and(|(active, _)| active == id)
+        {
+            return Err(configuration::invalid(
+                "Wait for the processing worker to stop before keeping this output.",
+            ));
+        }
+        let request = self.store.request(id)?;
+        if !target_requires_decision(&record, &request.plan) || record.verified_hash.is_none() {
+            return Err(EngineError::Recovery { detail: "This job has no retained verified target-size result to keep. Its resources have been preserved.".into() });
+        }
+        record.keep_target_miss = true;
+        record.state = JobState::Queued;
+        record.error = None;
+        record.error_category = None;
+        record.finished_ms = None;
+        self.store.update(&record)?;
+        drop(control);
+        self.notify();
+        self.wake();
+        Ok(())
+    }
+
+    pub fn resubmit_target(
+        &self,
+        id: &str,
+        new_target: Option<TargetSize>,
+        key: String,
+        token: Arc<CancellationToken>,
+    ) -> Result<JobRecord, EngineError> {
+        let _submit = self.submission.lock().map_err(internal)?;
+        if key.len() < 16 || key.len() > 128 {
+            return Err(configuration::invalid(
+                "The submission identifier is invalid.",
+            ));
+        }
+        let previous = self.store.request(id)?;
+        let mut config = previous.plan.config.clone();
+        if let Some(target) = new_target {
+            target.bytes()?;
+            let compression = config.compression.get_or_insert_with(Default::default);
+            compression.reduce_file_size = true;
+            compression.mode = CompressionMode::TargetSize;
+            compression.target = Some(target);
+            compression.custom_video = None;
+            compression.custom_audio = None;
+        }
+        // A retry of an accepted submission returns that same new job even if
+        // the user subsequently kept or discarded the original result.
+        if let Some((record, accepted)) = self.store.by_submission(&key)? {
+            if accepted.source.info.source_identity != previous.source.info.source_identity
+                || serde_json::to_string(&accepted.plan.config).map_err(internal)?
+                    != serde_json::to_string(&config).map_err(internal)?
+            {
+                return Err(configuration::invalid(
+                    "This submission identifier already belongs to a different accepted request.",
+                ));
+            }
+            return Ok(record);
+        }
+        let control = self.control.lock().map_err(internal)?;
+        let record = self.store.get(id)?;
+        if record.state != JobState::TargetNotMet {
+            return Err(configuration::invalid(
+                "Only an output awaiting a target-size decision can be adjusted or retried.",
+            ));
+        }
+        if !target_requires_decision(&record, &previous.plan) || record.verified_hash.is_none() {
+            return Err(EngineError::Recovery { detail: "This job has no retained verified target-size result to retry. Its resources have been preserved.".into() });
+        }
+        if control
+            .active
+            .as_ref()
+            .is_some_and(|(active, _)| active == id)
+        {
+            return Err(configuration::invalid(
+                "Wait for the processing worker to stop before retrying this target.",
+            ));
+        }
+        drop(control);
+        let access = self.source_access.retain(&previous.source.locator)?;
+        self.submit_asset(
+            SourceAsset {
+                source: previous.source,
+                _access: access,
+            },
+            key,
+            config,
+            token,
+        )
+    }
+
+    pub fn discard_target_output(&self, id: &str) -> Result<(), EngineError> {
+        let _submit = self.submission.lock().map_err(internal)?;
+        let control = self.control.lock().map_err(internal)?;
+        let mut record = self.store.get(id)?;
+        if record.state == JobState::Canceled {
+            return Ok(());
+        }
+        if record.state != JobState::TargetNotMet {
+            return Err(configuration::invalid(
+                "Only an output awaiting a target-size decision can be discarded here.",
+            ));
+        }
+        if control
+            .active
+            .as_ref()
+            .is_some_and(|(active, _)| active == id)
+        {
+            return Err(configuration::invalid(
+                "Wait for worker termination before discarding its output.",
+            ));
+        }
+        record.state = JobState::Canceled;
+        record.error = None;
+        record.error_category = None;
+        record.finished_ms = Some(now_ms());
+        self.store.update(&record)?;
+        drop(control);
+        self.cleanup(&record);
+        self.release_job_access(id);
+        self.notify();
+        Ok(())
+    }
+
     pub fn cancel(&self, id: &str) -> Result<(), EngineError> {
         let control = self.control.lock().map_err(internal)?;
         let mut record = self.store.get(id)?;
@@ -687,6 +856,8 @@ impl Runtime {
             }
         }
         record.state = JobState::Canceled;
+        record.error = None;
+        record.error_category = None;
         record.finished_ms = Some(now_ms());
         self.store.update(&record)?;
         drop(control);
@@ -737,6 +908,7 @@ impl Runtime {
             record.verified = false;
             record.verified_size = None;
             record.verified_hash = None;
+            record.keep_target_miss = false;
         }
         record.state = JobState::Queued;
         record.error = None;
@@ -842,6 +1014,18 @@ impl Runtime {
     }
     fn restore(&self) -> Result<(), EngineError> {
         for mut record in self.store.list()? {
+            if !matches!(
+                record.state,
+                JobState::Completed | JobState::Canceled | JobState::Canceling | JobState::Paused
+            ) {
+                let request = self.store.request(&record.id)?;
+                // A crash after verification but before the target decision
+                // must not turn a missed target into an automatic save or a
+                // failed-record retention cleanup. No worker survives startup.
+                if self.hold_target_miss(&mut record, &request.plan)? {
+                    continue;
+                }
+            }
             if record.verified
                 && record.reservation.is_some()
                 && record.state != JobState::Completed
@@ -953,6 +1137,20 @@ impl Runtime {
                 Err(_) => return,
             };
             let mut persistence_error = None;
+            // Cancellation can arrive after a target decision was persisted
+            // but before the worker acknowledges return. Complete that cancel
+            // only now, after every processing resource has been released.
+            let result = if result.is_ok()
+                && token.is_cancelled()
+                && self
+                    .store
+                    .get(&id)
+                    .is_ok_and(|record| record.state != JobState::Completed)
+            {
+                Err(EngineError::Cancelled)
+            } else {
+                result
+            };
             if let Err(error) = result {
                 if let Ok(mut record) = self.store.get(&id) {
                     record.state = if control.stop {
@@ -996,7 +1194,9 @@ impl Runtime {
         let mut record = self.store.get(id)?;
         let path = self.work_path(&record)?;
         if record.verified {
-            if self.reconcile_publication(&mut record)? {
+            if !target_requires_decision(&record, &request.plan)
+                && self.reconcile_publication(&mut record)?
+            {
                 self.update(&record)?;
                 self.cleanup(&record);
                 return Ok(());
@@ -1011,27 +1211,21 @@ impl Runtime {
         }
         if !record.verified {
             self.prepare_workdir(&record)?;
-            let opened = self.provider.open_source(request.source.locator.clone())?;
-            let input = Input::open(opened, self.provider.clone(), token.clone())?;
-            if input.source_identity()? != request.source.info.source_identity {
-                return Err(EngineError::SourceAccess {
-                    detail: "The original source changed. Re-select it before processing.".into(),
-                });
-            }
             record.state = JobState::Processing;
             self.update(&record)?;
             let mut reported = Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now);
-            processing::convert(
-                input,
+            processing::execute_conversion(
+                self.provider.clone(),
+                &request.source.locator,
                 &request.source.info,
                 &request.plan,
                 &path,
                 token.clone(),
                 |event| {
-                    let finalizing = matches!(event, processing::ProcessingProgress::Finalizing);
-                    if finalizing || reported.elapsed() >= Duration::from_millis(250) {
+                    let transition = !matches!(event, processing::ProcessingProgress::Timestamp(_));
+                    if transition || reported.elapsed() >= Duration::from_millis(250) {
                         let mut latest = self.store.get(id)?;
                         match event {
                             processing::ProcessingProgress::Timestamp(position) => {
@@ -1039,6 +1233,13 @@ impl Runtime {
                             }
                             processing::ProcessingProgress::Finalizing => {
                                 latest.state = JobState::Finalizing
+                            }
+                            processing::ProcessingProgress::Restarted => {
+                                latest.processed_us = 0;
+                                latest.state = JobState::Processing;
+                            }
+                            processing::ProcessingProgress::Validating => {
+                                latest.state = JobState::Validating;
                             }
                         }
                         self.update(&latest)?;
@@ -1051,10 +1252,8 @@ impl Runtime {
                 return Err(EngineError::Cancelled);
             }
             record = self.store.get(id)?;
-            record.state = JobState::Validating;
-            self.update(&record)?;
-            let output = media::inspect_file(&path, token.clone())?;
-            processing::verify_output(&output, &request.source.info, &request.plan)?;
+            // The processing owner has independently inspected and validated
+            // the actual finalized output against this accepted request.
             let (size, hash) = verified_identity(&path, &token)?;
             record.verified = true;
             record.verified_size = Some(size);
@@ -1071,6 +1270,11 @@ impl Runtime {
             return Err(EngineError::InvalidMedia {
                 detail: "The finalized working output is empty.".into(),
             });
+        }
+        // Never reserve or publish a target miss until an explicit keep
+        // decision has been persisted. Retain verified work and source access.
+        if self.hold_target_miss(&mut record, &request.plan)? {
+            return Ok(());
         }
         if record.reservation.is_none() {
             let reservation = self.provider.reserve_output(
@@ -1115,6 +1319,10 @@ impl Runtime {
         Ok(())
     }
     fn reconcile_publication(&self, record: &mut JobRecord) -> Result<bool, EngineError> {
+        let request = self.store.request(&record.id)?;
+        if target_requires_decision(record, &request.plan) {
+            return Ok(false);
+        }
         let Some(reservation) = &record.reservation else {
             return Ok(false);
         };
@@ -1131,6 +1339,18 @@ impl Runtime {
         record.error_category = None;
         Ok(true)
     }
+
+    fn hold_target_miss(&self, record: &mut JobRecord, plan: &Plan) -> Result<bool, EngineError> {
+        if !target_requires_decision(record, plan) {
+            return Ok(false);
+        }
+        record.state = JobState::TargetNotMet;
+        record.error = Some(format!("The verified output is {} bytes, exceeding the requested {}-byte limit. Keep this output, adjust the target and retry, or discard it. Nothing has been published.", record.verified_size.unwrap(), plan.target_size_bytes.unwrap()));
+        record.error_category = Some("target_not_met".into());
+        record.finished_ms = None;
+        self.update(record)?;
+        Ok(true)
+    }
     pub fn appearance(&self) -> Result<String, EngineError> {
         Ok(self
             .store
@@ -1143,6 +1363,15 @@ impl Runtime {
         }
         self.store.set_setting("appearance", value)
     }
+}
+
+fn target_requires_decision(record: &JobRecord, plan: &Plan) -> bool {
+    record.verified
+        && !record.keep_target_miss
+        && record
+            .verified_size
+            .zip(plan.target_size_bytes)
+            .is_some_and(|(actual, target)| actual > target)
 }
 
 fn verified_identity(

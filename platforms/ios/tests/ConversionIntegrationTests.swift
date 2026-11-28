@@ -3,6 +3,7 @@ import AVKit
 import CryptoKit
 import CoreMedia
 import CoreVideo
+import VideoToolbox
 import SQLite3
 import UIKit
 import UniformTypeIdentifiers
@@ -33,6 +34,144 @@ final class ConversionIntegrationTests: XCTestCase {
                 continuation.resume(with: Result { try action() })
             }
         }
+    }
+
+    private func nativeVideoRequest(
+        codec: String = "h264", width: Int32 = 320, height: Int32 = 180,
+        numerator: Int32 = 24, denominator: Int32 = 1,
+        bitRate: Int64 = 2_000_000, pixelFormat: String = "nv12", bitDepth: Int32 = 8,
+        hdr: Bool = false, transfer: String = "bt709"
+    ) -> NativeVideoRequest {
+        NativeVideoRequest(
+            codec: codec, width: width, height: height,
+            frameRateNumerator: numerator, frameRateDenominator: denominator,
+            bitRate: bitRate, pixelFormat: pixelFormat, bitDepth: bitDepth, hdr: hdr,
+            colorSpace: "bt709", colorRange: "tv", colorPrimaries: "bt709", colorTransfer: transfer
+        )
+    }
+
+    private struct NativePreparationProof {
+        let stage: String
+        let status: OSStatus
+        let identifier: String?
+        let hardware: Bool?
+        var prepared: Bool { stage == "prepared" && status == noErr }
+    }
+
+    /// This test calls VideoToolbox independently to verify a returned identity
+    /// or provide a concrete OS failure when the provider has no candidate.
+    private func prepareBaselineNativeEncoder(identifier: String?) -> NativePreparationProof {
+        var specification: [String: Any] = [:]
+        if let identifier { specification[kVTVideoEncoderSpecification_EncoderID as String] = identifier }
+        if #available(iOS 17.4, *) {
+            specification[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String] = true
+        }
+        let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey as String: 320, kCVPixelBufferHeightKey as String: 180,
+        ]
+        var created: VTCompressionSession?
+        let createStatus = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault, width: 320, height: 180, codecType: kCMVideoCodecType_H264,
+            encoderSpecification: specification as CFDictionary, imageBufferAttributes: attributes as CFDictionary,
+            compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &created
+        )
+        guard let session = created else {
+            return NativePreparationProof(stage: "create", status: createStatus, identifier: nil, hardware: nil)
+        }
+        defer { VTCompressionSessionInvalidate(session) }
+        guard createStatus == noErr else {
+            return NativePreparationProof(stage: "create", status: createStatus, identifier: nil, hardware: nil)
+        }
+        let properties: [String: Any] = [
+            kVTCompressionPropertyKey_ProfileLevel as String: kVTProfileLevel_H264_High_AutoLevel,
+            kVTCompressionPropertyKey_AverageBitRate as String: 2_000_000,
+            kVTCompressionPropertyKey_ExpectedFrameRate as String: 24,
+            kVTCompressionPropertyKey_AllowFrameReordering as String: false,
+            kVTCompressionPropertyKey_RealTime as String: false,
+            kVTCompressionPropertyKey_YCbCrMatrix as String: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            kVTCompressionPropertyKey_ColorPrimaries as String: kCVImageBufferColorPrimaries_ITU_R_709_2,
+            kVTCompressionPropertyKey_TransferFunction as String: kCVImageBufferTransferFunction_ITU_R_709_2,
+        ]
+        let configureStatus = VTSessionSetProperties(session, propertyDictionary: properties as CFDictionary)
+        guard configureStatus == noErr else {
+            return NativePreparationProof(stage: "configure", status: configureStatus, identifier: nil, hardware: nil)
+        }
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
+        guard prepareStatus == noErr else {
+            return NativePreparationProof(stage: "prepare", status: prepareStatus, identifier: nil, hardware: nil)
+        }
+        var retainedID: Unmanaged<CFTypeRef>?
+        let identityStatus = VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_EncoderID,
+                                                   allocator: kCFAllocatorDefault, valueOut: &retainedID)
+        let encoderID = retainedID?.takeRetainedValue() as? String
+        guard identityStatus == noErr, let encoderID, !encoderID.isEmpty else {
+            return NativePreparationProof(stage: "encoder identity", status: identityStatus, identifier: nil, hardware: nil)
+        }
+        var hardware: Bool?
+        if #available(iOS 17.4, *) {
+            var retained: Unmanaged<CFTypeRef>?
+            let status = VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                                               allocator: kCFAllocatorDefault, valueOut: &retained)
+            if let value = retained?.takeRetainedValue(), status == noErr,
+               CFGetTypeID(value) == CFBooleanGetTypeID() { hardware = value as? Bool }
+        }
+        return NativePreparationProof(stage: "prepared", status: noErr, identifier: encoderID, hardware: hardware)
+    }
+
+    @MainActor
+    func testNativeCapabilitiesPrepareRealSessionsWithoutClaimingEncodedHardwareOutput() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("velmux-capability-query-" + UUID().uuidString, isDirectory: true)
+        let evidence = try await onWorker { () -> [String] in
+            let services = IosMediaServices(
+                operationalRoot: root.appendingPathComponent("support"),
+                cacheDirectory: root.appendingPathComponent("cache"),
+                outputDirectory: root.appendingPathComponent("output")
+            )
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+            let invalid = [
+                self.nativeVideoRequest(width: 0), self.nativeVideoRequest(height: Int32.max),
+                self.nativeVideoRequest(numerator: 0), self.nativeVideoRequest(denominator: 0),
+                self.nativeVideoRequest(denominator: -1), self.nativeVideoRequest(bitRate: 0),
+                self.nativeVideoRequest(pixelFormat: "p010le", bitDepth: 10),
+                self.nativeVideoRequest(hdr: true), self.nativeVideoRequest(transfer: "smpte2084"),
+                self.nativeVideoRequest(codec: "av1"),
+            ]
+            for request in invalid {
+                XCTAssertTrue(try services.nativeVideoCandidates(request: request).isEmpty,
+                              "The initial native route must reject unsupported or invalid representations")
+            }
+            let candidates = try services.nativeVideoCandidates(request: self.nativeVideoRequest())
+            XCTAssertLessThanOrEqual(candidates.count, 1, "This probe must prepare at most one session per request")
+            var lines = [
+                "Runtime: " + ProcessInfo.processInfo.operatingSystemVersionString,
+                "Baseline H264320x180,24fps,2Mbps,NV12,SDR BT709 limited.",
+                "Session creation/preparation only. No media frame was encoded; no physical-device or hardware-output claim follows.",
+            ]
+            if candidates.isEmpty {
+                let actual = self.prepareBaselineNativeEncoder(identifier: nil)
+                XCTAssertFalse(actual.prepared, "The provider omitted a real baseline session that the runtime OS can prepare")
+                lines.append("No native candidate: independent VideoToolbox stage=\(actual.stage), OSStatus=\(actual.status), encoderID=\(actual.identifier ?? "unavailable"). Software FFmpeg processing remains independent.")
+            }
+            for candidate in candidates {
+                XCTAssertFalse(candidate.identifier.isEmpty)
+                XCTAssertLessThanOrEqual(candidate.identifier.utf8.count, 256)
+                XCTAssertTrue(candidate.sessionPrepared, "The provider must actually prepare its reported session")
+                let actual = self.prepareBaselineNativeEncoder(identifier: candidate.identifier)
+                XCTAssertTrue(actual.prepared, "The reported OS encoder cannot prepare the exact baseline: \(actual.stage), OSStatus=\(actual.status)")
+                XCTAssertEqual(candidate.identifier, actual.identifier)
+                XCTAssertEqual(candidate.osReportsHardware?.boolValue, actual.hardware,
+                               "Classification describes this prepared OS session, not encoded output")
+                if #available(iOS 17.4, *) {} else { XCTAssertNil(candidate.osReportsHardware) }
+                lines.append("\(candidate.identifier): sessionPrepared=\(candidate.sessionPrepared), osReportsHardware=\(String(describing: candidate.osReportsHardware?.boolValue)); independently prepared matching OS encoder identity.")
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.path), "Capability inspection must not create operational, cache or output files")
+            return lines
+        }
+        let attachment = XCTAttachment(string: evidence.joined(separator: "\n"))
+        attachment.name = "Native encoder capability preparation evidence"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func digest(_ url: URL) throws -> String {

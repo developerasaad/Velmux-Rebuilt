@@ -1,5 +1,8 @@
+mod compression;
 pub(crate) mod encoding;
+mod execution;
 mod transcode;
+pub(crate) use execution::execute_conversion;
 
 use crate::{configuration::*, ffmpeg::sys, EngineError, MediaInfo, StreamKind};
 use serde::{Deserialize, Serialize};
@@ -9,6 +12,8 @@ pub(crate) use transcode::convert;
 pub(crate) enum ProcessingProgress {
     Timestamp(i64),
     Finalizing,
+    Restarted,
+    Validating,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +28,8 @@ pub(crate) struct StreamPlan {
     pub bit_depth: Option<u32>,
     #[serde(default)]
     pub encoding: Option<encoding::EncodingSettings>,
+    #[serde(default)]
+    pub frame_rate: Option<crate::Rational>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,6 +40,8 @@ pub(crate) struct Plan {
     pub output: Option<OutputRepresentation>,
     #[serde(default)]
     pub preview_range: Option<PreviewRange>,
+    #[serde(default)]
+    pub target_size_bytes: Option<u64>,
 }
 
 impl Plan {
@@ -179,6 +188,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             channels: None,
             bit_depth: None,
             encoding: None,
+            frame_rate: None,
         });
     }
     if let Some(stream) = audio {
@@ -213,6 +223,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             channels: Some(channels),
             bit_depth: None,
             encoding: None,
+            frame_rate: None,
         });
     }
     if streams.is_empty() {
@@ -257,11 +268,13 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
         custom_frame_rate: None,
         audio_precision: None,
         channel_layout: None,
+        compression: None,
     };
     Ok(Plan {
         output: Some(OutputRepresentation::from_format(config.format)),
         config,
         streams,
+        target_size_bytes: None,
         preview_range: Some(PreviewRange {
             start_us,
             duration_us,
@@ -312,8 +325,11 @@ pub(crate) fn validate_operation(
 pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, EngineError> {
     validate_fields(config)?;
     validate_operation(info, config.operation)?;
+    let accepted = config;
+    let effective = compression::effective_config(info, config)?;
+    let config = &effective;
     let format = resolve_format(info, config)?;
-    let mut resolved = config.clone();
+    let mut resolved = accepted.clone();
     resolved.format = format;
     // Original remains immutable user intent; compatibility is evaluated against
     // its actual resolved representation before a job can be accepted.
@@ -334,7 +350,10 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 .is_some_and(|layout| layout != AudioLayout::Original)
             || config
                 .audio_precision
-                .is_some_and(|precision| precision != AudioPrecision::Original))
+                .is_some_and(|precision| precision != AudioPrecision::Original)
+            || config.compression.as_ref().is_some_and(|settings| {
+                settings.reduce_file_size && settings.custom_audio.is_some()
+            }))
     {
         return Err(invalid(
             "This source has no audio stream to apply these settings to.",
@@ -370,6 +389,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             channels: None,
             bit_depth: None,
             encoding: None,
+            frame_rate: None,
         };
         if stream.kind == StreamKind::Video
             && !stream
@@ -386,12 +406,14 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                     != scaled_video_dimensions(video, VideoSize::Original)?;
             let transform =
                 size_change || config.frame_rate != FrameRate::Original || config.quality != 23;
+            let compression_encode = compression::force_video(stream, format, config)?;
             if config.video_codec == VideoCodec::Copy && transform {
                 return Err(invalid("These video settings require encoding. Choose an applicable codec or Automatic."));
             }
             let compatible = muxer_accepts(format, stream.codec_id);
             let encode = !matches!(config.video_codec, VideoCodec::Automatic | VideoCodec::Copy)
-                || config.video_codec == VideoCodec::Automatic && (transform || !compatible);
+                || config.video_codec == VideoCodec::Automatic
+                    && (transform || !compatible || compression_encode);
             if encode {
                 if !stream.decoder_available {
                     return Err(invalid(
@@ -418,9 +440,13 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 item.width = Some(dimensions.0);
                 item.height = Some(dimensions.1);
                 item.bit_depth = settings.bit_depth;
+                item.frame_rate = config
+                    .frame_rate
+                    .rational(config.custom_frame_rate.as_ref())?;
                 item.encoding = Some(settings);
             }
         } else if stream.kind == StreamKind::Audio {
+            compression::validate_audio_copy(stream, config)?;
             let audio = stream
                 .audio
                 .as_ref()
@@ -487,12 +513,15 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
         }
         streams.push(item);
     }
-    Ok(Plan {
+    let mut plan = Plan {
         output: Some(OutputRepresentation::from_format(format)),
-        config: config.clone(),
+        config: accepted.clone(),
         streams,
         preview_range: None,
-    })
+        target_size_bytes: None,
+    };
+    compression::apply_to_plan(info, &mut plan)?;
+    Ok(plan)
 }
 
 pub(crate) fn verify_output(
@@ -525,10 +554,10 @@ pub(crate) fn verify_output(
             }
         }
         if expected.width.is_some() && plan.preview_range.is_none() {
-            if let Some(requested) = plan
+            if let Some(requested) = expected.frame_rate.clone().or(plan
                 .config
                 .frame_rate
-                .rational(plan.config.custom_frame_rate.as_ref())?
+                .rational(plan.config.custom_frame_rate.as_ref())?)
             {
                 let actual = stream
                     .video

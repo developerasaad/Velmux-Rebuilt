@@ -215,6 +215,22 @@ impl Engine {
     pub fn retry_publication(&self, id: String) -> Result<(), EngineError> {
         self.media_runtime()?.retry_publication(&id)
     }
+    pub fn keep_target_output(&self, id: String) -> Result<(), EngineError> {
+        self.media_runtime()?.keep_target_output(&id)
+    }
+    pub fn resubmit_target(
+        &self,
+        id: String,
+        new_target: Option<crate::TargetSize>,
+        submission_key: String,
+        cancellation: Arc<CancellationToken>,
+    ) -> Result<crate::JobRecord, EngineError> {
+        self.media_runtime()?
+            .resubmit_target(&id, new_target, submission_key, cancellation)
+    }
+    pub fn discard_target_output(&self, id: String) -> Result<(), EngineError> {
+        self.media_runtime()?.discard_target_output(&id)
+    }
     pub fn dismiss_job(&self, id: String) -> Result<(), EngineError> {
         self.media_runtime()?.dismiss(&id)
     }

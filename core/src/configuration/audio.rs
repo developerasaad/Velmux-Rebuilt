@@ -1,4 +1,7 @@
-use super::{invalid, AudioCodec, AudioLayout, AudioPrecision, ConversionConfig, OutputFormat};
+use super::{
+    invalid, AudioCodec, AudioLayout, AudioPrecision, CompressionMode, ConversionConfig,
+    OutputFormat,
+};
 use crate::{AudioInfo, EngineError, StreamInfo};
 
 pub(crate) const SAMPLE_RATES: [u32; 15] = [
@@ -167,7 +170,29 @@ pub(crate) fn audio_encoding_required(
     if config.audio_codec == AudioCodec::Copy {
         return false;
     }
-    if !compatible || transform {
+    let compression = config.compression.as_ref().is_some_and(|settings| {
+        if !settings.reduce_file_size {
+            return false;
+        }
+        if settings.mode == CompressionMode::Custom {
+            return settings.custom_audio.is_some();
+        }
+        let lossless = if config.audio_codec == AudioCodec::Automatic {
+            stream.codec.starts_with("pcm_")
+                || matches!(stream.codec.as_str(), "flac" | "alac" | "wavpack")
+        } else {
+            matches!(
+                config.audio_codec,
+                AudioCodec::Pcm
+                    | AudioCodec::PcmS16le
+                    | AudioCodec::Flac
+                    | AudioCodec::Alac
+                    | AudioCodec::Wavpack
+            )
+        };
+        !lossless
+    });
+    if !compatible || transform || compression {
         return true;
     }
     if config.audio_codec == AudioCodec::Automatic {
