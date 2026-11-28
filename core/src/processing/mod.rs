@@ -459,7 +459,8 @@ fn audio_output_tolerance(
     actual: &crate::StreamInfo,
     expected: &StreamPlan,
     filters: &adjustments::AudioFilterPlan,
-) -> u64 {
+    source: &MediaInfo,
+) -> Result<u64, EngineError> {
     let rate = expected.sample_rate.unwrap_or(1).max(1);
     let codec_samples = match expected.expected_codec.as_str() {
         codec if codec.starts_with("pcm_") || matches!(codec, "flac" | "alac" | "wavpack") => 2,
@@ -477,11 +478,17 @@ fn audio_output_tolerance(
         .map_or(0, |base| {
             (base.numerator as u64 * 1_000_000).div_ceil(base.denominator as u64)
         });
+    let original = source
+        .streams
+        .iter()
+        .find(|stream| stream.index == expected.index)
+        .ok_or_else(|| invalid("The accepted audio source stream is missing."))?;
     filters
-        .timing_tolerance_us()
+        .timing_tolerance_us(original)?
         .unwrap_or(0)
-        .saturating_add(sample_time)
-        .saturating_add(tick)
+        .checked_add(sample_time)
+        .and_then(|value| value.checked_add(tick))
+        .ok_or_else(|| invalid("The output audio timing tolerance exceeds supported bounds."))
 }
 
 pub(crate) fn verify_output(
@@ -635,7 +642,7 @@ fn verify_output_with_evidence(
                 .ok_or_else(|| invalid("The output audio stream is missing."))?;
             if let Some(filters) = &expected.audio_filters {
                 if let Some(timing) = filters.timing() {
-                    let tolerance = audio_output_tolerance(stream, expected, filters);
+                    let tolerance = audio_output_tolerance(stream, expected, filters, source)?;
                     if !duration_evidence.reuses_measurement(filters)
                         && stream
                             .duration_us
@@ -727,7 +734,7 @@ fn verify_output_with_evidence(
                 })?;
             end = end.max(endpoint);
             start = start.min(timing.output_start_us);
-            tolerance = tolerance.max(audio_output_tolerance(actual, expected, filters));
+            tolerance = tolerance.max(audio_output_tolerance(actual, expected, filters, source)?);
         }
         let required = end
             .checked_sub(start)
@@ -810,6 +817,65 @@ mod preview_tests {
                 }),
             }],
         }
+    }
+
+    #[test]
+    fn coarse_source_timestamp_precision_scales_with_speed_but_not_measured_timing() {
+        let mut source = audio_source();
+        source.container = "matroska".into();
+        source.duration_us = Some(4_000_000);
+        source.start_time_us = Some(0);
+        source.streams[0].codec_id = sys::AV_CODEC_ID_PCM_S16LE as i32;
+        source.streams[0].duration_us = None;
+        source.streams[0].start_time_us = Some(0);
+        source.streams[0].time_base = Some(crate::Rational {
+            numerator: 1,
+            denominator: 1000,
+        });
+        source.streams[0].audio.as_mut().unwrap().sample_rate = Some(48000);
+        let mut config = default_config(Operation::AudioConverter, &source, "gap.mkv");
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_adjustments = Some(AudioAdjustments {
+            speed_milli: 2000,
+            preserve_pitch: false,
+            ..Default::default()
+        });
+        let mut accepted = plan(&source, &config).unwrap();
+        let filters = accepted.streams[0].audio_filters.as_ref().unwrap();
+        assert_eq!(
+            filters.timing_tolerance_us(&source.streams[0]).unwrap(),
+            Some(500)
+        );
+        let mut output = source.clone();
+        output.container = "wav".into();
+        output.duration_us = Some(2_000_167);
+        output.streams[0].duration_us = output.duration_us;
+        output.streams[0].time_base = Some(crate::Rational {
+            numerator: 1,
+            denominator: 48000,
+        });
+        assert!(verify_output(&output, &source, &accepted).is_ok());
+        output.duration_us = Some(2_001_000);
+        output.streams[0].duration_us = output.duration_us;
+        assert!(verify_output(&output, &source, &accepted).is_err());
+        accepted.streams[0]
+            .audio_filters
+            .as_mut()
+            .unwrap()
+            .apply_measurement(96008, 48000)
+            .unwrap();
+        let filters = accepted.streams[0].audio_filters.as_ref().unwrap();
+        assert_eq!(
+            filters.timing_tolerance_us(&source.streams[0]).unwrap(),
+            Some(0)
+        );
+        output.duration_us = Some(2_000_667);
+        output.streams[0].duration_us = output.duration_us;
+        assert!(
+            verify_output(&output, &source, &accepted).is_err(),
+            "A measured endpoint must not inherit source quantization tolerance"
+        );
     }
 
     #[test]

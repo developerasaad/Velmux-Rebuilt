@@ -171,16 +171,46 @@ impl AudioFilterPlan {
         })
     }
 
-    pub(crate) fn timing_tolerance_us(&self) -> Option<u64> {
-        self.speed.as_ref().map(|speed| {
-            if self.measured.is_some() || !speed.preserve_pitch {
-                return 0;
-            }
+    pub(crate) fn timing_tolerance_us(
+        &self,
+        source: &StreamInfo,
+    ) -> Result<Option<u64>, EngineError> {
+        let Some(speed) = &self.speed else {
+            return Ok(None);
+        };
+        if self.measured.is_some() {
+            return Ok(Some(0));
+        }
+        if !(500..=2000).contains(&speed.speed_milli) || speed.input_rate == 0 {
+            return Err(invalid("The accepted audio timing scale is invalid."));
+        }
+        // The source snapshot is part of the immutable accepted request. A
+        // coarse source PTS quantum survives sample-clock gap reconstruction;
+        // compare header-derived duration at that precision, scaled by speed.
+        let source_tick = source
+            .time_base
+            .as_ref()
+            .filter(|base| base.numerator > 0 && base.denominator > 0)
+            .map(|base| {
+                let numerator = base.numerator as u128 * 1_000_000 * 1000;
+                let denominator = base.denominator as u128 * u128::from(speed.speed_milli);
+                u64::try_from(numerator.div_ceil(denominator)).map_err(|_| {
+                    invalid("The source audio timestamp precision exceeds supported bounds.")
+                })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let window = if speed.preserve_pitch && speed.speed_milli != 1000 {
             // Pinned atempo uses the next power of two of rate/24 for its
-            // WSOLA window. Two windows bound its content-dependent boundaries.
+            // WSOLA window. Two windows bound content-dependent boundaries.
             let window = (speed.input_rate / 24).max(1).next_power_of_two();
             (u64::from(window) * 2 * 1_000_000).div_ceil(u64::from(speed.input_rate))
-        })
+        } else {
+            0
+        };
+        Ok(Some(source_tick.checked_add(window).ok_or_else(|| {
+            invalid("The audio timing tolerance exceeds supported bounds.")
+        })?))
     }
 
     pub(crate) fn needs_measurement(&self) -> bool {
