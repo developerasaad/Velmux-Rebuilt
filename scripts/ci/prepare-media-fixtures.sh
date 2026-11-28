@@ -20,6 +20,10 @@ run_ffmpeg -f lavfi -i 'testsrc2=size=320x180:rate=24000/1001:duration=2' \
   -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
   -map 0:v -map 1:a -c:v libx264 -preset ultrafast -pix_fmt yuv420p -threads:v 1 \
   -c:a aac -b:a 192k -map_metadata -1 "$fixtures/video.mp4"
+# Asymmetric corner colors expose incorrect rotation/reflection composition.
+run_ffmpeg -f lavfi -i 'color=red:size=160x96:rate=12:duration=1,drawbox=x=80:y=0:w=80:h=48:color=lime:t=fill,drawbox=x=0:y=48:w=80:h=48:color=blue:t=fill,drawbox=x=80:y=48:w=80:h=48:color=yellow:t=fill' \
+  -c:v libx264 -preset ultrafast -crf 12 -pix_fmt yuv420p -threads:v 1 \
+  -map_metadata -1 "$fixtures/orientation-grid.mp4"
 run_ffmpeg -i "$fixtures/video.mp4" -vf transpose=clock -c:v libx264 \
   -preset ultrafast -threads:v 1 -c:a copy "$fixtures/portrait.mp4"
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
@@ -152,6 +156,15 @@ done
 python3 - "$fixtures" <<'MANIFEST'
 import hashlib, json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
+# Verify actual decoded content before using the grid as a spatial oracle.
+grid = subprocess.check_output(['ffmpeg', '-v', 'error', '-nostdin', '-noautorotate',
+                                '-i', str(root / 'orientation-grid.mp4'), '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'])
+frame_bytes = 160 * 96 * 3
+assert len(grid) == frame_bytes * 12, 'Spatial fixture must contain twelve real 160x96 frames'
+for offset in range(0, len(grid), frame_bytes):
+    for (x, y), expected in zip([(40,24),(120,24),(40,72),(120,72)], [(1,0,0),(0,1,0),(0,0,1),(1,1,0)]):
+        pixel = grid[offset + (y * 160 + x) * 3:offset + (y * 160 + x) * 3 + 3]
+        assert all(value > 200 if high else value < 40 for value, high in zip(pixel, expected)), 'Spatial fixture corner colors changed'
 (root / 'invalid.bin').write_bytes(b'not a media file\x00' * 80)
 (root / 'truncated.mp4').write_bytes((root / 'video.mp4').read_bytes()[:256])
 probes = {}

@@ -9,7 +9,7 @@ import java.io.FileNotFoundException
 
 /** The helper accepts only whitelisted generated media and the signed target app. */
 internal object FixtureFiles {
-    val names = listOf("video.mp4", "video.bin", "stereo.wav", "stereo.flac", "video-large.mp4", "positive-origin.mkv", "vfr.mkv", "rotated-sar.mp4", "multi-track.mkv", "hdr.mkv", "truncated.mp4", "invalid.bin")
+    val names = listOf("video.mp4", "video.bin", "orientation-grid.mp4", "stereo.wav", "stereo.flac", "video-large.mp4", "positive-origin.mkv", "vfr.mkv", "rotated-sar.mp4", "multi-track.mkv", "hdr.mkv", "truncated.mp4", "invalid.bin")
 
     fun requireControlCaller(context: Context) {
         val uid = Binder.getCallingUid()
