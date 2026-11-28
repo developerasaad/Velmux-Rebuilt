@@ -168,8 +168,15 @@ final class PickerFlowUITests: XCTestCase {
         for _ in 0..<6 { if reduce.isHittable { break }; app.swipeUp() }
         try waitFor("The native compression switch was not reachable") { reduce.isHittable }
         XCTAssertEqual(reduce.value as? String, "0", "Compression must start disabled")
-        reduce.tap()
-        try waitFor("The compression switch did not acknowledge the edit") { reduce.value as? String == "1" }
+        // SwiftUI exposes the entire labeled row as a Switch, with the actual
+        // 51×31 native switch as its child. A row-center tap lands between the
+        // text and thumb and does not activate this standard native control.
+        let nativeSwitch = reduce.switches.firstMatch
+        try waitFor("The native compression switch thumb was not reachable") { nativeSwitch.isHittable }
+        nativeSwitch.tap()
+        try waitFor("The compression switch did not acknowledge the edit") {
+            reduce.value as? String == "1" && self.app.buttons["compression-mode"].exists
+        }
         try choose(id: "compression-mode", option: "Target File Size")
         let target = app.textFields["compression-target"]
         for _ in 0..<6 { if target.isHittable { break }; app.swipeUp() }

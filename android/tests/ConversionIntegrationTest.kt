@@ -254,7 +254,8 @@ class ConversionIntegrationTest {
                 clickText("Sample rate")
                 clickText("8000 Hz", exact = true)
                 reachableText("Reduce File Size", exact = true)
-                val reduce = requireNotNull(device.findObject(By.desc("Reduce File Size")))
+                val reduce = requireNotNull(checkableControl("Reduce File Size"))
+                assertTrue("The actual audio compression switch must be enabled and clickable", reduce.isEnabled && reduce.isClickable)
                 assertFalse("The new audio workspace must preserve the disabled compression default", reduce.isChecked)
                 reduce.click()
                 reachableText("Compression")
@@ -263,21 +264,21 @@ class ConversionIntegrationTest {
                 reachableText("Audio rate control")
                 requireNotNull(device.findObject(By.desc("Audio rate control"))).click()
                 clickText("Average bitrate", exact = true)
-                fun audioValue() = device.findObject(By.desc("Audio compression value").clazz("android.widget.EditText"))
+                fun audioValue() = labeledEditText("Audio compression value")
                 fun showAudioValue(): UiObject2 {
                     if (audioValue() == null) {
                         UiScrollable(UiSelector().scrollable(true)).setMaxSearchSwipes(6).scrollIntoView(
-                            UiSelector().description("Audio compression value").className("android.widget.EditText"))
+                            UiSelector().description("Audio compression value"))
                     }
                     return requireNotNull(audioValue()) { "The actual Custom audio value field is not reachable" }
                 }
                 showAudioValue().text = "32000"
                 waitUntil("The initial valid Custom draft was not reflected by the workspace") {
-                    audioValue()?.text == "32000" && device.findObject(By.text("Convert"))?.isEnabled == true
+                    audioValue()?.text == "32000" && convertControl()?.let { it.isEnabled && it.isClickable } == true
                 }
                 requireNotNull(audioValue()).text = "128000"
                 waitUntil("The incompatible Custom draft must disable conversion") {
-                    audioValue()?.text == "128000" && device.findObject(By.text("Convert"))?.isEnabled == false
+                    audioValue()?.text == "128000" && convertControl()?.isEnabled == false
                 }
                 assertEquals("Editing an incompatible draft created a job", before, media.jobsNative().map { it.id }.toSet())
                 capture("ui-audio-custom-invalid-draft.png")
@@ -287,7 +288,7 @@ class ConversionIntegrationTest {
                 clickText("Sample rate")
                 clickText("48000 Hz", exact = true)
                 waitUntil("Changing sampling did not make the retained Custom draft applicable") {
-                    device.findObject(By.text("Convert"))?.isEnabled == true
+                    convertControl()?.let { it.isEnabled && it.isClickable } == true
                 }
                 assertEquals("Changing sampling replaced the explicit Custom draft", "128000", showAudioValue().text)
                 assertEquals(before, media.jobsNative().map { it.id }.toSet())
@@ -607,33 +608,34 @@ class ConversionIntegrationTest {
 
     private fun exerciseCompressionWorkspace(before: Set<String>) {
         reachableText("Reduce File Size", exact = true)
-        val reduce = requireNotNull(device.wait(Until.findObject(By.desc("Reduce File Size")), 5_000)) {
+        val reduce = requireNotNull(checkableControl("Reduce File Size")) {
             "The native Reduce File Size switch is not reachable"
         }
         capture("ui-compression-default-switch.png")
         assertTrue("Reduce File Size must expose an actual checkable switch", reduce.isCheckable)
+        assertTrue("Reduce File Size must expose an enabled clickable control", reduce.isEnabled && reduce.isClickable)
         assertFalse("Reduce File Size must start disabled", reduce.isChecked)
         reduce.click()
         waitUntil("The compression switch did not acknowledge its change") {
-            device.findObject(By.desc("Reduce File Size"))?.isChecked == true
+            checkableControl("Reduce File Size")?.isChecked == true
         }
         reachableText("Compression")
         requireNotNull(device.findObject(By.desc("Compression"))).click()
         clickText("Target File Size", exact = true)
         waitUntil("An empty target left Convert enabled") {
-            device.findObject(By.text("Convert"))?.isEnabled == false
+            convertControl()?.isEnabled == false
         }
         assertEquals("An empty target created an accepted job", before, media.jobsNative().map { it.id }.toSet())
         reachableText("Target file size", exact = true)
-        val target = requireNotNull(device.findObject(By.desc("Target file size").clazz("android.widget.EditText"))) {
+        val target = requireNotNull(labeledEditText("Target file size")) {
             "The target input is not an accessible native text field"
         }
         target.text = "0"
         waitUntil("The target field did not acknowledge the invalid edit") {
-            device.findObject(By.desc("Target file size").clazz("android.widget.EditText"))?.text == "0"
+            labeledEditText("Target file size")?.text == "0"
         }
         waitUntil("An invalid target left Convert enabled") {
-            device.findObject(By.text("Convert"))?.isEnabled == false
+            convertControl()?.isEnabled == false
         }
         // This is a rejected editing draft, not a failed accepted job. Ordinary
         // interaction must remain available so the user can choose a preset.
@@ -643,7 +645,7 @@ class ConversionIntegrationTest {
         requireNotNull(device.findObject(By.desc("Compression"))).click()
         clickText("Balanced Quality", exact = true)
         waitUntil("Choosing a valid preset did not restore Convert") {
-            device.findObject(By.text("Convert"))?.isEnabled == true
+            convertControl()?.let { it.isEnabled && it.isClickable } == true
         }
         assertEquals("Editing compression unexpectedly submitted a job", before, media.jobsNative().map { it.id }.toSet())
         capture("ui-compression-balanced.png")
@@ -1050,6 +1052,58 @@ class ConversionIntegrationTest {
     }
 
     private fun clickText(text: String, exact: Boolean = false) = reachableText(text, exact).click()
+
+    private fun checkableControl(description: String): UiObject2? {
+        // The retained API29 hierarchy exposes a synthetic description child
+        // inside the actual checkable/clickable Compose row. Read state from
+        // that labeled control, never from the description-only child.
+        var node = device.findObject(By.desc(description))
+        repeat(4) {
+            val current = node ?: return null
+            if (current.isCheckable) return current
+            node = current.parent
+        }
+        return null
+    }
+
+    private fun labeledEditText(description: String): UiObject2? {
+        val descriptions = device.findObjects(By.desc(description))
+        if (descriptions.size != 1) return null
+        val label = descriptions.single()
+        val bounds = label.visibleBounds
+        var node: UiObject2? = label
+        repeat(4) {
+            val current = node ?: return null
+            if (current.className == "android.widget.EditText") return current
+            // A semantics-only description may be a child of the native field,
+            // or a sibling of its editable descendant. Search only the same
+            // bounded field container, never an encompassing workspace/scroll.
+            if (current.visibleBounds == bounds) {
+                val fields = current.findObjects(By.clazz("android.widget.EditText"))
+                if (fields.size == 1) return fields.single()
+                if (fields.size > 1) return null
+            }
+            node = current.parent
+        }
+        return null
+    }
+
+    private fun convertControl(): UiObject2? {
+        var node = device.findObject(By.text("Convert"))
+        repeat(4) {
+            val current = node ?: return null
+            if (current.className == "android.widget.Button") return current
+            val children = current.children
+            // The inspected Compose hierarchy puts the role-only Button and
+            // its text beside each other inside the actual action container.
+            // Enabled/clickable state belongs to that container, including when
+            // disabled; the text child is not the button's state authority.
+            if (children.count { it.className == "android.widget.Button" } == 1 &&
+                children.any { it.text == "Convert" }) return current
+            node = current.parent
+        }
+        return null
+    }
 
     private fun reachableText(text: String, exact: Boolean = false): UiObject2 {
         val selector = if (exact) By.text(text) else By.textContains(text)
