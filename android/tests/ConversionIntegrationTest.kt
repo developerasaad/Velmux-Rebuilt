@@ -516,6 +516,7 @@ class ConversionIntegrationTest {
         val reduce = requireNotNull(device.wait(Until.findObject(By.desc("Reduce File Size")), 5_000)) {
             "The native Reduce File Size switch is not reachable"
         }
+        capture("ui-compression-default-switch.png")
         assertTrue("Reduce File Size must expose an actual checkable switch", reduce.isCheckable)
         assertFalse("Reduce File Size must start disabled", reduce.isChecked)
         reduce.click()

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -22,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -198,10 +200,11 @@ private fun ControlEditor(
 
 @Composable
 private fun CompressionSwitch(title: String, checked: Boolean, enabled: Boolean, tag: String, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+        .testTag(tag).semantics { contentDescription = title }, verticalAlignment = Alignment.CenterVertically) {
         Text(title, Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled,
-            modifier = Modifier.testTag(tag).semantics { contentDescription = title })
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 

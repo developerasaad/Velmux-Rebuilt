@@ -277,8 +277,8 @@ pub(crate) fn estimate(
     // Current converters retain every source stream or reject the composition.
     // If future track selection omits any stream, this shortcut must instead use
     // that intended composition's payload facts, never the whole input file.
-    let (size, explanation) = if all_copy && info.byte_size.is_some() {
-        (EstimatedOutputSize::SourceSizeReference { bytes: info.byte_size.unwrap() },
+    let (size, explanation) = if let Some(bytes) = info.byte_size.filter(|_| all_copy) {
+        (EstimatedOutputSize::SourceSizeReference { bytes },
             "Source-size reference for retaining all original tracks. Processing still remuxes; different container headers and metadata can change finalized bytes.".into())
     } else if let Some(reason) = unavailable {
         (
