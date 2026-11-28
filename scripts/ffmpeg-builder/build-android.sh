@@ -247,18 +247,43 @@ ZPC
     patch_x265_cmake4_compat "$x265_src"
     x265_build="$build_tmp/x265"
     rm -rf "$x265_build"
-    # ENABLE_ASSEMBLY=OFF: x265's asm path expects nasm on x86 and is not
-    # wired for NDK cross targets; C++ intrinsics carry the real speed.
-    cmake -G Ninja -S "$x265_src/source" -B "$x265_build" \
-      -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-      -DANDROID_ABI="$abi" -DANDROID_PLATFORM="android-$API_LEVEL" \
-      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
-      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_FIND_ROOT_PATH="$prefix" \
-      -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=OFF \
-      >/dev/null
-    cmake --build "$x265_build" >/dev/null
-    cmake --install "$x265_build" >/dev/null
+    mkdir -p "$x265_build/8bit"
+    # ENABLE_ASSEMBLY=OFF: preserve the proven NDK intrinsics route.
+    local -a x265_cmake=(-G Ninja
+      -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
+      -DANDROID_ABI="$abi" -DANDROID_PLATFORM="android-$API_LEVEL"
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix"
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_FIND_ROOT_PATH="$prefix"
+      -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=OFF)
+    local -a x265_multilib=(-DLINKED_10BIT=OFF)
+    # Pinned upstream supports high-bit-depth only on 64-bit architectures.
+    # Preserve the optional legacy 32-bit ABI's existing Main8-only build.
+    if [ "$abi" != armeabi-v7a ]; then
+      mkdir -p "$x265_build/10bit"
+      cmake "${x265_cmake[@]}" -S "$x265_src/source" -B "$x265_build/10bit" \
+        -DHIGH_BIT_DEPTH=ON -DMAIN12=OFF -DEXPORT_C_API=OFF >/dev/null
+      cmake --build "$x265_build/10bit" >/dev/null
+      ln -sf ../10bit/libx265.a "$x265_build/8bit/libx265_main10.a"
+      x265_multilib=(-DLINKED_10BIT=ON -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L.)
+    fi
+    cmake "${x265_cmake[@]}" -S "$x265_src/source" -B "$x265_build/8bit" \
+      -DHIGH_BIT_DEPTH=OFF -DEXPORT_C_API=ON "${x265_multilib[@]}" >/dev/null
+    cmake --build "$x265_build/8bit" >/dev/null
+    if [ "$abi" != armeabi-v7a ]; then
+      # Match pinned upstream multilib construction with the target LLVM
+      # archiver. Merge before installing; do not publish a Main8 intermediate.
+      (cd "$x265_build/8bit" &&
+        mv libx265.a libx265_main.a
+        "$AR" -M <<'AR_SCRIPT'
+CREATE libx265.a
+ADDLIB libx265_main.a
+ADDLIB libx265_main10.a
+SAVE
+END
+AR_SCRIPT
+        "$RANLIB" libx265.a)
+    fi
+    cmake --install "$x265_build/8bit" >/dev/null
     sanitize_x265_pc "$prefix"
     log "[$abi] x265 installed"
   fi
@@ -342,7 +367,7 @@ ZPC
        --prefix="$prefix" \
        --disable-shared --enable-static --enable-pic \
        --disable-unit-tests --disable-examples --disable-tools --disable-docs \
-       --disable-install-docs --disable-webm-io \
+       --disable-install-docs --disable-webm-io --enable-vp9-highbitdepth \
        --extra-cflags="$ABI_CFLAGS -O3" \
        >"$vpx_log" 2>&1); then
       cat "$vpx_log" >&2

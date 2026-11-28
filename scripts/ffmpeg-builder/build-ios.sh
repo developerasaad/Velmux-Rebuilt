@@ -355,26 +355,37 @@ ZPC
 
   # --- x265 (cmake cross; HEVC software encode for the FFmpeg backend) -----
   if [ ! -f "$SLICE_PREFIX/lib/libx265.a" ]; then
-    log "[$slice] building x265"
+    log "[$slice] building x265 (8-bit and 10-bit)"
     x265_tb="$(fetch_tarball x265)"
     x265_src="$(extract_tarball "$x265_tb" "$SLICE_TAG")"
     patch_x265_cmake4_compat "$x265_src"
     x265_build="$build_tmp/x265"
     rm -rf "$x265_build"
-    # ENABLE_ASSEMBLY=OFF: x265's nasm path cannot cross-compile for Apple
-    # slices; the C++ intrinsics path is the supported one.
-    cmake -G Ninja -S "$x265_src/source" -B "$x265_build" \
-      -DCMAKE_SYSTEM_NAME=iOS \
-      -DCMAKE_OSX_SYSROOT="$SLICE_SDK" \
-      -DCMAKE_OSX_ARCHITECTURES="$SLICE_ARCH" \
-      -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
-      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$SLICE_PREFIX" \
-      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_FIND_ROOT_PATH="$SLICE_PREFIX" \
-      -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=OFF \
-      >/dev/null
-    cmake --build "$x265_build" >/dev/null
-    cmake --install "$x265_build" >/dev/null
+    mkdir -p "$x265_build/8bit" "$x265_build/10bit"
+    # ENABLE_ASSEMBLY=OFF: preserve the proven Apple cross intrinsics route.
+    local -a x265_cmake=(-G Ninja
+      -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$SLICE_SDK"
+      -DCMAKE_OSX_ARCHITECTURES="$SLICE_ARCH"
+      -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$SLICE_PREFIX"
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_FIND_ROOT_PATH="$SLICE_PREFIX"
+      -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=OFF)
+    # Follow pinned x265's multilib recipe: Main10 has a private namespace;
+    # Main8 owns the exported API and dispatches x265_api_get(10) to it.
+    cmake "${x265_cmake[@]}" -S "$x265_src/source" -B "$x265_build/10bit" \
+      -DHIGH_BIT_DEPTH=ON -DMAIN12=OFF -DEXPORT_C_API=OFF >/dev/null
+    cmake --build "$x265_build/10bit" >/dev/null
+    ln -sf ../10bit/libx265.a "$x265_build/8bit/libx265_main10.a"
+    cmake "${x265_cmake[@]}" -S "$x265_src/source" -B "$x265_build/8bit" \
+      -DHIGH_BIT_DEPTH=OFF -DEXPORT_C_API=ON -DLINKED_10BIT=ON \
+      -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L. >/dev/null
+    cmake --build "$x265_build/8bit" >/dev/null
+    # Use Apple's archive combiner, not GNU ar flags or a Homebrew libtool.
+    # Install only after the archive contains both implementations.
+    (cd "$x265_build/8bit" &&
+      mv libx265.a libx265_main.a
+      xcrun -sdk "$SLICE_SDK" libtool -static -o libx265.a libx265_main.a libx265_main10.a)
+    cmake --install "$x265_build/8bit" >/dev/null
     sanitize_x265_pc "$SLICE_PREFIX"
     log "[$slice] x265 installed"
   fi
@@ -461,7 +472,7 @@ ZPC
        --prefix="$SLICE_PREFIX" \
        --disable-shared --enable-static --enable-pic \
        --disable-unit-tests --disable-examples --disable-tools --disable-docs \
-       --disable-install-docs --disable-webm-io \
+       --disable-install-docs --disable-webm-io --enable-vp9-highbitdepth \
        --extra-cflags="-arch $SLICE_ARCH $SLICE_MIN_FLAG" \
        >"$vpx_log" 2>&1); then
       cat "$vpx_log" >&2

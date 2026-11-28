@@ -87,3 +87,5 @@ The shared theme reports its resolved light/dark appearance to the native host. 
 5. Verify real media progressively with independent inspection/decoding, retain M1/M2 regressions, then execute affected Android/iOS runtime and UI gates. Physical hardware limitations remain explicit.
 
 Original is user intent, not a muxer name. Accepted jobs must persist the resolved representation needed for working paths, MIME, publication and restart. Additive configuration/plan evolution must continue reading existing accepted M2 requests without silently re-planning them under new defaults. New capabilities are exposed only as their processing paths become functional.
+
+M3 precision builds extend the pinned dependency closure rather than replacing it: combined x265 Main8/Main10 follows the pinned upstream multilib recipe, and libvpx enables its existing VP9 high-bit-depth option. Compiled encoder declarations are queried once through bounded FFmpeg APIs and cached; they remain distinct from actual native hardware session availability. Route eligibility and output precision require runtime verification.

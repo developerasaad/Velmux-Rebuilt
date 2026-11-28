@@ -120,14 +120,39 @@ x265_tb="$(fetch_tarball x265)"
 x265_src="$(extract_tarball "$x265_tb")"
 patch_x265_cmake4_compat "$x265_src"
 if [ ! -f "$HOST_PREFIX/lib/libx265.a" ]; then
-  log "building x265"
+  log "building x265 (8-bit and 10-bit)"
   x265_build="$BUILD_TMP/x265"
-  mkdir -p "$x265_build"
-  (cd "$x265_build" && cmake -G Ninja -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release \
-     -DCMAKE_INSTALL_PREFIX="$HOST_PREFIX" \
-     -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=ON \
-     "$x265_src/source" >/dev/null && \
-   cmake --build . >/dev/null && cmake --install . >/dev/null)
+  rm -rf "$x265_build"
+  mkdir -p "$x265_build/8bit" "$x265_build/10bit"
+  x265_cmake=(-G Ninja -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_INSTALL_PREFIX="$HOST_PREFIX"
+    -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=ON)
+  # Follow pinned x265's build/linux/multilib.sh: only Main8 exports the C
+  # entry points; its API dispatcher links the namespaced Main10 implementation.
+  cmake "${x265_cmake[@]}" -S "$x265_src/source" -B "$x265_build/10bit" \
+    -DHIGH_BIT_DEPTH=ON -DMAIN12=OFF -DEXPORT_C_API=OFF >/dev/null
+  cmake --build "$x265_build/10bit" >/dev/null
+  ln -sf ../10bit/libx265.a "$x265_build/8bit/libx265_main10.a"
+  cmake "${x265_cmake[@]}" -S "$x265_src/source" -B "$x265_build/8bit" \
+    -DHIGH_BIT_DEPTH=OFF -DEXPORT_C_API=ON -DLINKED_10BIT=ON \
+    -DEXTRA_LIB=x265_main10.a -DEXTRA_LINK_FLAGS=-L. >/dev/null
+  cmake --build "$x265_build/8bit" >/dev/null
+  # Combine before installing, so the installed archive is never an 8-bit-only
+  # intermediate. Keep upstream's archive tools for ELF and Darwin respectively.
+  (cd "$x265_build/8bit" &&
+    mv libx265.a libx265_main.a
+    if [ "$(uname -s)" = Darwin ]; then
+      xcrun libtool -static -o libx265.a libx265_main.a libx265_main10.a
+    else
+      ar -M <<'AR_SCRIPT'
+CREATE libx265.a
+ADDLIB libx265_main.a
+ADDLIB libx265_main10.a
+SAVE
+END
+AR_SCRIPT
+    fi)
+  cmake --install "$x265_build/8bit" >/dev/null
   log "x265 installed"
 fi
 
@@ -182,7 +207,7 @@ if [ ! -f "$HOST_PREFIX/lib/libvpx.a" ]; then
   (cd "$vpx_src" && ./configure --prefix="$HOST_PREFIX" \
      --disable-shared --enable-static --enable-pic \
      --disable-unit-tests --disable-examples --disable-tools --disable-docs \
-     --disable-install-docs --disable-webm-io >/dev/null && \
+     --disable-install-docs --disable-webm-io --enable-vp9-highbitdepth >/dev/null && \
    make -j"$JOBS" >/dev/null && make install >/dev/null)
   log "libvpx installed"
 fi
