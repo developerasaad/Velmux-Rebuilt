@@ -56,8 +56,9 @@ fun ConverterWorkspace(
         val o = scaledDecimal(outValue, 6, false)?.takeIf { it >= 0 }?.toULong()
         if (g != null && i != null && o != null) onChange(config.copy(audioAdjustments = AudioAdjustments(g, i, o)))
     }
-    var qualityText by remember(config.quality) { mutableStateOf(config.quality.toString()) }
-    val qualityValid = qualityText.toIntOrNull()?.let { it in 18..28 } ?: false
+    val compression = config.compression ?: defaultCompression()
+    val compressionEditor = remember(source.id) { CompressionEditorState(config.compression) }
+    val compressionEdit = compressionEditor.evaluate(media, compression, choices.compressionChoices)
     var customWidthText by remember(source.id, config.videoSize, config.customWidth) { mutableStateOf(config.customWidth?.toString().orEmpty()) }
     var customHeightText by remember(source.id, config.videoSize, config.customHeight) { mutableStateOf(config.customHeight?.toString().orEmpty()) }
     var customRateNumeratorText by remember(source.id, config.frameRate, config.customFrameRate) { mutableStateOf(config.customFrameRate?.numerator?.toString().orEmpty()) }
@@ -68,8 +69,6 @@ fun ConverterWorkspace(
     val customDenominatorValid = customRateDenominatorText.toIntOrNull()?.let { it > 0 } == true
     val customSizeValid = config.videoSize != VideoSize.CUSTOM || customWidthValid && customHeightValid
     val customRateValid = config.frameRate != FrameRate.CUSTOM || customNumeratorValid && customDenominatorValid
-    val lossyControls = choices.audioBitrates.isNotEmpty()
-    val qualityVisible = config.videoCodec == VideoCodec.H264
     val selectedLayout = config.channelLayout ?: when (config.channels) {
         null -> AudioLayout.ORIGINAL
         1u -> AudioLayout.MONO
@@ -140,15 +139,6 @@ fun ConverterWorkspace(
                         if (!customRateValid) Text("Enter a positive whole-number numerator and denominator.", color = MaterialTheme.colorScheme.error)
                         Text("Frame rate is numerator / denominator fps, for example 24000 / 1001.", style = MaterialTheme.typography.bodySmall)
                     }
-                    if(qualityVisible) {
-                        Text("Encoding quality · ${config.quality}", style = MaterialTheme.typography.titleSmall)
-                        Slider(value = config.quality.toFloat(), onValueChange = { onChange(config.copy(quality = it.toInt().toUByte())) }, valueRange = 18f..28f, steps = 9, enabled = !submitting)
-                        OutlinedTextField(qualityText, onValueChange = { value ->
-                            qualityText = value
-                            value.toIntOrNull()?.takeIf { it in 18..28 }?.let { onChange(config.copy(quality = it.toUByte())) }
-                        }, label = { Text("Quality value · 18–28") }, supportingText = { Text("Lower values retain more detail and usually create larger files.") },
-                            isError = !qualityValid, singleLine = true, enabled = !submitting, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-                    }
                     if(source.info.streams.any { it.kind == StreamKind.AUDIO }) TextButton(enabled = !submitting, onClick = { advancedAudio = !advancedAudio }) { Text(if(advancedAudio) "Hide audio settings" else "Audio settings") }
                 }
                 if(!video || advancedAudio) {
@@ -156,7 +146,6 @@ fun ConverterWorkspace(
                     Choice("Sample rate", config.sampleRate?.let { "$it Hz" } ?: "Original", enabled = !submitting) { sheet = "Sample rate" }
                     Choice("Channel layout", selectedLayout?.let(::audioLayout) ?: "Retained ${config.channels}-channel setting", enabled = !submitting && choices.channelLayouts.isNotEmpty()) { sheet = "Channel layout" }
                     if (choices.audioPrecisions.isNotEmpty()) Choice("Sample precision", audioPrecision(selectedPrecision), enabled = !submitting) { sheet = "Sample precision" }
-                    if(lossyControls) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic", enabled = !submitting) { sheet = "Audio bitrate" }
                     if((config.sampleRate ?: 0u) !in choices.sampleRates) Text("The retained sample rate is unavailable for this route. Choose an applicable sample rate.", color = MaterialTheme.colorScheme.error)
                     if(selectedLayout == null || selectedLayout !in choices.channelLayouts) Text("The retained speaker layout is unavailable for this route. Choose an applicable layout.", color = MaterialTheme.colorScheme.error)
                     if (selectedPrecision !in choices.audioPrecisions && (choices.audioPrecisions.isNotEmpty() || selectedPrecision != AudioPrecision.ORIGINAL)) {
@@ -165,11 +154,10 @@ fun ConverterWorkspace(
                             TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioPrecision = null)) }) { Text("Use original sample precision") }
                         }
                     }
-                    if(config.audioBitrate != null && config.audioBitrate !in choices.audioBitrates) {
-                        Text("The retained bitrate is unavailable for the selected audio settings.", color = MaterialTheme.colorScheme.error)
-                        TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioBitrate = null)) }) { Text("Use automatic bitrate") }
-                    }
                 }
+                CompressionControls(media, compressionEditor, compression, choices.compressionChoices, video,
+                    enabled = !submitting, evaluation = compressionEdit,
+                    onChange = { onChange(config.copy(compression = it, quality = 23u, audioBitrate = null)) })
                 if (!video) choices.audioAdjustmentLimits?.let { limits ->
                     TextButton(enabled = !submitting, onClick = { adjustmentsExpanded = !adjustmentsExpanded }) {
                         Text(if (adjustmentsExpanded) "Hide audio adjustments" else "Audio adjustments")
@@ -202,10 +190,6 @@ fun ConverterWorkspace(
                     Text("This route preserves original video geometry and timing.", color = MaterialTheme.colorScheme.error)
                     TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL)) }) { Text("Use original geometry and timing") }
                 }
-                if(video && config.videoCodec != VideoCodec.H264 && config.quality != 23.toUByte()) {
-                    Text("The retained H.264 quality value is specific to H.264 encoding.", color = MaterialTheme.colorScheme.error)
-                    TextButton(enabled = !submitting, onClick = { onChange(config.copy(quality = 23u)) }) { Text("Reset H.264 quality") }
-                }
                 if(video && config.videoCodec == VideoCodec.COPY && (config.videoSize != VideoSize.ORIGINAL || config.frameRate != FrameRate.ORIGINAL)) {
                     Text("Copying requires original video geometry and timing.", color = MaterialTheme.colorScheme.error)
                     TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL, quality = 23u)) }) { Text("Use original video settings") }
@@ -216,7 +200,7 @@ fun ConverterWorkspace(
                 Spacer(Modifier.height(12.dp))
             }
             Surface(shadowElevation = 3.dp) {
-                Button(onClick = onConvert, enabled = !submitting && config.fileName.isNotBlank() && (!qualityVisible || qualityValid) && customSizeValid && customRateValid && adjustmentsValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
+                Button(onClick = onConvert, enabled = !submitting && config.fileName.isNotBlank() && compressionEdit.error == null && customSizeValid && customRateValid && adjustmentsValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
                     if(submitting) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)) }
                     Text(if(submitting) "Validating request…" else "Convert")
                 }
@@ -233,7 +217,7 @@ fun ConverterWorkspace(
             "Sample rate" -> choices.sampleRates
             "Channel layout" -> choices.channelLayouts
             "Sample precision" -> choices.audioPrecisions
-            else -> choices.audioBitrates
+            else -> emptyList<Any>()
         }
         val labels = values.map { value -> when(value) {
             is FormatOption -> value.label
@@ -255,7 +239,7 @@ fun ConverterWorkspace(
             "Sample rate" -> value == (config.sampleRate ?: 0u)
             "Channel layout" -> value == selectedLayout
             "Sample precision" -> value == selectedPrecision
-            else -> value == (config.audioBitrate ?: 0u)
+            else -> false
         } }
         OptionSheet(title, labels, selected, onSelect = { index ->
             if (submitting) return@OptionSheet
@@ -276,7 +260,7 @@ fun ConverterWorkspace(
                 "Sample rate" -> config.copy(sampleRate = (value as UInt).takeIf { it != 0u })
                 "Channel layout" -> config.copy(channelLayout = (value as AudioLayout).takeUnless { it == AudioLayout.ORIGINAL }, channels = null)
                 "Sample precision" -> config.copy(audioPrecision = (value as AudioPrecision).takeUnless { it == AudioPrecision.ORIGINAL })
-                else -> config.copy(audioBitrate = (value as UInt).takeIf { it != 0u })
+                else -> config
             }); sheet = null
         }, onDismiss = { sheet = null })
     }

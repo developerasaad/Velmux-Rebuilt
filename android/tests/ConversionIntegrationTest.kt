@@ -183,6 +183,7 @@ class ConversionIntegrationTest {
                 capture("ui-video-workspace.png")
                 exerciseEmbeddedPlayerControls(scenario, PICKER_VIDEO)
                 exerciseResponsiveWorkspace(PICKER_VIDEO)
+                exerciseCompressionWorkspace(before)
                 exerciseInvalidOutputName(before)
                 clickText("Convert", exact = true)
                 val submitted = awaitNewJob(before)
@@ -508,6 +509,51 @@ class ConversionIntegrationTest {
             runCatching { capture("failure-embedded-player.png") }
             throw error
         }
+    }
+
+    private fun exerciseCompressionWorkspace(before: Set<String>) {
+        reachableText("Reduce File Size", exact = true)
+        val reduce = requireNotNull(device.wait(Until.findObject(By.desc("Reduce File Size")), 5_000)) {
+            "The native Reduce File Size switch is not reachable"
+        }
+        assertTrue("Reduce File Size must expose an actual checkable switch", reduce.isCheckable)
+        assertFalse("Reduce File Size must start disabled", reduce.isChecked)
+        reduce.click()
+        waitUntil("The compression switch did not acknowledge its change") {
+            device.findObject(By.desc("Reduce File Size"))?.isChecked == true
+        }
+        reachableText("Compression")
+        requireNotNull(device.findObject(By.desc("Compression"))).click()
+        clickText("Target File Size", exact = true)
+        waitUntil("An empty target left Convert enabled") {
+            device.findObject(By.text("Convert"))?.isEnabled == false
+        }
+        assertEquals("An empty target created an accepted job", before, media.jobsNative().map { it.id }.toSet())
+        reachableText("Target file size", exact = true)
+        val target = requireNotNull(device.findObject(By.desc("Target file size").clazz("android.widget.EditText"))) {
+            "The target input is not an accessible native text field"
+        }
+        target.text = "0"
+        waitUntil("The target field did not acknowledge the invalid edit") {
+            device.findObject(By.desc("Target file size").clazz("android.widget.EditText"))?.text == "0"
+        }
+        waitUntil("An invalid target left Convert enabled") {
+            device.findObject(By.text("Convert"))?.isEnabled == false
+        }
+        // This is a rejected editing draft, not a failed accepted job. Ordinary
+        // interaction must remain available so the user can choose a preset.
+        assertEquals("An invalid target created an accepted job", before, media.jobsNative().map { it.id }.toSet())
+        capture("ui-compression-invalid-target.png")
+        reachableText("Compression")
+        requireNotNull(device.findObject(By.desc("Compression"))).click()
+        clickText("Balanced Quality", exact = true)
+        waitUntil("Choosing a valid preset did not restore Convert") {
+            device.findObject(By.text("Convert"))?.isEnabled == true
+        }
+        assertEquals("Editing compression unexpectedly submitted a job", before, media.jobsNative().map { it.id }.toSet())
+        capture("ui-compression-balanced.png")
+        // The caller now submits this actual UI-selected preset and performs
+        // the existing independent video/audio decode and source-protection checks.
     }
 
     private fun exerciseInvalidOutputName(before: Set<String>) {

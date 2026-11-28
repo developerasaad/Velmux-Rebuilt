@@ -235,9 +235,7 @@ class MediaSession(private val engine: Engine) {
 
     @Throws(EngineException::class, IllegalStateException::class)
     fun defaultsNative(id: String, video: Boolean): ConversionConfig = ready {
-        // The migrated workspace currently exposes the verified legacy quality
-        // controls. Full Rust-owned compression settings are integrated separately.
-        engine.defaultConfiguration(id, operation(video)).copy(compression = null)
+        engine.defaultConfiguration(id, operation(video))
     }
 
     /** Explicit encoding intent for native callers; final validation remains in Rust. */
@@ -264,6 +262,21 @@ class MediaSession(private val engine: Engine) {
 
     @Throws(EngineException::class, IllegalStateException::class)
     fun configurationChoices(id: String, configuration: ConversionConfig) = ready { engine.configurationChoices(id, configuration) }
+
+    @Throws(EngineException::class, IllegalStateException::class)
+    fun parseTargetSize(value: String, unit: uniffi.velmux_core.TargetSizeUnit) = ready {
+        engine.parseTargetSize(value, unit)
+    }
+
+    @Throws(EngineException::class, IllegalStateException::class)
+    fun videoCompressionControl(kind: uniffi.velmux_core.CompressionControlKind, value: ULong) = ready {
+        engine.videoCompressionControl(kind, value)
+    }
+
+    @Throws(EngineException::class, IllegalStateException::class)
+    fun audioCompressionControl(kind: uniffi.velmux_core.CompressionControlKind, value: ULong) = ready {
+        engine.audioCompressionControl(kind, value)
+    }
 
     @Throws(EngineException::class, IllegalStateException::class)
     suspend fun validate(id: String, configuration: ConversionConfig) = withContext(Dispatchers.Default) {
