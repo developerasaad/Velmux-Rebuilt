@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the native SwiftUI app from the same generated target-core artifacts as
-# direct Swift verification. The established bridge remains a separate gate.
+# the direct Swift regression proof and canonical Foundation integration gate.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"

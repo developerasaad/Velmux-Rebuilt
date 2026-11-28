@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Renew affected iOS regressions against the native SwiftUI/direct Swift host.
-# This does not remove or substitute for the preserved prior-architecture gate.
+# Execute native SwiftUI/direct Swift provider, conversion and real Files regressions.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root="$PWD"

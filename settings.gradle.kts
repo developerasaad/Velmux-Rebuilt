@@ -12,6 +12,6 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "Velmux"
-include(":UI", ":android")
+include(":android")
 include(":android-fixtures")
 project(":android-fixtures").projectDir = file("tests/android-fixtures")

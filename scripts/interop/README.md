@@ -17,14 +17,24 @@ is required. Generated API checksums remain enabled.
 The tool source retains upstream's MPL-2.0 license and notices in its ignored
 extraction directory; this does not introduce or change the Velmux product license.
 
-`scripts/ci/verify-swift-interop.sh` is temporary migration verification. It
+`scripts/ci/verify-swift-interop.sh` is the direct binding regression proof. It
 builds/links both arm64 Apple targets at iOS 15.0, then executes the simulator
 smoke through `simctl spawn`. The proof covers real FFmpeg calls, typed records,
 errors, callbacks, explicit cancellation, one Engine, callback release and actual
 AAC encoding/publication independently decoded through AVFoundation. Its native
 file provider uses only a disposable CI-owned directory; production document
-grants, security scope, SwiftUI workflows and physical hardware need their own
-renewed integration evidence. The existing iOS production bridge is untouched.
+grants, security scope and SwiftUI workflows are exercised separately by
+`scripts/ci/verify-native-ios.sh`, including real Files selection, source
+protection, actual conversions and independently decoded publications. Simulator
+results do not establish physical-device or hardware encoding behavior.
+
+The canonical Foundation workflow's iOS job runs the direct proof, native device
+application build and simulator integration tests together. Use
+`scripts/build.sh ios-device` or `scripts/build.sh ios-simulator` for native
+Release builds and `scripts/test.sh ios-simulator` for the native runtime gate.
+The native application wrapper verifies the exact target identity and supplies
+its reported system link arguments through the generated `native-app.xcconfig`.
+Gradle, Kotlin/Native and a shared UI framework are not part of Apple builds.
 
 The generated Swift can be compiled into the native application module with its
 FFI modulemap supplied to Clang. Link `libvelmux_core.a` once and preserve the

@@ -56,8 +56,8 @@ fun ConverterWorkspace(
         val o = scaledDecimal(outValue, 6, false)?.takeIf { it >= 0 }?.toULong()
         if (g != null && i != null && o != null) onChange(config.copy(audioAdjustments = AudioAdjustments(g, i, o)))
     }
-    val compression = config.compression ?: defaultCompression()
     val compressionEditor = remember(source.id) { CompressionEditorState(config.compression) }
+    val compression = compressionEditor.settings
     val compressionEdit = compressionEditor.evaluate(media, compression, choices.compressionChoices)
     var customWidthText by remember(source.id, config.videoSize, config.customWidth) { mutableStateOf(config.customWidth?.toString().orEmpty()) }
     var customHeightText by remember(source.id, config.videoSize, config.customHeight) { mutableStateOf(config.customHeight?.toString().orEmpty()) }

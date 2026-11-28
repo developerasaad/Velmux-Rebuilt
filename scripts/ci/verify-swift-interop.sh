@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Temporary direct-binding acceptance scaffold. Keep the old production iOS
-# bridge until native presentation and its complete affected regressions pass.
+# Direct generated binding/lifetime regression proof, run alongside the native
+# application and Files integration tests in the Foundation iOS gate.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root="$PWD"
@@ -68,7 +68,7 @@ if re.search(r'VelmuxUI|Kotlin|libav(codec|format|filter|util)|libx26[45]', depe
 PY
 done
 # Core exports are currently target-independent; prevent independently stale
-# device/simulator generated APIs before any old bridge is removed.
+# device/simulator generated APIs before native applications consume them.
 for file in VelmuxCore.swift VelmuxCoreFFI.h VelmuxCoreFFI.modulemap; do
   cmp "$evidence/iphoneos/generated/$file" "$evidence/iphonesimulator/generated/$file"
 done
@@ -93,5 +93,5 @@ if proof['media']['codec'] != 'aac' or proof['media']['decoded_frames'] <= 0:
 if 'DIRECT_SWIFT_INTEROP_PASSED' not in pathlib.Path(sys.argv[2]).read_text():
     raise SystemExit('The direct Swift smoke process did not finish successfully')
 print('Verified actual direct Swift/iOS simulator binding execution and real provider conversion.')
-print('Production SwiftUI migration, physical devices and hardware acceleration remain unverified.')
+print('This binding proof does not establish native UI, physical-device or hardware encoding behavior.')
 PY

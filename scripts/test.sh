@@ -35,49 +35,8 @@ case "${1:-}" in
     ./gradlew -PbindingsTarget=android :android:connectedDebugAndroidTest
     ;;
   ios-simulator)
-    capture_ios() {
-      result=$?
-      if [ -f build/ios-source-hashes.json ]; then
-        python3 scripts/ci/seed-ios-fixtures.py --verify build/ios-source-hashes.json || result=1
-      fi
-      if [ -d build/ios-tests.xcresult ]; then
-        xcrun xcresulttool export attachments --path build/ios-tests.xcresult --output-path build/ios-screenshots || true
-      fi
-      if [ "$result" -eq 0 ]; then
-        published_container=$(xcrun simctl get_app_container "$device" com.velmux.mobile data) || result=1
-        if [ "$result" -eq 0 ]; then
-          python3 scripts/ci/verify-mobile-outputs.py ios "$published_container" || result=1
-        fi
-      fi
-      exit "$result"
-    }
-    trap capture_ios EXIT
-    if [ ! -f build/media-fixtures/fixtures.json ]; then bash scripts/ci/prepare-media-fixtures.sh; fi
     bash scripts/ffmpeg/build-ios.sh
-    bash scripts/ci/apple-framework.sh iphonesimulator Debug
-    device=$(python3 scripts/ci/ios-simulator.py)
-    xcrun simctl boot "$device" || true
-    xcrun simctl bootstatus "$device" -b
-    xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Debug \
-      -sdk iphonesimulator -destination "platform=iOS Simulator,id=$device" \
-      -derivedDataPath build/xcode/tests -parallel-testing-enabled NO \
-      CODE_SIGNING_ALLOWED=NO build-for-testing
-    app=build/xcode/tests/Build/Products/Debug-iphonesimulator/Velmux.app
-    xcrun simctl install "$device" "$app"
-    xcrun simctl install "$device" build/xcode/tests/Build/Products/Debug-iphonesimulator/VelmuxMediaFixtures.app
-    container=$(xcrun simctl get_app_container "$device" com.velmux.mediafixtures data)
-    python3 scripts/ci/seed-ios-fixtures.py "$container" build/media-fixtures build/ios-source-hashes.json
-    xcrun simctl launch "$device" com.velmux.mediafixtures
-    xcrun simctl terminate "$device" com.velmux.mediafixtures
-    xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Debug \
-      -sdk iphonesimulator -destination "platform=iOS Simulator,id=$device" \
-      -derivedDataPath build/xcode/tests -resultBundlePath build/ios-tests.xcresult -parallel-testing-enabled NO \
-      CODE_SIGNING_ALLOWED=NO test-without-building 2>&1 | tee build/ios-tests.log
-    python3 - <<'CHECK_IOS_LOG'
-from pathlib import Path
-if 'Uncaught Kotlin exception:' in Path('build/ios-tests.log').read_text(errors='replace'):
-    raise SystemExit('The iOS host logged an uncaught Kotlin exception during runtime verification')
-CHECK_IOS_LOG
+    bash scripts/ci/verify-native-ios.sh
     ;;
   *) echo 'Usage: scripts/test.sh host|android|ios-simulator' >&2; exit 2 ;;
 esac

@@ -2,7 +2,7 @@
 
 An offline Android and iOS media utility under active development. Milestones 1 and 2 are verified. Basic Video/Audio Converter workflows, real previews, persistent SQLite jobs and verified native publication work end to end; see PROGRESS.md for inspected CI evidence and physical-device/hardware-testing limitations. Milestone 3 is explicitly authorized and in progress; Milestone 4 is not authorized.
 
-Rust owns the engine and operational policy. The authorized Milestone 3 migration uses independent Kotlin/Jetpack Compose/Material 3 Android and Swift/SwiftUI iOS interfaces with direct generated UniFFI Kotlin/Swift bindings. Native providers retain operating-system facilities. Existing M1/M2 mobile evidence predates this migration; affected runtime gates must be renewed. See REQUIREMENTS.md for the complete product scope, IMPLEMENTATION.md for decisions, and PROGRESS.md for actual verification evidence.
+Rust owns the engine and operational policy. The authorized Milestone 3 migration uses independent Kotlin/Jetpack Compose/Material 3 Android and Swift/SwiftUI iOS interfaces with direct generated UniFFI Kotlin/Swift bindings. Native providers retain operating-system facilities. Historical M1/M2 evidence predates this migration. Native Android and direct SwiftUI foundation gates have been renewed; final integrated converter sources and build entrypoints still require their affected runtime checks. See REQUIREMENTS.md for the complete product scope, IMPLEMENTATION.md for decisions, and PROGRESS.md for actual verification evidence.
 
 Substantial builds run in GitHub Actions. Native libraries are constructed from pinned, checksum-verified sources; generated bindings and build products are excluded from Git. No releases are published by this repository.
 
@@ -20,11 +20,11 @@ bash scripts/build.sh ios-simulator
 bash scripts/test.sh ios-simulator
 ```
 
-During the iOS migration, those three legacy iOS entry points retain the established bridge. The separate native Swift gate uses `scripts/ci/verify-swift-interop.sh`, `scripts/ci/apple-native-app.sh iphoneos Release` and `scripts/ci/verify-native-ios.sh`. These also run on provisioned macOS CI; their actual evidence must pass before the legacy bridge is removed.
+Apple entrypoints use `scripts/ci/apple-native-app.sh` and `scripts/ci/verify-native-ios.sh`. Foundation integration also executes `scripts/ci/verify-swift-interop.sh` against the actual device/simulator archives, preserving direct binding and native provider lifetime coverage. These commands run on provisioned macOS CI.
 
 The Native dependencies workflow constructs identity-keyed artifacts. Foundation integration reuses those exact artifacts and verifies Rust, Android APK packaging, emulator integration, Apple device compilation and simulator execution. Source checks run automatically; integration dispatch is explicit during foundation bring-up. Workflow files alone are not acceptance evidence; see PROGRESS.md for inspected runs.
 
-The final physical source roots are `core/`, `android/` and `ios/`, with lowercase native `src/ui/` directories. Migration is in progress: Android sources now live in root `android/`; the established shared iOS bridge remains temporarily until direct Swift interoperability and its functional replacement have demonstrated real operation. Each native application session owns one Rust engine for the process; screens do not own shutdown. Preserve in-progress Rust work and user media through this transition. See IMPLEMENTATION.md for sequencing and PROGRESS.md for actual state.
+The final physical source roots are `core/`, `android/` and `ios/`, with lowercase native `src/ui/` directories. The obsolete shared UI and Kotlin Apple bridge have been retired after the functional native replacement passed its runtime/media gate. Final source and build-path regression renewal remains in progress. Each native application session owns one Rust engine for the process; screens do not own shutdown. Preserve in-progress Rust work and user media through this transition. See IMPLEMENTATION.md for sequencing and PROGRESS.md for actual state.
 
 Velmux has proprietary commercialization intent. The development repository remains public for now for GitHub Actions allowances; this is not an open-source product or an application distribution channel. No project license, commercial licensing arrangement, release or store preparation is authorized.
 

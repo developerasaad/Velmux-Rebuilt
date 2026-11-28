@@ -17,14 +17,11 @@ case "${1:-}" in
   ios-device|ios-simulator)
     bash scripts/ffmpeg/build-ios.sh
     if [ "$1" = ios-device ]; then
-      sdk=iphoneos; destination='generic/platform=iOS'
+      sdk=iphoneos
     else
-      sdk=iphonesimulator; destination='generic/platform=iOS Simulator'
+      sdk=iphonesimulator
     fi
-    bash scripts/ci/apple-framework.sh "$sdk" Release
-    xcodebuild -project platforms/ios/Velmux.xcodeproj -scheme Velmux -configuration Release \
-      -sdk "$sdk" -destination "$destination" -derivedDataPath "build/xcode/$sdk" \
-      CODE_SIGNING_ALLOWED=NO build
+    bash scripts/ci/apple-native-app.sh "$sdk" Release
     ;;
   *) echo 'Usage: scripts/build.sh host|android|ios-device|ios-simulator' >&2; exit 2 ;;
 esac

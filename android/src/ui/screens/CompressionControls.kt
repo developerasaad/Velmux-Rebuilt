@@ -41,6 +41,7 @@ internal fun defaultCompression() = CompressionSettings(
 
 /** Retains only editing drafts; all ranges and typed controls come from Rust. */
 internal class CompressionEditorState(initial: CompressionSettings?) {
+    var settings by mutableStateOf(initial ?: defaultCompression())
     var targetText by mutableStateOf(initial?.target?.let {
         BigDecimal(it.amountMilli.toString()).movePointLeft(3).stripTrailingZeros().toPlainString()
     }.orEmpty())
@@ -106,7 +107,15 @@ internal fun CompressionControls(
 ) {
     var sheet by remember { mutableStateOf<String?>(null) }
     fun commit(base: CompressionSettings = settings) {
-        onChange(editor.evaluate(media, base, choices).settings)
+        editor.settings = base
+        val result = editor.evaluate(media, base, choices)
+        // Keep incomplete editing intent local. An empty target must not send
+        // an invalid global configuration through unrelated media selectors.
+        // The workspace separately blocks submission and hides stale estimates.
+        if (result.error == null) {
+            editor.settings = result.settings
+            onChange(result.settings)
+        }
     }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         CompressionSwitch("Reduce File Size", settings.reduceFileSize, enabled, "reduce-file-size") {

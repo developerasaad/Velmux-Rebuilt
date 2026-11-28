@@ -133,17 +133,12 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
       - run: sudo xcode-select -s /Applications/Xcode_16.4.app
-      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy --target aarch64-apple-ios,aarch64-apple-ios-sim
+      - run: rustup toolchain install 1.99.1 --profile minimal --target aarch64-apple-ios,aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
           cache-on-failure: true
-      - uses: gradle/actions/setup-gradle@v4
       - run: bash scripts/ci/setup-native.sh
       - id: identity
         run: bash scripts/ci/native-key.sh ios
@@ -152,66 +147,38 @@ jobs:
         with:
           path: scripts/ffmpeg-builder/out
           key: native-ios-arm64-${{ steps.identity.outputs.key }}
-      - name: Construct Apple dependencies
+      - uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: uniffi-tools-${{ runner.os }}-${{ runner.arch }}-rust1.99.1-${{ hashFiles('scripts/interop/versions.json') }}
+      - name: Restore or construct identity-matching Apple dependencies
+        id: native
         run: bash scripts/ffmpeg/build-ios.sh
+      - name: Verify direct Swift with the actual Apple engine
+        run: bash scripts/ci/verify-swift-interop.sh
+      - name: Build the native SwiftUI device application
+        run: bash scripts/build.sh ios-device
+      - name: Verify the native SwiftUI application at runtime
+        run: bash scripts/test.sh ios-simulator
       - uses: actions/cache/save@v4
-        if: steps.native-cache.outputs.cache-hit != 'true'
+        if: always() && steps.native.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
         with:
           path: scripts/ffmpeg-builder/out
           key: native-ios-arm64-${{ steps.identity.outputs.key }}
-      - uses: actions/cache/restore@v4
-        id: konan
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/src/**', 'UI/integration/**', 'UI/build.gradle.kts', 'core/src/**', 'core/Cargo.*', 'core/build.rs', 'platforms/ios/src/**', 'platforms/ios/tests/**', 'platforms/ios/Velmux.xcodeproj/project.pbxproj', 'build.gradle.kts') }}
-          restore-keys: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-
-      - id: framework-identity
-        env:
-          NATIVE_ID: ${{ steps.identity.outputs.key }}
-          SOURCE_ID: ${{ hashFiles('UI/src/**', 'UI/integration/**', 'UI/resources/**', 'UI/build.gradle.kts', 'core/src/**', 'core/Cargo.*', 'core/build.rs', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'rust-toolchain.toml', 'gradle/wrapper/**', '.cargo/**', 'scripts/ci/apple-framework.sh', 'scripts/check-build-environment.sh', '.github/workflows/foundation.yml') }}
-        run: echo "key=apple-framework-v1-${{ runner.os }}-${{ runner.arch }}-$NATIVE_ID-$SOURCE_ID" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: device-framework
-        with:
-          path: build/ios/iphoneos
-          key: ${{ steps.framework-identity.outputs.key }}-device
-      - uses: actions/cache/restore@v4
-        id: simulator-framework
-        with:
-          path: build/ios/iphonesimulator
-          key: ${{ steps.framework-identity.outputs.key }}-simulator
-      - name: Device-target build
-        id: device-build
-        env:
-          VELMUX_FRAMEWORK_ID: ${{ steps.framework-identity.outputs.key }}
-        run: bash scripts/build.sh ios-device
-      - name: Simulator runtime integration
-        env:
-          VELMUX_FRAMEWORK_ID: ${{ steps.framework-identity.outputs.key }}
-        run: bash scripts/test.sh ios-simulator
-      - uses: actions/cache/save@v4
-        if: always() && steps.device-framework.outputs.cache-hit != 'true' && hashFiles('build/ios/iphoneos/FRAMEWORK-IDENTITY') != ''
-        with:
-          path: build/ios/iphoneos
-          key: ${{ steps.framework-identity.outputs.key }}-device
-      - uses: actions/cache/save@v4
-        if: always() && steps.simulator-framework.outputs.cache-hit != 'true' && hashFiles('build/ios/iphonesimulator/FRAMEWORK-IDENTITY') != ''
-        with:
-          path: build/ios/iphonesimulator
-          key: ${{ steps.framework-identity.outputs.key }}-simulator
-      - uses: actions/cache/save@v4
-        if: always() && steps.konan.outputs.cache-hit != 'true'
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ runner.arch }}-2.2.20-16.4-${{ hashFiles('UI/src/**', 'UI/integration/**', 'UI/build.gradle.kts', 'core/src/**', 'core/Cargo.*', 'core/build.rs', 'platforms/ios/src/**', 'platforms/ios/tests/**', 'platforms/ios/Velmux.xcodeproj/project.pbxproj', 'build.gradle.kts') }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ios-foundation-evidence
           path: |
-            build/ios-tests.xcresult
-            build/ios-tests.log
-            build/ios-source-hashes.json
+            build/swift-interop
+            !build/swift-interop/iphoneos/swiftInteropSmoke
+            !build/swift-interop/iphonesimulator/swiftInteropSmoke
+            build/ios/**/generated
+            build/ios/**/rust-build.log
+            build/ios/**/native-link-flags.json
+            build/ios/**/native-app.xcconfig
+            build/ios/**/TARGET-IDENTITY
+            build/xcode/native/**/*.log
+            build/native-ios
             build/ios-screenshots
-            build/ios/iphoneos/VelmuxUI.framework/Headers/VelmuxUI.h
           retention-days: 7
