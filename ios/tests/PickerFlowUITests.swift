@@ -55,6 +55,7 @@ final class PickerFlowUITests: XCTestCase {
         try choose(id: "video-codec", option: "H.264")
         let stem = "picker-video-" + UUID().uuidString.lowercased()
         try setOutputName(stem)
+        try exerciseCompression()
         capture("Video workspace — actual selected source and H.264")
         try tap(label: "Convert", scroll: true)
         try waitForCompletedOutput(stem + ".mp4")
@@ -70,6 +71,7 @@ final class PickerFlowUITests: XCTestCase {
         try choose(id: "audio-codec", option: "AAC-LC")
         let stem = "picker-audio-" + UUID().uuidString.lowercased()
         try setOutputName(stem)
+        try exerciseCompression()
         capture("Audio workspace — actual selected source and AAC")
         try tap(label: "Convert", scroll: true)
         try waitForCompletedOutput(stem + ".m4a")
@@ -159,6 +161,36 @@ final class PickerFlowUITests: XCTestCase {
             }
         }
         try waitFor("Done did not dismiss the native filename keyboard") { !keyboard.firstMatch.exists }
+    }
+
+    private func exerciseCompression() throws {
+        let reduce = app.switches["reduce-file-size"]
+        for _ in 0..<6 { if reduce.isHittable { break }; app.swipeUp() }
+        try waitFor("The native compression switch was not reachable") { reduce.isHittable }
+        XCTAssertEqual(reduce.value as? String, "0", "Compression must start disabled")
+        reduce.tap()
+        try waitFor("The compression switch did not acknowledge the edit") { reduce.value as? String == "1" }
+        try choose(id: "compression-mode", option: "Target File Size")
+        let target = app.textFields["compression-target"]
+        for _ in 0..<6 { if target.isHittable { break }; app.swipeUp() }
+        try waitFor("The native target input was not reachable") { target.isHittable }
+        target.tap()
+        target.typeText("0")
+        try waitFor("The target input did not acknowledge the invalid value") { target.value as? String == "0" }
+        let done = app.toolbars.buttons["Done"].firstMatch
+        try waitFor("The target keyboard did not expose Done") { done.isHittable }
+        done.tap()
+        try waitFor("The target keyboard did not dismiss") { !self.app.keyboards.firstMatch.exists }
+        let convert = app.buttons["convert"]
+        for _ in 0..<6 { if convert.exists { break }; app.swipeUp() }
+        try waitFor("An invalid visible target draft must prevent submission") { convert.exists && !convert.isEnabled }
+        capture("Compression — invalid target draft blocks conversion")
+        let mode = app.buttons["compression-mode"]
+        for _ in 0..<6 { if mode.isHittable { break }; app.swipeDown() }
+        try choose(id: "compression-mode", option: "Balanced Quality")
+        for _ in 0..<6 { if convert.isHittable { break }; app.swipeUp() }
+        try waitFor("A valid compression preset must restore submission") { convert.exists && convert.isEnabled }
+        capture("Compression — UI-selected Balanced Quality")
     }
 
     private func waitForCompletedOutput(_ name: String) throws {

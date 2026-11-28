@@ -179,6 +179,14 @@ final class AppSession: ObservableObject {
         try engine.parseTargetSize(value: value, unit: unit)
     }
 
+    func videoCompressionControl(kind: CompressionControlKind, value: UInt64) throws -> VideoRateControl {
+        try engine.videoCompressionControl(kind: kind, value: value)
+    }
+
+    func audioCompressionControl(kind: CompressionControlKind, value: UInt64) throws -> AudioRateControl {
+        try engine.audioCompressionControl(kind: kind, value: value)
+    }
+
     func inspect(_ selected: IosSelectedSource, operation: Operation) async throws -> InspectedSource {
         try requireReady()
         return try await perform(discardWhenCanceled: true, onAbandoned: { core, source in
@@ -197,11 +205,7 @@ final class AppSession: ObservableObject {
     func defaults(sourceId: String, operation: Operation) async throws -> ConversionConfig {
         try requireReady()
         return try await perform { core, _ in
-            var configuration = try core.defaultConfiguration(id: sourceId, operation: operation)
-            // Temporary migration adapter: the retained M2 quality/bitrate
-            // controls use the preserved legacy model until full M3 UI wiring.
-            configuration.compression = nil
-            return configuration
+            try core.defaultConfiguration(id: sourceId, operation: operation)
         }
     }
 

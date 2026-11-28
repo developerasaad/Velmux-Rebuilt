@@ -586,6 +586,9 @@ final class ConversionIntegrationTests: XCTestCase {
         XCTAssertNil(picker.transitionCoordinator)
         XCTAssertNotNil(picker.viewIfLoaded?.window)
         XCTAssertFalse(picker.allowsMultipleSelection)
+        let obsoletePicker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false)
+        actions.documentPickerWasCancelled(obsoletePicker)
+        XCTAssertEqual(calls, 0, "A callback from another picker must not cancel the active selection")
         actions.documentPickerWasCancelled(picker); actions.documentPickerWasCancelled(picker)
         // Keep the picker and its delegate alive through UIKit's actual
         // dismissal acknowledgement, rather than just issuing dismissal.

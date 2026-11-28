@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum ConverterChoice: String, Identifiable {
-    case format, videoCodec, resolution, frameRate, audioCodec, sampleRate, channels, precision, bitrate
+    case format, videoCodec, resolution, frameRate, audioCodec, sampleRate, channels, precision
     var id: String { rawValue }
 }
 
@@ -24,6 +24,8 @@ struct ConverterView: View {
     @State private var submissionKey = UUID().uuidString
     @State private var jobsActive = false
     @State private var advanced = false
+    @State private var compressionDraft: CompressionDraft
+    @State private var compressionError: String?
     @State private var adjustmentsExpanded = false
     @State private var gainText: String
     @State private var fadeInText: String
@@ -48,6 +50,7 @@ struct ConverterView: View {
         self.actions = actions
         _isPresented = isPresented
         _configuration = State(initialValue: seed.configuration)
+        _compressionDraft = State(initialValue: CompressionDraft(seed.configuration.compression))
         let adjustments = seed.configuration.audioAdjustments
         _gainText = State(initialValue: String(Double(adjustments?.gainCentidb ?? 0) / 100))
         _fadeInText = State(initialValue: String(Double(adjustments?.fadeInUs ?? 0) / 1_000_000))
@@ -62,6 +65,7 @@ struct ConverterView: View {
         (configuration.videoSize != .custom || UInt32(width) != nil && UInt32(height) != nil)
         && (configuration.frameRate != .custom || Int32(numerator) != nil && Int32(denominator) != nil)
         && (video || parsedAdjustments != nil)
+        && compressionError == nil
     }
 
     var body: some View {
@@ -89,21 +93,16 @@ struct ConverterView: View {
                     .accessibilityIdentifier("output-filename")
                 if let compatibility { Text(compatibility).font(.footnote).foregroundColor(.red).textSelection(.enabled) }
             }.disabled(submitting)
-            if video && hasAudio || video && configuration.videoCodec == .h264 {
+            if video && hasAudio {
                 Section {
-                    DisclosureGroup("Encoding settings", isExpanded: $advanced) {
-                        if hasAudio { audioSettings }
-                        if configuration.videoCodec == .h264 {
-                            VStack(alignment: .leading) {
-                                Text("H.264 quality: \(configuration.quality)")
-                                Slider(value: Binding(get: { Double(configuration.quality) }, set: { value in change { $0.quality = UInt8(value.rounded()) } }), in: 18...28, step: 1)
-                                    .accessibilityLabel("H.264 quality")
-                                Text("Lower values retain more detail and use more space.").font(.footnote).foregroundColor(.secondary)
-                            }
-                        }
-                    }
+                    DisclosureGroup("Audio settings", isExpanded: $advanced) { audioSettings }
                 }.disabled(submitting)
             }
+            CompressionControls(draft: $compressionDraft,
+                                choices: choices?.compressionChoices,
+                                video: video, hasAudio: hasAudio,
+                                error: compressionError, focus: $focusedField)
+                .disabled(submitting)
             if !video, let limits = choices?.audioAdjustmentLimits {
                 Section {
                     DisclosureGroup("Audio adjustments", isExpanded: $adjustmentsExpanded) {
@@ -154,8 +153,11 @@ struct ConverterView: View {
             Button("Discard changes", role: .destructive, action: leave)
             Button("Keep editing", role: .cancel) {}
         }
-        .onAppear { previewVisible = true; session.setPresentationScope(scope); refreshChoices() }
+        .onAppear { previewVisible = true; session.setPresentationScope(scope); refreshChoices(); commitCompression(refresh: false) }
         .onDisappear { previewVisible = false; stopPreview() }
+        .onChange(of: compressionDraft) { _ in
+            edited = true; submissionKey = UUID().uuidString; commitCompression()
+        }
         .onChange(of: width) { _ in commitNumbers() }
         .onChange(of: height) { _ in commitNumbers() }
         .onChange(of: numerator) { _ in commitNumbers() }
@@ -195,9 +197,6 @@ struct ConverterView: View {
         selection("Channels", value: layoutLabel(configuration.channelLayout ?? .original), field: .channels)
         if !(choices?.audioPrecisions.isEmpty ?? true) {
             selection("Precision", value: precisionLabel(configuration.audioPrecision ?? .original), field: .precision)
-        }
-        if !(choices?.audioBitrates.isEmpty ?? true) {
-            selection("Audio bitrate", value: configuration.audioBitrate.map { "\($0 / 1000) kbps" } ?? "Automatic", field: .bitrate)
         }
     }
 
@@ -268,8 +267,6 @@ struct ConverterView: View {
             NativeChoiceSheet(title: "Channels", values: choices?.channelLayouts ?? [], selected: configuration.channelLayout ?? .original, label: layoutLabel) { value in change { $0.channelLayout = value; $0.channels = nil }; choice = nil }
         case .precision:
             NativeChoiceSheet(title: "Sample precision", values: choices?.audioPrecisions ?? [], selected: configuration.audioPrecision ?? .original, label: precisionLabel) { value in change { $0.audioPrecision = value }; choice = nil }
-        case .bitrate:
-            NativeChoiceSheet(title: "Audio bitrate", values: choices?.audioBitrates ?? [], selected: configuration.audioBitrate ?? 0, label: { $0 == 0 ? "Automatic" : "\(Double($0) / 1000) kbps" }) { value in change { $0.audioBitrate = value == 0 ? nil : value }; choice = nil }
         }
     }
 
@@ -281,7 +278,23 @@ struct ConverterView: View {
     }
     private func change(_ edit: (inout ConversionConfig) -> Void) {
         edit(&configuration); edited = true; submissionKey = UUID().uuidString; refreshChoices()
+        commitCompression(refresh: false)
     }
+    private func commitCompression(refresh: Bool = true) {
+        do {
+            let settings = try compressionDraft.settings(session: session, choices: choices?.compressionChoices, video: video)
+            configuration.compression = settings
+            configuration.quality = 23
+            configuration.audioBitrate = nil
+            compressionError = nil
+            if refresh { refreshChoices() }
+        } catch {
+            // Retain the last representable configuration, but never submit it
+            // while the visible active draft is invalid or incompatible.
+            compressionError = session.errorDetail(error)
+        }
+    }
+
     private func commitNumbers() {
         guard configuration.videoSize == .custom || configuration.frameRate == .custom else { return }
         change { configuration in
@@ -304,7 +317,10 @@ struct ConverterView: View {
         } catch { compatibility = session.errorDetail(error) }
     }
     private func submit() {
-        guard !submitting, validNumbers else { return }
+        // Read the visible draft synchronously as well as on field changes.
+        // A keyboard edit must never submit a previous valid compression value.
+        commitCompression(refresh: false)
+        guard !submitting, validNumbers, compatibility == nil else { return }
         submitting = true
         let acceptedConfiguration = configuration
         let key = submissionKey
@@ -410,4 +426,244 @@ private func layoutLabel(_ value: AudioLayout) -> String {
 }
 private func precisionLabel(_ value: AudioPrecision) -> String {
     switch value { case .original: return "Original"; case .pcm8: return "8-bit integer"; case .pcm16: return "16-bit integer"; case .pcm24: return "24-bit integer"; case .pcm32: return "32-bit integer"; case .float32: return "32-bit float"; case .float64: return "64-bit float" }
+}
+
+/// Inactive draft fields remain local to the workspace. Only the active mode's
+/// typed fields enter an immutable Rust request; codec rules come from Rust.
+private struct CompressionDraft: Equatable {
+    var enabled = false
+    var mode = CompressionMode.highQuality
+    var optimizeResolution = false
+    var optimizeFrameRate = false
+    var targetText = ""
+    var targetUnit = TargetSizeUnit.megabytes
+    var videoKind: CompressionControlKind?
+    var videoValue = ""
+    var audioKind: CompressionControlKind?
+    var audioValue = ""
+
+    init(_ settings: CompressionSettings?) {
+        guard let settings else { return }
+        enabled = settings.reduceFileSize
+        mode = settings.mode
+        optimizeResolution = settings.optimizeResolution
+        optimizeFrameRate = settings.optimizeFrameRate
+        if let target = settings.target {
+            targetUnit = target.unit
+            let whole = target.amountMilli / 1000
+            let remainder = target.amountMilli % 1000
+            targetText = String(whole)
+            if remainder != 0 {
+                targetText += "." + String(format: "%03llu", remainder)
+            }
+        }
+        if let control = settings.customVideo {
+            let pair: (CompressionControlKind, UInt64)
+            switch control {
+            case .averageBitrate(let value): pair = (.videoAverageBitrate, value)
+            case .h264Crf(let value): pair = (.h264Crf, UInt64(value))
+            case .hevcCrf(let value): pair = (.hevcCrf, UInt64(value))
+            case .av1Crf(let value): pair = (.av1Crf, UInt64(value))
+            case .vp8Cq(let value): pair = (.vp8Cq, UInt64(value))
+            case .vp9Crf(let value): pair = (.vp9Crf, UInt64(value))
+            case .mpeg4Qscale(let value): pair = (.mpeg4Qscale, UInt64(value))
+            case .mjpegQscale(let value): pair = (.mjpegQscale, UInt64(value))
+            case .ffv1Context(let large): pair = (.ffv1Context, large ? 1 : 0)
+            }
+            videoKind = pair.0; videoValue = String(pair.1)
+        }
+        if let control = settings.customAudio {
+            let pair: (CompressionControlKind, UInt64)
+            switch control {
+            case .averageBitrate(let value): pair = (.audioAverageBitrate, UInt64(value))
+            case .mp3VbrQuality(let value): pair = (.mp3VbrQuality, UInt64(value))
+            case .vorbisQuality(let value): pair = (.vorbisQuality, UInt64(value))
+            case .flacLevel(let value): pair = (.flacLevel, UInt64(value))
+            case .alacLevel(let value): pair = (.alacLevel, UInt64(value))
+            case .wavpackLevel(let value): pair = (.wavpackLevel, UInt64(value))
+            }
+            audioKind = pair.0; audioValue = String(pair.1)
+        }
+    }
+
+    @MainActor
+    func settings(session: AppSession, choices: CompressionChoices?, video: Bool) throws -> CompressionSettings {
+        var target: TargetSize?
+        var videoControl: VideoRateControl?
+        var audioControl: AudioRateControl?
+        if enabled {
+            switch mode {
+            case .targetSize:
+                target = try session.parseTarget(value: targetText, unit: targetUnit)
+            case .custom:
+                if video, let kind = videoKind {
+                    let value = try checkedValue(videoValue, kind: kind, choices: choices?.video ?? [])
+                    videoControl = try session.videoCompressionControl(kind: kind, value: value)
+                }
+                if let kind = audioKind {
+                    let value = try checkedValue(audioValue, kind: kind, choices: choices?.audio ?? [])
+                    audioControl = try session.audioCompressionControl(kind: kind, value: value)
+                }
+                guard videoControl != nil || audioControl != nil else {
+                    throw NativePresentationError("Choose an applicable Custom control for video or audio.")
+                }
+            default: break
+            }
+        }
+        return CompressionSettings(reduceFileSize: enabled, mode: mode,
+                                   optimizeResolution: enabled && video && optimizeResolution,
+                                   optimizeFrameRate: enabled && video && optimizeFrameRate,
+                                   target: target, customVideo: videoControl, customAudio: audioControl)
+    }
+
+    private func checkedValue(_ text: String, kind: CompressionControlKind, choices: [CompressionControlOption]) throws -> UInt64 {
+        guard let option = choices.first(where: { $0.kind == kind }) else {
+            throw NativePresentationError("The retained Custom control is incompatible with the current codec or media settings. Choose an applicable control or None.")
+        }
+        guard !text.isEmpty, text.count <= 20, text.utf8.allSatisfy({ (48...57).contains($0) }),
+              let value = UInt64(text), value >= option.minimum, value <= option.maximum,
+              option.values.isEmpty || option.values.contains(value) else {
+            throw NativePresentationError("Enter an applicable value for \(option.label) in \(option.unit).")
+        }
+        return value
+    }
+}
+
+private enum CompressionField: String, Identifiable {
+    case mode, videoControl, audioControl, videoValue, audioValue
+    var id: String { rawValue }
+}
+
+@MainActor
+private struct CompressionControls: View {
+    @Binding var draft: CompressionDraft
+    let choices: CompressionChoices?
+    let video: Bool
+    let hasAudio: Bool
+    let error: String?
+    var focus: FocusState<String?>.Binding
+    @State private var selection: CompressionField?
+
+    var body: some View {
+        Section("Compression") {
+            Toggle("Reduce File Size", isOn: $draft.enabled)
+                .accessibilityIdentifier("reduce-file-size")
+            if draft.enabled {
+                choiceRow("Mode", value: compressionModeLabel(draft.mode), field: .mode)
+                    .accessibilityIdentifier("compression-mode")
+                if draft.mode == .targetSize {
+                    HStack {
+                        Text("Target size")
+                        TextField("Positive size", text: $draft.targetText).keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing).focused(focus, equals: "target-size")
+                            .accessibilityIdentifier("compression-target")
+                    }
+                    Picker("Unit", selection: $draft.targetUnit) {
+                        Text("KB").tag(TargetSizeUnit.kilobytes)
+                        Text("MB").tag(TargetSizeUnit.megabytes)
+                        Text("GB").tag(TargetSizeUnit.gigabytes)
+                    }.accessibilityIdentifier("compression-target-unit")
+                    Text("KB = 1,000 bytes. MB = 1,000,000 bytes. GB = 1,000,000,000 bytes.")
+                        .font(.footnote).foregroundColor(.secondary)
+                }
+                if draft.mode == .custom {
+                    if video {
+                        customControl("Video", options: choices?.video ?? [], kind: $draft.videoKind,
+                                      value: $draft.videoValue, field: .videoControl, valueField: .videoValue)
+                    }
+                    if hasAudio {
+                        customControl(video ? "Audio tracks" : "Audio", options: choices?.audio ?? [], kind: $draft.audioKind,
+                                      value: $draft.audioValue, field: .audioControl, valueField: .audioValue)
+                    }
+                }
+                if video {
+                    Toggle("Optimize resolution", isOn: $draft.optimizeResolution)
+                        .accessibilityIdentifier("compression-optimize-resolution")
+                    Toggle("Optimize frame rate", isOn: $draft.optimizeFrameRate)
+                        .accessibilityIdentifier("compression-optimize-frame-rate")
+                }
+                if let error { Text(error).font(.footnote).foregroundColor(.red).textSelection(.enabled) }
+            }
+        }
+        .sheet(item: $selection) { field in sheet(field) }
+    }
+
+    private func choiceRow(_ title: String, value: String, field: CompressionField) -> some View {
+        Button { selection = field } label: {
+            HStack { Text(title); Spacer(); Text(value).foregroundColor(.secondary); Image(systemName: "chevron.down").font(.caption).foregroundColor(.secondary) }
+        }.foregroundColor(.primary)
+    }
+
+    @ViewBuilder
+    private func customControl(_ title: String, options: [CompressionControlOption], kind: Binding<CompressionControlKind?>,
+                               value: Binding<String>, field: CompressionField, valueField: CompressionField) -> some View {
+        choiceRow(title + " control", value: kind.wrappedValue.map { selected in
+            options.first { $0.kind == selected }?.label ?? "Retained control — incompatible"
+        } ?? "None", field: field)
+            .accessibilityIdentifier(field == .videoControl ? "compression-video-control" : "compression-audio-control")
+        if let selected = kind.wrappedValue, let option = options.first(where: { $0.kind == selected }) {
+            if option.values.isEmpty {
+                HStack {
+                    Text(option.label)
+                    TextField("Value", text: value).keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing).focused(focus, equals: valueField.rawValue)
+                        .accessibilityIdentifier(valueField == .videoValue ? "compression-video-value" : "compression-audio-value")
+                    Text(option.unit).foregroundColor(.secondary)
+                }
+                Text("\(option.minimum)–\(option.maximum) \(option.unit)").font(.footnote).foregroundColor(.secondary)
+            } else {
+                choiceRow(option.label, value: value.wrappedValue.isEmpty ? "Choose value" : value.wrappedValue + " " + option.unit, field: valueField)
+                    .accessibilityIdentifier(valueField == .videoValue ? "compression-video-value" : "compression-audio-value")
+            }
+        }
+    }
+
+    @ViewBuilder private func sheet(_ field: CompressionField) -> some View {
+        switch field {
+        case .mode:
+            NativeChoiceSheet(title: "Compression mode", values: [.highQuality, .balanced, .smallerFile, .targetSize, .custom],
+                              selected: draft.mode, label: compressionModeLabel) { draft.mode = $0; selection = nil }
+        case .videoControl, .audioControl:
+            let isVideo = field == .videoControl
+            let options = isVideo ? choices?.video ?? [] : choices?.audio ?? []
+            let selected = isVideo ? draft.videoKind : draft.audioKind
+            NativeChoiceSheet(title: isVideo ? "Video control" : "Audio control", values: [nil] + options.map { Optional($0.kind) },
+                              selected: selected, label: { kind in
+                kind.flatMap { selected in options.first { $0.kind == selected }?.label } ?? "None"
+            }) { kind in
+                if isVideo {
+                    if draft.videoKind != kind {
+                        draft.videoKind = kind
+                        draft.videoValue = kind.flatMap { selected in options.first { $0.kind == selected }?.defaultValue }.map(String.init) ?? ""
+                    }
+                } else if draft.audioKind != kind {
+                    draft.audioKind = kind
+                    draft.audioValue = kind.flatMap { selected in options.first { $0.kind == selected }?.defaultValue }.map(String.init) ?? ""
+                }
+                selection = nil
+            }
+        case .videoValue, .audioValue:
+            let isVideo = field == .videoValue
+            let selected = isVideo ? draft.videoKind : draft.audioKind
+            let option = (isVideo ? choices?.video ?? [] : choices?.audio ?? []).first { $0.kind == selected }
+            if let option {
+                NativeChoiceSheet(title: option.label, values: option.values,
+                                  selected: UInt64(isVideo ? draft.videoValue : draft.audioValue) ?? UInt64.max,
+                                  label: { "\($0) \(option.unit)" }) { value in
+                    if isVideo { draft.videoValue = String(value) } else { draft.audioValue = String(value) }
+                    selection = nil
+                }
+            }
+        }
+    }
+}
+
+private func compressionModeLabel(_ mode: CompressionMode) -> String {
+    switch mode {
+    case .highQuality: return "High Quality"
+    case .balanced: return "Balanced Quality"
+    case .smallerFile: return "Smaller File"
+    case .targetSize: return "Target File Size"
+    case .custom: return "Custom"
+    }
 }

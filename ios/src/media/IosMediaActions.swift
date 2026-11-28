@@ -9,6 +9,7 @@ final class IosMediaActions: NSObject, ObservableObject, UIDocumentPickerDelegat
     private let presentationHost: () -> UIViewController?
     private var selection: ((IosSelectedSource?, String?) -> Void)?
     private var selectionID: UUID?
+    private weak var activePicker: UIDocumentPickerViewController?
     private var resolvingSelection = false
     private var documentInteraction: UIDocumentInteractionController?
 
@@ -43,15 +44,18 @@ final class IosMediaActions: NSObject, ObservableObject, UIDocumentPickerDelegat
             picker.delegate = self
             self.selection = completion
             self.selectionID = UUID()
+            self.activePicker = picker
             presenter.present(picker, animated: true)
             picker.presentationController?.delegate = self
         }
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        guard activePicker === controller else { return }
         let completion = selection
         selection = nil
         selectionID = nil
+        activePicker = nil
         resolvingSelection = false
         _ = completion?(nil, nil)
     }
@@ -63,6 +67,7 @@ final class IosMediaActions: NSObject, ObservableObject, UIDocumentPickerDelegat
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard activePicker === controller else { return }
         guard let url = urls.first, let identifier = selectionID else {
             documentPickerWasCancelled(controller)
             return
@@ -78,6 +83,7 @@ final class IosMediaActions: NSObject, ObservableObject, UIDocumentPickerDelegat
                 let completion = self.selection
                 self.selection = nil
                 self.selectionID = nil
+                self.activePicker = nil
                 self.resolvingSelection = false
                 switch result {
                 case .success(let source): _ = completion?(source, nil)
