@@ -55,6 +55,10 @@ WRITER_NEW = """    if (par->ch_layout.order == AV_CHANNEL_ORDER_NATIVE && par->
     }
 """
 
+# Put descriptions after the complete COMM chunk: independent older readers
+# need its channel count before parsing UseChannelDescriptions.
+WRITER_AFTER = "    if (  (par->codec_tag == MKTAG('Q','D','M','2')\n"
+
 READER_OLD = """            tmp.u.map[i].id = mov_get_channel_id(label);
 """
 READER_NEW = """            tmp.u.map[i].id = mov_get_channel_id(label);
@@ -76,7 +80,7 @@ COUNT_OLD = """        int nb_channels = ch_layout->nb_channels;
 """
 COUNT_NEW = """        int nb_channels = ch_layout->nb_channels;
 
-        /* AIFF writes CHAN before COMM, so no channel count is known yet.
+        /* AIFF may put CHAN before COMM, so no channel count is known yet.
          * Bound the supported description domain and let COMM confirm it. */
         if (s->iformat && !strcmp(s->iformat->name, "aiff") && !nb_channels) {
             if (!num_descr || num_descr > 18)
@@ -89,9 +93,9 @@ COUNT_NEW = """        int nb_channels = ch_layout->nb_channels;
 
 # Complete original/patched file hashes refuse source drift and partial patches.
 PATCHES = [
-    ("libavformat/aiffenc.c", "58a39d35931a6d6efff78cd7c28aa9ca794f16f1002ae25d5e4fb10b9db6bf80", "b9452113738b608b2dad106a62a98529e12818a1e3724839f2d4380d0da5fdd7",
-     [(WRITER_OLD, WRITER_NEW)]),
-    ("libavformat/mov_chan.c", "015cc3d3d2a2e5eff62d38b0fb3211c350054d30429cef10f5d04e2c6842a2f7", "7ca8d0c10a1b4daebc141bae52bc62eb846c36a38daba02c69a40d115e85e8ab",
+    ("libavformat/aiffenc.c", "58a39d35931a6d6efff78cd7c28aa9ca794f16f1002ae25d5e4fb10b9db6bf80", "70f8ccf997d141698a9a4203c12b0193067732b5b74dcb24d02235de49e31454",
+     [(WRITER_OLD, ""), (WRITER_AFTER, WRITER_NEW + "\n" + WRITER_AFTER)]),
+    ("libavformat/mov_chan.c", "015cc3d3d2a2e5eff62d38b0fb3211c350054d30429cef10f5d04e2c6842a2f7", "37a4fedcc1957f69072a0ac2b1a9939e53668a7d95b72868927b939c2e7c8290",
      [("#include <stdint.h>\n", "#include <stdint.h>\n#include <string.h>\n"),
       (COUNT_OLD, COUNT_NEW), (READER_OLD, READER_NEW)]),
 ]
@@ -145,6 +149,8 @@ def self_test(archive):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(contents.extractfile("ffmpeg-7.1.5/" + relative).read())
         apply(source)
+        writer = (source / "libavformat/aiffenc.c").read_text()
+        assert writer.index('ffio_wfourcc(pb, "COMM")') < writer.index('ffio_wfourcc(pb, "CHAN")') < writer.index('ffio_wfourcc(pb, "SSND")')
         once = [(source / entry[0]).read_bytes() for entry in PATCHES]
         apply(source)
         assert once == [(source / entry[0]).read_bytes() for entry in PATCHES]

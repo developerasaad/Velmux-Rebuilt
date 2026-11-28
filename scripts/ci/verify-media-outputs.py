@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import re
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from fractions import Fraction
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "build/media-fixtures"
 OUTPUTS = ROOT / "build/media-test-output"
+AIFF_LAYOUT_EVIDENCE = []
 
 
 def run(arguments):
@@ -35,13 +37,14 @@ def assert_close(actual, expected, tolerance, detail):
     assert math.isfinite(actual) and abs(actual - expected) <= tolerance, f"{detail}: {actual} != {expected} ± {tolerance}"
 
 
-def check_tones(path, expected_channels, expected_frequencies=None):
-    raw = run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0",
-               "-ar", "48000", "-ac", str(expected_channels), "-f", "f32le", "-acodec", "pcm_f32le", "-"])
-    samples = array.array("f")
-    samples.frombytes(raw)
-    if sys.byteorder != "little":
-        samples.byteswap()
+def check_tones(path, expected_channels, expected_frequencies=None, samples=None):
+    if samples is None:
+        raw = run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0",
+                   "-ar", "48000", "-ac", str(expected_channels), "-f", "f32le", "-acodec", "pcm_f32le", "-"])
+        samples = array.array("f")
+        samples.frombytes(raw)
+        if sys.byteorder != "little":
+            samples.byteswap()
     assert len(samples) > 48000 * expected_channels, f"{path}: missing decoded tone samples"
     # Discard priming/tail regions; measure known frequencies from actual samples.
     begin, count = 12000, 24000
@@ -73,6 +76,74 @@ def float_samples(raw):
     return values
 
 
+def described_aiff_pcm(path, case):
+    """Check actual CoreAudio labels and decode PCM without guessing speakers.
+
+    Unpatched independent FFmpeg may not recognize CoreAudio rear labels 33/34.
+    Parse their standard CHAN descriptions and SSND samples independently; never
+    accept that decoder's guessed layout as evidence of physical speaker identity.
+    """
+    raw = path.read_bytes()
+    assert raw[:4] == b'FORM' and raw[8:12] in (b'AIFF', b'AIFC'), path
+    assert struct.unpack_from('>I', raw, 4)[0] == len(raw) - 8, f'{path}: unfinished AIFF FORM'
+    chunks = {}
+    position = 12
+    while position + 8 <= len(raw):
+        tag = raw[position:position + 4]
+        size = struct.unpack_from('>I', raw, position + 4)[0]
+        end = position + 8 + size
+        assert end <= len(raw), f'{path}: truncated AIFF chunk'
+        assert tag not in chunks, f'{path}: duplicate AIFF chunk'
+        chunks[tag] = raw[position + 8:end]
+        position = end + (size & 1)
+    assert position == len(raw), f'{path}: unparsed AIFF bytes'
+    common, chan, sound = (chunks[key] for key in (b'COMM', b'CHAN', b'SSND'))
+    channels, frames, bits = struct.unpack_from('>HIH', common)
+    exponent, mantissa = struct.unpack_from('>HQ', common, 8)
+    assert exponent < 0x7fff and mantissa > 0, f'{path}: invalid AIFF sample rate'
+    rate = math.ldexp(mantissa, exponent - 16383 - 63)
+    assert channels == case['channels'] and rate == case['sample_rate'], path
+    layout, bitmap, count = struct.unpack_from('>III', chan)
+    assert layout == bitmap == 0 and count == channels and len(chan) == 12 + count * 20, f'{path}: missing exact speaker descriptions'
+    labels = []
+    for index in range(count):
+        label, flags, x, y, z = struct.unpack_from('>IIIII', chan, 12 + 20 * index)
+        assert flags == x == y == z == 0, f'{path}: unexpected coordinate speaker mapping'
+        labels.append(label)
+    expected = {'5.1': [1, 2, 3, 4, 33, 34], '5.1(side)': [1, 2, 3, 4, 5, 6],
+                '7.1': [1, 2, 3, 4, 33, 34, 5, 6]}[case['channel_layout']]
+    assert labels == expected, f'{path}: actual CoreAudio speaker identities/order changed: {labels}'
+    offset, block = struct.unpack_from('>II', sound)
+    assert block == 0, f'{path}: unsupported blocked AIFF PCM'
+    pcm = sound[8 + offset:]
+    width = (bits + 7) // 8
+    assert len(pcm) == frames * channels * width, f'{path}: AIFF sample count/precision changed'
+    compression = common[18:22] if raw[8:12] == b'AIFC' else b'NONE'
+    if compression.lower() in (b'fl32', b'fl64'):
+        assert bits == (32 if compression.lower() == b'fl32' else 64), path
+        values = [item[0] for item in struct.iter_unpack('>f' if bits == 32 else '>d', pcm)]
+        integer = None
+    else:
+        assert compression in (b'NONE', b'twos', b'sowt') and bits in (8, 16, 24, 32), path
+        order = 'little' if compression == b'sowt' else 'big'
+        integers = [int.from_bytes(pcm[index:index + width], order, signed=True) for index in range(0, len(pcm), width)]
+        values = [value / 2 ** (bits - 1) for value in integers]
+        integer = b''.join((value << (32 - bits)).to_bytes(4, 'little', signed=True) for value in integers)
+    assert values and all(math.isfinite(value) and abs(value) <= 1 for value in values), path
+    return {'values': values, 's32': integer, 'frames': frames, 'labels': labels, 'bits': bits}
+
+
+def verify_aiff_decoding(path, frames):
+    # Decode the whole AIFF with independent libavcodec through ffprobe. This
+    # needs no resampling/filter graph that could guess or relabel unknown labels.
+    decoded = subprocess.run(['ffprobe', '-v', 'error', '-err_detect', 'explode', '-select_streams', 'a:0',
+                              '-show_frames', '-of', 'json', str(path)], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, check=True)
+    assert not decoded.stderr.strip(), f'{path}: independent AIFF decoding reported errors: {decoded.stderr.decode()}'
+    decoded_frames = json.loads(decoded.stdout)['frames']
+    assert sum(int(frame['nb_samples']) for frame in decoded_frames) == frames, f'{path}: independently decoded AIFF sample count changed'
+
+
 def first_rgb(path, width, height, start=0, tone_map=False):
     filters = []
     if tone_map:
@@ -98,6 +169,16 @@ def check_case(case):
     pictures = [stream for stream in info["streams"] if stream["codec_type"] == "video" and stream.get("disposition", {}).get("attached_pic")]
     video = [stream for stream in info["streams"] if stream["codec_type"] == "video" and not stream.get("disposition", {}).get("attached_pic")]
     audio = [stream for stream in info["streams"] if stream["codec_type"] == "audio"]
+    described_aiff = None
+    if 'channel_layout' in case and 'aiff' in info['format']['format_name'].split(','):
+        described_aiff = described_aiff_pcm(path, case)
+        verify_aiff_decoding(path, described_aiff['frames'])
+        AIFF_LAYOUT_EVIDENCE.append({'path': str(path.relative_to(OUTPUTS)),
+                                    'coreaudio_labels': described_aiff['labels'],
+                                    'verified_layout': case['channel_layout'],
+                                    'independent_ffprobe_layout': audio[0].get('channel_layout'),
+                                    'decoded_sample_frames': described_aiff['frames'],
+                                    'verification': 'Exact CHAN speaker identities, independent PCM values and full ffprobe decoding'})
     if "attached_picture_codec" in case:
         assert len(pictures) == 1 and pictures[0]["codec_name"] == case["attached_picture_codec"], f"{path}: attached artwork changed"
         assert (pictures[0]["width"], pictures[0]["height"]) == (32, 32), f"{path}: artwork geometry changed"
@@ -125,7 +206,8 @@ def check_case(case):
         assert int(stream["sample_rate"]) == case["sample_rate"], path
         assert stream["channels"] == case["channels"], path
         if 'channel_layout' in case:
-            assert stream.get('channel_layout') == case['channel_layout'], f'{path}: speaker layout changed'
+            if described_aiff is None:
+                assert stream.get('channel_layout') == case['channel_layout'], f'{path}: speaker layout changed'
         if 'audio_bits' in case:
             bits = int(stream.get('bits_per_raw_sample', 0) or stream.get('bits_per_sample', 0))
             assert bits == case['audio_bits'], f'{path}: sample precision changed: {bits}'
@@ -145,23 +227,28 @@ def check_case(case):
         else:
             assert_close(duration, case["duration"], case.get("duration_tolerance", 0.15), str(path))
     if "decoded_samples" in case:
-        raw = run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0", "-f", "f32le", "-acodec", "pcm_f32le", "-"])
-        assert len(raw) == case["decoded_samples"] * case["channels"] * 4, f"{path}: decoded sample count changed"
+        if described_aiff is not None:
+            assert described_aiff['frames'] == case['decoded_samples'], f'{path}: AIFF decoded sample count changed'
+        else:
+            raw = run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0:a:0", "-f", "f32le", "-acodec", "pcm_f32le", "-"])
+            assert len(raw) == case["decoded_samples"] * case["channels"] * 4, f"{path}: decoded sample count changed"
     if "duration_range" in case:
         lower, upper = case["duration_range"]
         assert lower <= float(info["format"]["duration"]) <= upper, f"{path}: preview is not bounded to its selected interval"
     if "reported_preview_duration_us" in case:
         assert_close(float(info["format"]["duration"]), case["reported_preview_duration_us"] / 1_000_000, 0.15, f"{path}: reported preview duration")
-    run(["ffmpeg", "-v", "error", "-xerror", "-err_detect", "explode", "-nostdin", "-threads", "1",
-         "-i", str(path), "-map", "0:v?", "-map", "0:a?", "-f", "null", "-"])
+    if described_aiff is None:
+        run(["ffmpeg", "-v", "error", "-xerror", "-err_detect", "explode", "-nostdin", "-threads", "1",
+             "-i", str(path), "-map", "0:v?", "-map", "0:a?", "-f", "null", "-"])
     if case.get("tones"):
-        check_tones(path, case["channels"], case.get("tone_frequencies"))
+        check_tones(path, case["channels"], case.get("tone_frequencies"),
+                    described_aiff['values'] if described_aiff is not None else None)
     if 'exact_audio_source' in case:
-        actual = decoded_audio(path)
+        actual = described_aiff['s32'] if described_aiff is not None else decoded_audio(path)
         expected = decoded_audio(FIXTURES / case['exact_audio_source'])
         assert actual and actual == expected, f'{path}: lossless encoding changed sample values, speaker order or duration'
     if 'pcm_precision_source' in case:
-        actual = float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
+        actual = described_aiff['values'] if described_aiff is not None else float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
         expected = float_samples(decoded_audio(FIXTURES / case['pcm_precision_source'], 'f64le', 'pcm_f64le'))
         assert len(actual) == len(expected) > 0, f'{path}: PCM conversion changed sample count or channel count'
         tolerance = 2.0 ** (1 - case['pcm_quantization_bits'])
@@ -326,7 +413,8 @@ def main():
     assert len(checked) >= 8, f"Incomplete conversion output set: {checked}"
     result = {"verified_outputs": checked, "fixture_tool": fixture_manifest["ffmpeg_version"],
               "verification_tool": run(["ffprobe", "-version"]).decode().splitlines()[0],
-              "original_hashes_unchanged": len(fixture_manifest["files"])}
+              "original_hashes_unchanged": len(fixture_manifest["files"]),
+              "aiff_speaker_evidence": AIFF_LAYOUT_EVIDENCE}
     (OUTPUTS / "independent-verification.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"Independently inspected and decoded {len(checked)} real outputs; original hashes unchanged")
 
