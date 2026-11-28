@@ -17,9 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 use velmux_core::{
-    AudioCodec, CancellationToken, ConversionConfig, Engine, EngineError, FrameRate,
-    InspectedSource, JobObserver, JobRecord, JobState, MediaProvider, NativeProvider, OpenedSource,
-    Operation, OutputFormat, OutputReservation, PublishedOutput, StreamKind, VideoCodec, VideoSize,
+    AudioCodec, AudioLayout, AudioPrecision, CancellationToken, ConversionConfig, Engine,
+    EngineError, FrameRate, InspectedSource, JobObserver, JobRecord, JobState, MediaProvider,
+    NativeProvider, OpenedSource, Operation, OutputFormat, OutputReservation, PublishedOutput,
+    StreamKind, VideoCodec, VideoSize,
 };
 
 fn repository() -> PathBuf {
@@ -434,9 +435,16 @@ impl Harness {
             .unwrap()
     }
     fn defaults(&self, source: &InspectedSource, operation: Operation) -> ConversionConfig {
-        self.engine()
+        let mut config = self
+            .engine()
             .default_configuration(source.id.clone(), operation)
-            .unwrap()
+            .unwrap();
+        // Keep regression conversions explicit when product defaults evolve.
+        config.format = match operation {
+            Operation::VideoConverter => OutputFormat::Mp4,
+            Operation::AudioConverter => OutputFormat::M4a,
+        };
+        config
     }
     fn submit(&self, source: &InspectedSource, config: ConversionConfig) -> JobRecord {
         self.engine()
@@ -729,8 +737,17 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
     legacy.as_object_mut().unwrap().remove("version");
     legacy["plan"].as_object_mut().unwrap().remove("output");
     let accepted = legacy["plan"]["config"].as_object_mut().unwrap();
-    for field in ["custom_width", "custom_height", "custom_frame_rate"] {
+    for field in [
+        "custom_width",
+        "custom_height",
+        "custom_frame_rate",
+        "audio_precision",
+        "channel_layout",
+    ] {
         accepted.remove(field);
+    }
+    for stream in legacy["plan"]["streams"].as_array_mut().unwrap() {
+        stream.as_object_mut().unwrap().remove("encoding");
     }
     let legacy_bytes = serde_json::to_string(&legacy).unwrap();
     connection
@@ -2096,12 +2113,13 @@ fn unmasked_stereo_pcm_encodes_aac_without_losing_channel_identity() {
 fn configuration_choices_follow_real_sampling_and_encoding_limits() {
     let harness = Harness::new("applicable-settings");
     let pcm32 = harness.inspect("pcm32.wav", Operation::AudioConverter);
-    assert!(!harness
+    assert!(harness
         .engine()
         .media_catalog_for_source(pcm32.id.clone(), Operation::AudioConverter)
         .unwrap()
         .iter()
-        .any(|format| format.format == OutputFormat::Flac));
+        .any(|format| format.format == OutputFormat::Flac),
+        "Explicit precision conversion makes FLAC applicable; Original precision must still reject truncation");
     let mut invalid_precision = harness.defaults(&pcm32, Operation::AudioConverter);
     invalid_precision.format = OutputFormat::Flac;
     assert!(matches!(
@@ -2112,13 +2130,17 @@ fn configuration_choices_follow_real_sampling_and_encoding_limits() {
     ));
 
     let odd = harness.inspect("odd-video.mkv", Operation::VideoConverter);
-    let odd_default = harness.defaults(&odd, Operation::VideoConverter);
-    assert_eq!(odd_default.format, OutputFormat::Matroska);
+    let odd_default = harness
+        .engine()
+        .default_configuration(odd.id.clone(), Operation::VideoConverter)
+        .unwrap();
+    assert_eq!(odd_default.format, OutputFormat::Original);
+    assert_eq!(odd_default.video_codec, VideoCodec::Automatic);
     let odd_choices = harness
         .engine()
         .configuration_choices(odd.id.clone(), odd_default.clone())
         .unwrap();
-    assert_eq!(odd_choices.frame_rates, vec![FrameRate::Original]);
+    assert!(odd_choices.frame_rates.contains(&FrameRate::Original));
     let copied = harness.complete(&harness.submit(&odd, odd_default).id);
 
     let stereo = harness.inspect("stereo.flac", Operation::AudioConverter);
@@ -2137,15 +2159,29 @@ fn configuration_choices_follow_real_sampling_and_encoding_limits() {
         .validate_configuration(stereo.id, equal)
         .unwrap();
     let high = harness.inspect("high-rate.flac", Operation::AudioConverter);
-    let mut config = harness.defaults(&high, Operation::AudioConverter);
-    assert_eq!(config.format, OutputFormat::Flac, "Default should retain a compatible representation instead of assuming AAC supports 192 kHz");
+    let mut config = harness
+        .engine()
+        .default_configuration(high.id.clone(), Operation::AudioConverter)
+        .unwrap();
+    assert_eq!(
+        config.format,
+        OutputFormat::Original,
+        "Default should retain the source representation instead of assuming AAC supports 192 kHz"
+    );
     config.format = OutputFormat::M4a;
     let options = harness
         .engine()
         .configuration_choices(high.id.clone(), config.clone())
         .unwrap();
     assert!(!options.sample_rates.contains(&0));
-    assert_eq!(options.sample_rates, vec![44100, 48000]);
+    assert!(options.sample_rates.contains(&44100) && options.sample_rates.contains(&48000));
+    assert!(
+        options.sample_rates.iter().all(|rate| [
+            8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000
+        ]
+        .contains(rate)),
+        "Every offered AAC rate must be a declared usable rate"
+    );
     assert!(matches!(
         harness
             .engine()
@@ -2182,10 +2218,17 @@ fn configuration_choices_follow_real_sampling_and_encoding_limits() {
         .engine()
         .configuration_choices(low.id.clone(), config.clone())
         .unwrap();
-    assert_eq!(
-        options.audio_bitrates,
-        vec![0],
-        "Explicit exposed bitrates exceed MPEG-2.5 support at 8 kHz"
+    assert!(options.audio_bitrates.contains(&0));
+    assert!(
+        options.audio_bitrates.contains(&64000),
+        "Expose applicable explicit MPEG-2.5 bitrates"
+    );
+    assert!(
+        options
+            .audio_bitrates
+            .iter()
+            .all(|rate| [0, 8000, 16000, 24000, 32000, 40000, 48000, 56000, 64000].contains(rate)),
+        "Never offer a bitrate beyond the actual 8 kHz MP3 route"
     );
     config.audio_bitrate = Some(192000);
     assert!(matches!(
@@ -2250,7 +2293,10 @@ fn basic_conversion_preserves_compatible_tracks_metadata_and_chapters() {
     let harness = Harness::new("chaptered-streams");
     let source = harness.inspect("chaptered.mkv", Operation::VideoConverter);
     assert_eq!(source.info.chapters.len(), 2);
-    let config = harness.defaults(&source, Operation::VideoConverter);
+    let config = harness
+        .engine()
+        .default_configuration(source.id.clone(), Operation::VideoConverter)
+        .unwrap();
     assert_eq!(config.format, OutputFormat::Matroska);
     let catalog = harness
         .engine()
@@ -2310,7 +2356,10 @@ fn attached_artwork_is_preserved_and_incompatible_catalog_formats_are_omitted() 
             .any(|option| option.format == OutputFormat::Wav),
         "WAV cannot preserve this attached picture with the current copy-only artwork route"
     );
-    let defaults = harness.defaults(&source, Operation::AudioConverter);
+    let defaults = harness
+        .engine()
+        .default_configuration(source.id.clone(), Operation::AudioConverter)
+        .unwrap();
     assert!(options
         .iter()
         .any(|option| option.format == defaults.format));
@@ -2366,4 +2415,369 @@ fn attached_artwork_is_preserved_and_incompatible_catalog_formats_are_omitted() 
     expected["source"] = json!("cover-art.flac");
     expected["attached_picture_codec"] = json!("png");
     harness.expect(vec![expected]);
+}
+
+#[test]
+fn complete_video_codec_and_container_matrix_encodes_real_content() {
+    let harness = Harness::new("m3-video-codecs");
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let mut cases = Vec::new();
+    for (format, codec, audio, expected_video, expected_audio, container) in [
+        (
+            OutputFormat::Mp4,
+            VideoCodec::H264,
+            AudioCodec::Aac,
+            "h264",
+            "aac",
+            "mov",
+        ),
+        (
+            OutputFormat::Matroska,
+            VideoCodec::Hevc,
+            AudioCodec::Aac,
+            "hevc",
+            "aac",
+            "matroska",
+        ),
+        (
+            OutputFormat::Matroska,
+            VideoCodec::Av1,
+            AudioCodec::Opus,
+            "av1",
+            "opus",
+            "matroska",
+        ),
+        (
+            OutputFormat::Webm,
+            VideoCodec::Vp8,
+            AudioCodec::Opus,
+            "vp8",
+            "opus",
+            "webm",
+        ),
+        (
+            OutputFormat::Webm,
+            VideoCodec::Vp9,
+            AudioCodec::Vorbis,
+            "vp9",
+            "vorbis",
+            "webm",
+        ),
+        (
+            OutputFormat::Avi,
+            VideoCodec::Mpeg4,
+            AudioCodec::Mp3,
+            "mpeg4",
+            "mp3",
+            "avi",
+        ),
+        (
+            OutputFormat::Matroska,
+            VideoCodec::Ffv1,
+            AudioCodec::Flac,
+            "ffv1",
+            "flac",
+            "matroska",
+        ),
+        (
+            OutputFormat::Mov,
+            VideoCodec::Mjpeg,
+            AudioCodec::Pcm,
+            "mjpeg",
+            "pcm_s16le",
+            "mov",
+        ),
+        (
+            OutputFormat::M4v,
+            VideoCodec::H264,
+            AudioCodec::Aac,
+            "h264",
+            "aac",
+            "mov",
+        ),
+        (
+            OutputFormat::MpegTs,
+            VideoCodec::H264,
+            AudioCodec::Ac3,
+            "h264",
+            "ac3",
+            "mpegts",
+        ),
+        (
+            OutputFormat::Flv,
+            VideoCodec::H264,
+            AudioCodec::Aac,
+            "h264",
+            "aac",
+            "flv",
+        ),
+        (
+            OutputFormat::ThreeGp,
+            VideoCodec::Mpeg4,
+            AudioCodec::Aac,
+            "mpeg4",
+            "aac",
+            "mov",
+        ),
+        (
+            OutputFormat::Asf,
+            VideoCodec::Mpeg4,
+            AudioCodec::Wma,
+            "mpeg4",
+            "wmav2",
+            "asf",
+        ),
+    ] {
+        let mut config = harness.defaults(&source, Operation::VideoConverter);
+        config.format = format;
+        config.video_codec = codec;
+        config.audio_codec = audio;
+        if audio == AudioCodec::Pcm {
+            config.audio_precision = Some(AudioPrecision::Pcm16);
+        }
+        config.file_name = format!("matrix_{format:?}_{codec:?}");
+        let record = harness.complete(&harness.submit(&source, config).id);
+        cases.push(
+            json!({"path":record.output.unwrap().locator,"container":container,
+            "video_codec":expected_video,"width":320,"height":180,"audio_codecs":[expected_audio],
+            "channels":2,"sample_rate":48000,"duration":2.0,"tones":true,
+            "source":"video.mp4","match_source_frame":true,"decoded_video_frames":48}),
+        );
+    }
+    harness.expect(cases);
+}
+
+#[test]
+fn complete_audio_codec_and_container_matrix_encodes_real_samples() {
+    let harness = Harness::new("m3-audio-codecs");
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut cases = Vec::new();
+    for (format, codec, expected, container) in [
+        (OutputFormat::Mp3, AudioCodec::Mp3, "mp3", "mp3"),
+        (OutputFormat::M4a, AudioCodec::Aac, "aac", "mov"),
+        (OutputFormat::M4a, AudioCodec::Alac, "alac", "mov"),
+        (OutputFormat::Flac, AudioCodec::Flac, "flac", "flac"),
+        (OutputFormat::Ogg, AudioCodec::Vorbis, "vorbis", "ogg"),
+        (OutputFormat::Opus, AudioCodec::Opus, "opus", "ogg"),
+        (OutputFormat::Aac, AudioCodec::Aac, "aac", "aac"),
+        (OutputFormat::Aiff, AudioCodec::Pcm, "pcm_s16be", "aiff"),
+        (OutputFormat::M4a, AudioCodec::Ac3, "ac3", "mov"),
+        (OutputFormat::M4a, AudioCodec::Eac3, "eac3", "mov"),
+        (OutputFormat::Wavpack, AudioCodec::Wavpack, "wavpack", "wv"),
+        (OutputFormat::Wma, AudioCodec::Wma, "wmav2", "asf"),
+    ] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = format;
+        config.audio_codec = codec;
+        config.file_name = format!("matrix_{format:?}_{codec:?}");
+        let record = harness.complete(&harness.submit(&source, config).id);
+        let mut expected = expectation(&record, expected, 2, 48000);
+        expected["container"] = json!(container);
+        if matches!(
+            codec,
+            AudioCodec::Flac | AudioCodec::Alac | AudioCodec::Pcm | AudioCodec::Wavpack
+        ) {
+            expected["exact_audio_source"] = json!("stereo.wav");
+        }
+        cases.push(expected);
+    }
+    harness.expect(cases);
+}
+
+#[test]
+fn actual_main10_hevc_and_vp9_preserve_precision_and_color() {
+    let harness = Harness::new("m3-ten-bit");
+    let mut cases = Vec::new();
+    for (name, format, codec, expected, transfer, primaries, matrix) in [
+        (
+            "camera10.mp4",
+            OutputFormat::Mp4,
+            VideoCodec::Hevc,
+            "hevc",
+            "bt709",
+            "bt709",
+            "bt709",
+        ),
+        (
+            "camera10.mp4",
+            OutputFormat::Webm,
+            VideoCodec::Vp9,
+            "vp9",
+            "bt709",
+            "bt709",
+            "bt709",
+        ),
+        (
+            "hdr.mkv",
+            OutputFormat::Mp4,
+            VideoCodec::Hevc,
+            "hevc",
+            "smpte2084",
+            "bt2020",
+            "bt2020nc",
+        ),
+        (
+            "hlg.mkv",
+            OutputFormat::Webm,
+            VideoCodec::Vp9,
+            "vp9",
+            "arib-std-b67",
+            "bt2020",
+            "bt2020nc",
+        ),
+    ] {
+        let source = harness.inspect(name, Operation::VideoConverter);
+        let mut config = harness.defaults(&source, Operation::VideoConverter);
+        config.format = format;
+        config.video_codec = codec;
+        config.file_name = format!("precision_{name}_{codec:?}");
+        let record = harness.complete(&harness.submit(&source, config).id);
+        cases.push(
+            json!({"path":record.output.unwrap().locator,"video_codec":expected,
+            "width":160,"height":90,"pixel_format":"yuv420p10le","color_transfer":transfer,
+            "color_primaries":primaries,"color_space":matrix,"audio_codecs":[],"duration":1.0,
+            "source":name,"decoded_video_frames":12,"ten_bit_reference":name}),
+        );
+    }
+    harness.expect(cases);
+}
+
+#[test]
+fn hdr10_static_metadata_survives_real_hevc_encoding_into_transport_stream() {
+    let harness = Harness::new("m3-hdr10-sei");
+    let source = harness.inspect("camera10-hdr.mp4", Operation::VideoConverter);
+    let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.format = OutputFormat::MpegTs;
+    config.video_codec = VideoCodec::Hevc;
+    config.file_name = "hdr10_reencoded_transport".into();
+    let record = harness.complete(&harness.submit(&source, config).id);
+    harness.expect(vec![
+        json!({"path":record.output.unwrap().locator,"container":"mpegts",
+        "video_codec":"hevc","width":160,"height":90,"pixel_format":"yuv420p10le",
+        "color_transfer":"smpte2084","color_primaries":"bt2020","color_space":"bt2020nc",
+        "audio_codecs":[],"duration":1.0,"source":"camera10-hdr.mp4","decoded_video_frames":12,
+        "ten_bit_reference":"camera10-hdr.mp4","hdr10_elementary_sei":true,"reencoded_video":true}),
+    ]);
+}
+
+#[test]
+fn pcm_precisions_and_lossless_multichannel_preserve_real_samples() {
+    let harness = Harness::new("m3-audio-precision");
+    let source = harness.inspect("precision24.wav", Operation::AudioConverter);
+    let mut cases = Vec::new();
+    for (precision, codec, bits) in [
+        (AudioPrecision::Pcm8, "pcm_u8", 8),
+        (AudioPrecision::Pcm16, "pcm_s16le", 16),
+        (AudioPrecision::Pcm24, "pcm_s24le", 24),
+        (AudioPrecision::Pcm32, "pcm_s32le", 32),
+        (AudioPrecision::Float32, "pcm_f32le", 32),
+        (AudioPrecision::Float64, "pcm_f64le", 64),
+    ] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_precision = Some(precision);
+        config.channel_layout = Some(AudioLayout::Surround51);
+        config.file_name = format!("pcm_{precision:?}");
+        let record = harness.complete(&harness.submit(&source, config).id);
+        cases.push(json!({"path":record.output.unwrap().locator,"container":"wav","audio_codecs":[codec],
+            "channels":6,"channel_layout":"5.1","sample_rate":48000,"audio_bits":bits,"duration":2.0,
+            "decoded_samples":96000,"tones":true,"tone_frequencies":[220,330,440,55,660,880],
+            "pcm_precision_source":"precision24.wav","pcm_quantization_bits":if bits==8 {8} else if bits==16 {16} else {24}}));
+    }
+    for (format, codec, expected) in [
+        (OutputFormat::Flac, AudioCodec::Flac, "flac"),
+        (OutputFormat::M4a, AudioCodec::Alac, "alac"),
+        (OutputFormat::Aiff, AudioCodec::Pcm, "pcm_s24be"),
+    ] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = format;
+        config.audio_codec = codec;
+        config.audio_precision = Some(AudioPrecision::Pcm24);
+        config.channel_layout = Some(AudioLayout::Surround51);
+        config.file_name = format!("surround_{format:?}");
+        let record = harness.complete(&harness.submit(&source, config).id);
+        cases.push(
+            json!({"path":record.output.unwrap().locator,"audio_codecs":[expected],"channels":6,
+            "channel_layout":"5.1","sample_rate":48000,"audio_bits":24,"duration":2.0,
+            "decoded_samples":96000,"tones":true,"tone_frequencies":[220,330,440,55,660,880],
+            "exact_audio_source":"precision24.wav"}),
+        );
+    }
+    harness.expect(cases);
+}
+
+#[test]
+fn incompatible_catalog_requests_are_rejected_directly_by_the_core() {
+    let harness = Harness::new("m3-codec-validation");
+    let video = harness.inspect("video.mp4", Operation::VideoConverter);
+    for (format, codec, audio) in [
+        (OutputFormat::Webm, VideoCodec::H264, AudioCodec::Opus),
+        (OutputFormat::Mp4, VideoCodec::Vp8, AudioCodec::Aac),
+        (OutputFormat::Flv, VideoCodec::Hevc, AudioCodec::Aac),
+        (OutputFormat::ThreeGp, VideoCodec::Ffv1, AudioCodec::Aac),
+        (OutputFormat::Webm, VideoCodec::Vp9, AudioCodec::Aac),
+    ] {
+        let mut config = harness.defaults(&video, Operation::VideoConverter);
+        config.format = format;
+        config.video_codec = codec;
+        config.audio_codec = audio;
+        assert!(matches!(
+            harness.engine().submit_conversion(
+                video.id.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                config,
+                CancellationToken::new()
+            ),
+            Err(EngineError::Configuration { .. })
+        ));
+    }
+    let audio = harness.inspect("stereo.wav", Operation::AudioConverter);
+    for (format, codec) in [
+        (OutputFormat::Mp3, AudioCodec::Flac),
+        (OutputFormat::Flac, AudioCodec::Aac),
+        (OutputFormat::Aac, AudioCodec::HeAac),
+        (OutputFormat::Amr, AudioCodec::AmrNb),
+        (OutputFormat::Amr, AudioCodec::AmrWb),
+    ] {
+        let mut config = harness.defaults(&audio, Operation::AudioConverter);
+        config.format = format;
+        config.audio_codec = codec;
+        assert!(matches!(
+            harness.engine().submit_conversion(
+                audio.id.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                config,
+                CancellationToken::new()
+            ),
+            Err(EngineError::Configuration { .. } | EngineError::Unsupported { .. })
+        ));
+    }
+    assert!(harness.engine().jobs().unwrap().is_empty());
+}
+
+#[test]
+fn original_automatic_keeps_compatible_video_and_audio_payloads() {
+    let harness = Harness::new("m3-original-copy");
+    let video = harness.inspect("video.mp4", Operation::VideoConverter);
+    let mut config = harness.defaults(&video, Operation::VideoConverter);
+    config.format = OutputFormat::Original;
+    config.video_codec = VideoCodec::Automatic;
+    config.audio_codec = AudioCodec::Automatic;
+    let video_job = harness.complete(&harness.submit(&video, config).id);
+    assert!(video_job.file_name.ends_with(".mp4"));
+    let audio = harness.inspect("stereo.flac", Operation::AudioConverter);
+    let mut config = harness.defaults(&audio, Operation::AudioConverter);
+    config.format = OutputFormat::Original;
+    config.audio_codec = AudioCodec::Automatic;
+    let audio_job = harness.complete(&harness.submit(&audio, config).id);
+    assert!(audio_job.file_name.ends_with(".flac"));
+    harness.expect(vec![
+        json!({"path":video_job.output.unwrap().locator,"container":"mov","video_codec":"h264",
+            "width":320,"height":180,"audio_codecs":["aac"],"channels":2,"sample_rate":48000,
+            "duration":2.0,"source":"video.mp4","preserve_video_packets":true,"preserve_audio_packets":true}),
+        json!({"path":audio_job.output.unwrap().locator,"container":"flac","audio_codecs":["flac"],
+            "channels":2,"sample_rate":48000,"duration":2.0,"source":"stereo.flac",
+            "preserve_audio_packets":true,"exact_audio_source":"stereo.flac"}),
+    ]);
 }

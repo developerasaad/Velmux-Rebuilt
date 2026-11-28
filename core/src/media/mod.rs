@@ -1,3 +1,4 @@
+mod ebml;
 pub(crate) mod input;
 mod inspect;
 

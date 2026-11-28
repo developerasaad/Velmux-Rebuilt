@@ -361,6 +361,25 @@ impl Input {
         self.reader.length
     }
 
+    /// A bounded positional read leaves the demuxer and provider cursors alone.
+    pub(crate) fn container_header(&self) -> Result<Vec<u8>, EngineError> {
+        let mut header = vec![0u8; 8192];
+        let mut position = 0;
+        while position < header.len() {
+            self.reader.check()?;
+            let count = self
+                .reader
+                .read_at(&mut header[position..], position as u64)
+                .map_err(access_error)?;
+            if count == 0 {
+                break;
+            }
+            position += count;
+        }
+        header.truncate(position);
+        Ok(header)
+    }
+
     pub(crate) fn was_staged(&self) -> bool {
         self.reader.staged_path.is_some()
     }

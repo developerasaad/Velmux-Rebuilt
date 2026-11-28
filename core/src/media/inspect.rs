@@ -110,7 +110,12 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
                 metadata: metadata(chapter.metadata, &mut metadata_budget)?,
             });
         }
-        let container = text(descriptor.name).unwrap_or_else(|| "unknown".into());
+        let mut container = text(descriptor.name).unwrap_or_else(|| "unknown".into());
+        if container == "matroska,webm" {
+            if let Some(variant) = super::ebml::document_type(&input.container_header()?) {
+                container = variant.into();
+            }
+        }
         let start_time_us = (format.start_time != i64::MIN)
             .then_some(format.start_time)
             .or_else(|| {

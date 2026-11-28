@@ -240,6 +240,7 @@ class MediaSession(private val engine: Engine) {
     fun encodingConfigurationNative(id: String, video: Boolean, fileName: String): ConversionConfig {
         val defaults = defaultsNative(id, video)
         return defaults.copy(
+            format = if (video) uniffi.velmux_core.OutputFormat.MP4 else uniffi.velmux_core.OutputFormat.M4A,
             videoCodec = if (video) uniffi.velmux_core.VideoCodec.H264 else uniffi.velmux_core.VideoCodec.AUTOMATIC,
             audioCodec = if (video) uniffi.velmux_core.AudioCodec.AUTOMATIC else uniffi.velmux_core.AudioCodec.AAC,
             fileName = fileName,

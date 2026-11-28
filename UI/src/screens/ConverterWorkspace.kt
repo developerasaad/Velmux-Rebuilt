@@ -26,7 +26,7 @@ fun ConverterWorkspace(
 ) {
     val formats = remember(media, source.id, video) { media.catalogForSource(source.id, video) }
     val format = formats.firstOrNull { it.format == config.format }
-    val choices = remember(media, source.id, config.format, config.videoCodec, config.videoSize, config.frameRate, config.quality, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate, config.customWidth, config.customHeight, config.customFrameRate) {
+    val choices = remember(media, source.id, config.format, config.videoCodec, config.videoSize, config.frameRate, config.quality, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate, config.customWidth, config.customHeight, config.customFrameRate, config.channelLayout, config.audioPrecision) {
         media.configurationChoices(source.id, config)
     }
     var sheet by remember { mutableStateOf<String?>(null) }
@@ -43,9 +43,16 @@ fun ConverterWorkspace(
     val customDenominatorValid = customRateDenominatorText.toIntOrNull()?.let { it > 0 } == true
     val customSizeValid = config.videoSize != VideoSize.CUSTOM || customWidthValid && customHeightValid
     val customRateValid = config.frameRate != FrameRate.CUSTOM || customNumeratorValid && customDenominatorValid
-    val lossless = config.format == OutputFormat.WAV || config.format == OutputFormat.FLAC
     val lossyControls = choices.audioBitrates.isNotEmpty()
-    val qualityVisible = config.videoCodec == VideoCodec.H264 || config.videoCodec == VideoCodec.AUTOMATIC && config.quality != 23.toUByte()
+    val qualityVisible = config.videoCodec == VideoCodec.H264
+    val selectedLayout = config.channelLayout ?: when (config.channels) {
+        null -> AudioLayout.ORIGINAL
+        1u -> AudioLayout.MONO
+        2u -> AudioLayout.STEREO
+        else -> null
+    }
+    val selectedPrecision = config.audioPrecision ?: AudioPrecision.ORIGINAL
+    LaunchedEffect(submitting) { if (submitting) sheet = null }
 
     BoxWithConstraints(modifier.fillMaxSize()) {
         val previewHeight = (maxHeight * 0.4f).coerceIn(120.dp, if(video) 220.dp else 120.dp)
@@ -117,18 +124,24 @@ fun ConverterWorkspace(
                         }, label = { Text("Quality value · 18–28") }, supportingText = { Text("Lower values retain more detail and usually create larger files.") },
                             isError = !qualityValid, singleLine = true, enabled = !submitting, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
                     }
-                    if(source.info.streams.any { it.kind == StreamKind.AUDIO }) TextButton(onClick = { advancedAudio = !advancedAudio }) { Text(if(advancedAudio) "Hide audio settings" else "Audio settings") }
+                    if(source.info.streams.any { it.kind == StreamKind.AUDIO }) TextButton(enabled = !submitting, onClick = { advancedAudio = !advancedAudio }) { Text(if(advancedAudio) "Hide audio settings" else "Audio settings") }
                 }
                 if(!video || advancedAudio) {
                     Choice("Audio codec", audioCodec(config.audioCodec), enabled = !submitting) { sheet = "Audio codec" }
                     Choice("Sample rate", config.sampleRate?.let { "$it Hz" } ?: "Original", enabled = !submitting) { sheet = "Sample rate" }
-                    Choice("Channels", when(config.channels) { 1u -> "Mono"; 2u -> "Stereo"; else -> "Original" }, enabled = !submitting) { sheet = "Channels" }
-                    if(lossyControls && config.audioCodec != AudioCodec.COPY) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic", enabled = !submitting) { sheet = "Audio bitrate" }
-                    if(lossless) Text("PCM and FLAC use their selected sample representation; a lossy bitrate does not apply.", style = MaterialTheme.typography.bodySmall)
+                    Choice("Channel layout", selectedLayout?.let(::audioLayout) ?: "Retained ${config.channels}-channel setting", enabled = !submitting && choices.channelLayouts.isNotEmpty()) { sheet = "Channel layout" }
+                    if (choices.audioPrecisions.isNotEmpty()) Choice("Sample precision", audioPrecision(selectedPrecision), enabled = !submitting) { sheet = "Sample precision" }
+                    if(lossyControls) Choice("Audio bitrate", config.audioBitrate?.let { "${it / 1000u} kbps" } ?: "Automatic", enabled = !submitting) { sheet = "Audio bitrate" }
                     if((config.sampleRate ?: 0u) !in choices.sampleRates) Text("The retained sample rate is unavailable for this route. Choose an applicable sample rate.", color = MaterialTheme.colorScheme.error)
-                    if((config.channels ?: 0u) !in choices.channels) Text("The retained channel count is unavailable for this route. Choose Mono or Stereo.", color = MaterialTheme.colorScheme.error)
-                    if(config.audioBitrate != null && config.audioBitrate !in choices.audioBitrates && !lossless && config.audioCodec != AudioCodec.COPY) {
-                        Text("The retained bitrate is unavailable at this sampling and channel count.", color = MaterialTheme.colorScheme.error)
+                    if(selectedLayout == null || selectedLayout !in choices.channelLayouts) Text("The retained speaker layout is unavailable for this route. Choose an applicable layout.", color = MaterialTheme.colorScheme.error)
+                    if (selectedPrecision !in choices.audioPrecisions && (choices.audioPrecisions.isNotEmpty() || selectedPrecision != AudioPrecision.ORIGINAL)) {
+                        Text("The retained sample precision is unavailable for this route. Choose an applicable precision or codec.", color = MaterialTheme.colorScheme.error)
+                        if (choices.audioPrecisions.isEmpty() || AudioPrecision.ORIGINAL in choices.audioPrecisions) {
+                            TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioPrecision = null)) }) { Text("Use original sample precision") }
+                        }
+                    }
+                    if(config.audioBitrate != null && config.audioBitrate !in choices.audioBitrates) {
+                        Text("The retained bitrate is unavailable for the selected audio settings.", color = MaterialTheme.colorScheme.error)
                         TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioBitrate = null)) }) { Text("Use automatic bitrate") }
                     }
                 }
@@ -140,12 +153,12 @@ fun ConverterWorkspace(
                     Text("This route preserves original video geometry and timing.", color = MaterialTheme.colorScheme.error)
                     TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL)) }) { Text("Use original geometry and timing") }
                 }
-                if(lossless && config.audioBitrate != null || config.audioCodec == AudioCodec.COPY && (config.audioBitrate != null || (config.sampleRate ?: 0u) !in choices.sampleRates || (config.channels ?: 0u) !in choices.channels)) {
-                    Text("The retained audio settings conflict with this choice.", color = MaterialTheme.colorScheme.error)
-                    TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioBitrate = null, sampleRate = null, channels = null)) }) { Text("Use original audio settings") }
+                if(video && config.videoCodec != VideoCodec.H264 && config.quality != 23.toUByte()) {
+                    Text("The retained H.264 quality value is specific to H.264 encoding.", color = MaterialTheme.colorScheme.error)
+                    TextButton(enabled = !submitting, onClick = { onChange(config.copy(quality = 23u)) }) { Text("Reset H.264 quality") }
                 }
-                if(config.videoCodec == VideoCodec.COPY && (config.frameRate != FrameRate.ORIGINAL || config.quality != 23.toUByte())) {
-                    Text("Copying requires original video settings.", color = MaterialTheme.colorScheme.error)
+                if(video && config.videoCodec == VideoCodec.COPY && (config.videoSize != VideoSize.ORIGINAL || config.frameRate != FrameRate.ORIGINAL)) {
+                    Text("Copying requires original video geometry and timing.", color = MaterialTheme.colorScheme.error)
                     TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoSize = VideoSize.ORIGINAL, frameRate = FrameRate.ORIGINAL, quality = 23u)) }) { Text("Use original video settings") }
                 }
                 OutlinedTextField(config.fileName, onValueChange = { onChange(config.copy(fileName = it)) }, label = { Text("Output name") }, suffix = { Text(".${format?.extension ?: ""}") },
@@ -161,7 +174,7 @@ fun ConverterWorkspace(
             }
         }
     }
-    sheet?.let { title ->
+    sheet?.takeUnless { submitting }?.let { title ->
         val values: List<Any> = when(title) {
             "Format" -> formats
             "Codec" -> format?.videoCodecs ?: emptyList<VideoCodec>()
@@ -169,7 +182,8 @@ fun ConverterWorkspace(
             "Resolution" -> choices.videoSizes
             "Frame rate" -> choices.frameRates
             "Sample rate" -> choices.sampleRates
-            "Channels" -> choices.channels
+            "Channel layout" -> choices.channelLayouts
+            "Sample precision" -> choices.audioPrecisions
             else -> choices.audioBitrates
         }
         val labels = values.map { value -> when(value) {
@@ -178,7 +192,9 @@ fun ConverterWorkspace(
             is AudioCodec -> audioCodec(value)
             is VideoSize -> videoSize(value)
             is FrameRate -> frameRate(value)
-            is UInt -> when(title) { "Sample rate" -> if(value == 0u) "Original" else "$value Hz"; "Channels" -> when(value) { 0u -> "Original"; 1u -> "Mono"; else -> "Stereo" }; else -> if(value == 0u) "Automatic" else "${value / 1000u} kbps" }
+            is AudioLayout -> audioLayout(value)
+            is AudioPrecision -> audioPrecision(value)
+            is UInt -> when(title) { "Sample rate" -> if(value == 0u) "Original" else "$value Hz"; else -> if(value == 0u) "Automatic" else "${value / 1000u} kbps" }
             else -> value.toString()
         } }
         val selected = values.indexOfFirst { value -> when(title) {
@@ -188,10 +204,12 @@ fun ConverterWorkspace(
             "Resolution" -> value == config.videoSize
             "Frame rate" -> value == config.frameRate
             "Sample rate" -> value == (config.sampleRate ?: 0u)
-            "Channels" -> value == (config.channels ?: 0u)
+            "Channel layout" -> value == selectedLayout
+            "Sample precision" -> value == selectedPrecision
             else -> value == (config.audioBitrate ?: 0u)
         } }
         OptionSheet(title, labels, selected, onSelect = { index ->
+            if (submitting) return@OptionSheet
             val value = values[index]
             onChange(when(title) {
                 "Format" -> config.copy(format = (value as FormatOption).format)
@@ -207,7 +225,8 @@ fun ConverterWorkspace(
                     customFrameRate = config.customFrameRate ?: choices.defaultCustomFrameRate,
                 ) else config.copy(frameRate = value as FrameRate)
                 "Sample rate" -> config.copy(sampleRate = (value as UInt).takeIf { it != 0u })
-                "Channels" -> config.copy(channels = (value as UInt).takeIf { it != 0u })
+                "Channel layout" -> config.copy(channelLayout = (value as AudioLayout).takeUnless { it == AudioLayout.ORIGINAL }, channels = null)
+                "Sample precision" -> config.copy(audioPrecision = (value as AudioPrecision).takeUnless { it == AudioPrecision.ORIGINAL })
                 else -> config.copy(audioBitrate = (value as UInt).takeIf { it != 0u })
             }); sheet = null
         }, onDismiss = { sheet = null })
@@ -281,7 +300,53 @@ private fun frameRate(value: FrameRate) = when (value) {
     FrameRate.FPS60 -> "60 fps"
     FrameRate.CUSTOM -> "Custom rate"
 }
-private fun videoCodec(value: VideoCodec) = when(value) { VideoCodec.AUTOMATIC -> "Automatic"; VideoCodec.H264 -> "H.264"; VideoCodec.COPY -> "Copy compatible streams" }
-private fun audioCodec(value: AudioCodec) = when(value) { AudioCodec.AUTOMATIC -> "Automatic"; AudioCodec.AAC -> "AAC"; AudioCodec.MP3 -> "MP3"; AudioCodec.PCM_S16LE -> "PCM 16-bit"; AudioCodec.FLAC -> "FLAC"; AudioCodec.COPY -> "Copy compatible streams" }
+private fun videoCodec(value: VideoCodec) = when(value) {
+    VideoCodec.AUTOMATIC -> "Automatic"
+    VideoCodec.H264 -> "H.264"
+    VideoCodec.HEVC -> "HEVC / H.265"
+    VideoCodec.AV1 -> "AV1"
+    VideoCodec.VP8 -> "VP8"
+    VideoCodec.VP9 -> "VP9"
+    VideoCodec.MPEG4 -> "MPEG-4 Part 2"
+    VideoCodec.FFV1 -> "FFV1"
+    VideoCodec.MJPEG -> "MJPEG"
+    VideoCodec.COPY -> "Copy compatible streams"
+}
+private fun audioCodec(value: AudioCodec) = when(value) {
+    AudioCodec.AUTOMATIC -> "Automatic"
+    AudioCodec.AAC -> "AAC-LC"
+    AudioCodec.MP3 -> "MP3"
+    AudioCodec.PCM_S16LE -> "PCM 16-bit"
+    AudioCodec.PCM -> "PCM"
+    AudioCodec.FLAC -> "FLAC"
+    AudioCodec.ALAC -> "ALAC"
+    AudioCodec.OPUS -> "Opus"
+    AudioCodec.VORBIS -> "Vorbis"
+    AudioCodec.AC3 -> "AC-3"
+    AudioCodec.EAC3 -> "E-AC-3"
+    AudioCodec.WAVPACK -> "WavPack"
+    AudioCodec.WMA -> "WMA"
+    AudioCodec.HE_AAC -> "HE-AAC"
+    AudioCodec.AMR_NB -> "AMR-NB"
+    AudioCodec.AMR_WB -> "AMR-WB"
+    AudioCodec.COPY -> "Copy compatible streams"
+}
+private fun audioLayout(value: AudioLayout) = when(value) {
+    AudioLayout.ORIGINAL -> "Original"
+    AudioLayout.MONO -> "Mono"
+    AudioLayout.STEREO -> "Stereo"
+    AudioLayout.SURROUND51 -> "5.1 · back surrounds"
+    AudioLayout.SURROUND51_SIDE -> "5.1 · side surrounds"
+    AudioLayout.SURROUND71 -> "7.1 · side and back surrounds"
+}
+private fun audioPrecision(value: AudioPrecision) = when(value) {
+    AudioPrecision.ORIGINAL -> "Original"
+    AudioPrecision.PCM8 -> "8-bit integer PCM"
+    AudioPrecision.PCM16 -> "16-bit integer PCM"
+    AudioPrecision.PCM24 -> "24-bit integer PCM"
+    AudioPrecision.PCM32 -> "32-bit integer PCM"
+    AudioPrecision.FLOAT32 -> "32-bit floating point"
+    AudioPrecision.FLOAT64 -> "64-bit floating point"
+}
 private fun duration(value: Long): String { val seconds = value.coerceAtLeast(0) / 1_000_000; return "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}" }
 private fun bytes(value: Long): String = formatByteCount(value.toULong())

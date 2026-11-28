@@ -239,36 +239,52 @@ fn video_dimensions(
     Ok((out_w, out_h))
 }
 
-pub(crate) fn h264_dimensions(
-    video: &VideoInfo,
-    size: VideoSize,
-) -> Result<(u32, u32), EngineError> {
-    validate_h264(video, scaled_video_dimensions(video, size)?)
-}
-pub(crate) fn configured_h264_dimensions(
+/// The selected pixel representation determines chroma alignment. RGB and
+/// 4:4:4 encoders do not inherit an unrelated 4:2:0 even-dimension restriction.
+pub(crate) fn configured_encoding_dimensions(
     video: &VideoInfo,
     config: &ConversionConfig,
+    pixel: &str,
 ) -> Result<(u32, u32), EngineError> {
-    validate_h264(video, configured_video_dimensions(video, config)?)
-}
-fn validate_h264(video: &VideoInfo, dimensions: (u32, u32)) -> Result<(u32, u32), EngineError> {
-    if video.width.is_some_and(|w| w > 16384)
-        || video.height.is_some_and(|h| h > 16384)
-        || video
-            .width
-            .zip(video.height)
-            .is_some_and(|(w, h)| u64::from(w) * u64::from(h) > 64 * 1024 * 1024)
-    {
+    use crate::ffmpeg::sys;
+    if video.width.zip(video.height).is_none_or(|(width, height)| {
+        width == 0
+            || height == 0
+            || width > 16384
+            || height > 16384
+            || u64::from(width) * u64::from(height) > 64 * 1024 * 1024
+    }) {
         return Err(invalid(
             "The source geometry exceeds this processing route's limits.",
         ));
     }
-    if dimensions.0 < 2
-        || dimensions.1 < 2
-        || !dimensions.0.is_multiple_of(2)
-        || !dimensions.1.is_multiple_of(2)
-    {
-        return Err(invalid("H.264 requires even dimensions. Choose explicit custom bounds or compatible stream copying."));
+    let dimensions = configured_video_dimensions(video, config)?;
+    let pixel = std::ffi::CString::new(pixel)
+        .map_err(|_| invalid("The encoder pixel representation is invalid."))?;
+    // The descriptor is an immutable FFmpeg-owned scalar declaration.
+    unsafe {
+        let descriptor = sys::av_pix_fmt_desc_get(sys::av_get_pix_fmt(pixel.as_ptr()));
+        if descriptor.is_null() {
+            return Err(invalid("The encoder pixel representation is unknown."));
+        }
+        let horizontal = 1u32
+            .checked_shl(u32::from((*descriptor).log2_chroma_w))
+            .unwrap_or(0);
+        let vertical = 1u32
+            .checked_shl(u32::from((*descriptor).log2_chroma_h))
+            .unwrap_or(0);
+        if dimensions.0 < 2
+            || dimensions.1 < 2
+            || dimensions.0 > 16384
+            || dimensions.1 > 16384
+            || u64::from(dimensions.0) * u64::from(dimensions.1) > 64 * 1024 * 1024
+            || horizontal == 0
+            || vertical == 0
+            || !dimensions.0.is_multiple_of(horizontal)
+            || !dimensions.1.is_multiple_of(vertical)
+        {
+            return Err(invalid("This encoder requires aligned dimensions. Choose explicit custom bounds or compatible copying."));
+        }
     }
     Ok(dimensions)
 }

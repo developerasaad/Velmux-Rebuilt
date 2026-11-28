@@ -200,6 +200,121 @@ unsafe fn copy_side_data(
     Ok(())
 }
 
+/// Supply static HDR metadata before encoder initialization. The packet and
+/// frame representations use the same documented payload structs, but their
+/// enum types and allocation ownership are different.
+unsafe fn copy_hdr_encoder_side_data(
+    from: *const sys::AVCodecParameters,
+    to: *mut sys::AVCodecContext,
+    strip_hdr: bool,
+) -> Result<(), EngineError> {
+    if strip_hdr {
+        return Ok(());
+    }
+    if (*from).nb_coded_side_data < 0
+        || (*from).nb_coded_side_data > 1024
+        || (*from).nb_coded_side_data > 0 && (*from).coded_side_data.is_null()
+    {
+        return Err(EngineError::InvalidMedia {
+            detail: "The source HDR side-data declaration is invalid.".into(),
+        });
+    }
+    for index in 0..(*from).nb_coded_side_data {
+        let source = &*(*from).coded_side_data.add(index as usize);
+        let (kind, size) = match source.type_ {
+            sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA => (
+                sys::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
+                std::mem::size_of::<sys::AVMasteringDisplayMetadata>(),
+            ),
+            sys::AV_PKT_DATA_CONTENT_LIGHT_LEVEL => (
+                sys::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+                std::mem::size_of::<sys::AVContentLightMetadata>(),
+            ),
+            _ => continue,
+        };
+        if source.data.is_null() || source.size < size {
+            return Err(EngineError::InvalidMedia {
+                detail: "The source HDR metadata payload is incomplete.".into(),
+            });
+        }
+        if !sys::av_frame_side_data_get_c(
+            (*to).decoded_side_data.cast(),
+            (*to).nb_decoded_side_data,
+            kind,
+        )
+        .is_null()
+        {
+            return Err(EngineError::InvalidMedia {
+                detail: "The source declares duplicate static HDR metadata.".into(),
+            });
+        }
+        if kind == sys::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA {
+            let metadata =
+                ptr::read_unaligned(source.data.cast::<sys::AVMasteringDisplayMetadata>());
+            let valid_coordinate =
+                |value: sys::AVRational| value.den > 0 && value.num >= 0 && value.num <= value.den;
+            let valid_luminance = |value: sys::AVRational| {
+                value.den > 0
+                    && value.num >= 0
+                    && u64::from(value.num as u32) * 10_000
+                        <= u64::from(u32::MAX) * value.den as u64
+            };
+            if metadata.has_primaries != 0
+                && (!metadata
+                    .display_primaries
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .all(valid_coordinate)
+                    || !metadata.white_point.iter().copied().all(valid_coordinate))
+                || metadata.has_luminance != 0
+                    && (!valid_luminance(metadata.min_luminance)
+                        || !valid_luminance(metadata.max_luminance)
+                        || i64::from(metadata.min_luminance.num)
+                            * i64::from(metadata.max_luminance.den)
+                            > i64::from(metadata.max_luminance.num)
+                                * i64::from(metadata.min_luminance.den))
+            {
+                return Err(EngineError::InvalidMedia {
+                    detail: "The source mastering-display metadata contains invalid values.".into(),
+                });
+            }
+            // The pinned x265 wrapper consumes every field without consulting
+            // these flags. Reject incomplete input rather than inventing the
+            // missing chromaticities/luminance or passing invalid rationals.
+            if (*to).codec_id == sys::AV_CODEC_ID_HEVC
+                && (metadata.has_primaries == 0 || metadata.has_luminance == 0)
+            {
+                return Err(EngineError::UnsupportedMedia {
+                    detail: "This HEVC encoder cannot faithfully preserve incomplete mastering-display metadata. Use compatible stream copying or a supported representation.".into(),
+                });
+            }
+        } else {
+            let metadata = ptr::read_unaligned(source.data.cast::<sys::AVContentLightMetadata>());
+            if metadata.MaxCLL > u32::from(u16::MAX) || metadata.MaxFALL > u32::from(u16::MAX) {
+                return Err(EngineError::InvalidMedia {
+                    detail: "The source content-light metadata exceeds its encoded bounds.".into(),
+                });
+            }
+        }
+        // FFmpeg allocates a fresh reference-counted buffer. The encoder
+        // context owns this array on success and avcodec_free_context releases
+        // it on every initialization/error path; no source buffer is borrowed.
+        let destination = sys::av_frame_side_data_new(
+            &mut (*to).decoded_side_data,
+            &mut (*to).nb_decoded_side_data,
+            kind,
+            size,
+            0,
+        );
+        if destination.is_null() {
+            return Err(failure(-libc::ENOMEM, "Encode"));
+        }
+        ptr::copy_nonoverlapping(source.data, (*destination).data, size);
+    }
+    Ok(())
+}
+
 struct TransformContext<'a> {
     config: &'a crate::ConversionConfig,
     global: bool,
@@ -303,7 +418,21 @@ unsafe fn make_transform(
         (*enc).flags |= sys::AV_CODEC_FLAG_FRAME_DURATION as i32;
         (*enc).width = plan.width.unwrap() as i32;
         (*enc).height = plan.height.unwrap() as i32;
-        (*enc).pix_fmt = sys::AV_PIX_FMT_YUV420P;
+        (*enc).pix_fmt = if let Some(settings) = &plan.encoding {
+            let name = text(
+                settings
+                    .pixel_format
+                    .as_deref()
+                    .ok_or_else(|| failure(-libc::EINVAL, "Encode"))?,
+            )?;
+            let format = sys::av_get_pix_fmt(name.as_ptr());
+            if format == sys::AV_PIX_FMT_NONE {
+                return Err(failure(-libc::EINVAL, "Encode"));
+            }
+            format
+        } else {
+            sys::AV_PIX_FMT_YUV420P
+        };
         let source_sar =
             if (*input).sample_aspect_ratio.num > 0 && (*input).sample_aspect_ratio.den > 0 {
                 (*input).sample_aspect_ratio
@@ -355,68 +484,131 @@ unsafe fn make_transform(
             (*enc).colorspace = sys::AVCOL_SPC_BT709;
             (*enc).color_range = sys::AVCOL_RANGE_MPEG;
         }
-        check(
-            sys::av_opt_set(
-                (*enc).priv_data,
-                c"preset".as_ptr(),
-                c"veryfast".as_ptr(),
-                0,
-            ),
-            "Encode",
-        )?;
-        check(
-            sys::av_opt_set(
-                (*enc).priv_data,
-                c"crf".as_ptr(),
-                text(&config.quality.to_string())?.as_ptr(),
-                0,
-            ),
-            "Encode",
-        )?;
+        if let Some(settings) = &plan.encoding {
+            // Values were resolved by the core before acceptance. These options
+            // belong to FFmpeg's context or encoder, never external user input.
+            if let Some(space) = &settings.color_space {
+                check(
+                    sys::av_opt_set_int(
+                        enc.cast(),
+                        c"colorspace".as_ptr(),
+                        i64::from(sys::av_color_space_from_name(text(space)?.as_ptr())),
+                        0,
+                    ),
+                    "Encode",
+                )?;
+            }
+            if let Some(range) = &settings.color_range {
+                check(
+                    sys::av_opt_set_int(
+                        enc.cast(),
+                        c"color_range".as_ptr(),
+                        i64::from(sys::av_color_range_from_name(text(range)?.as_ptr())),
+                        0,
+                    ),
+                    "Encode",
+                )?;
+            }
+            if settings.codec == "mpeg4" && (*enc).time_base.den > 65535 {
+                // MPEG-4 Part 2 stores a 16-bit time increment resolution.
+                // Preserve presentation times on a sufficiently fine legal base.
+                (*enc).time_base = sys::AVRational { num: 1, den: 60000 };
+            }
+        } else {
+            // Already accepted M2 plans retain their original encoding policy.
+            check(
+                sys::av_opt_set(
+                    (*enc).priv_data,
+                    c"preset".as_ptr(),
+                    c"veryfast".as_ptr(),
+                    0,
+                ),
+                "Encode",
+            )?;
+            check(
+                sys::av_opt_set(
+                    (*enc).priv_data,
+                    c"crf".as_ptr(),
+                    text(&config.quality.to_string())?.as_ptr(),
+                    0,
+                ),
+                "Encode",
+            )?;
+        }
     } else {
         (*enc).sample_rate = plan.sample_rate.unwrap() as i32;
         let channels = plan.channels.unwrap() as i32;
-        if config.channels.is_none() && channels == (*dec).ch_layout.nb_channels {
+        if let Some(settings) = &plan.encoding {
+            let layout = text(
+                settings
+                    .channel_layout
+                    .as_deref()
+                    .ok_or_else(|| failure(-libc::EINVAL, "Encode"))?,
+            )?;
             check(
-                sys::av_channel_layout_copy(&mut (*enc).ch_layout, &(*dec).ch_layout),
+                sys::av_channel_layout_from_string(&mut (*enc).ch_layout, layout.as_ptr()),
                 "Encode",
             )?;
-        } else {
-            sys::av_channel_layout_default(&mut (*enc).ch_layout, channels);
-        }
-        (*enc).sample_fmt = if plan.expected_codec == "pcm_s16le" {
-            sys::AV_SAMPLE_FMT_S16
-        } else if plan.expected_codec == "flac" {
-            let precision = plan.bit_depth.unwrap_or_else(|| {
-                let coded = sys::av_get_bits_per_sample((*dec).codec_id);
-                if (*dec).bits_per_raw_sample > 0 {
-                    (*dec).bits_per_raw_sample as u32
-                } else if coded > 0 {
-                    coded as u32
-                } else {
-                    24
-                }
-            });
-            if !(1..=24).contains(&precision) {
-                return Err(EngineError::Configuration {
-                    detail: "FLAC encoding requires a supported precision of at most 24 bits."
-                        .into(),
-                });
+            if (*enc).ch_layout.nb_channels != channels {
+                return Err(failure(-libc::EINVAL, "Encode"));
             }
-            (*enc).bits_per_raw_sample = precision as i32;
-            if precision > 16 {
-                sys::AV_SAMPLE_FMT_S32
+            let sample = text(
+                settings
+                    .sample_format
+                    .as_deref()
+                    .ok_or_else(|| failure(-libc::EINVAL, "Encode"))?,
+            )?;
+            (*enc).sample_fmt = sys::av_get_sample_fmt(sample.as_ptr());
+            if (*enc).sample_fmt == sys::AV_SAMPLE_FMT_NONE {
+                return Err(failure(-libc::EINVAL, "Encode"));
+            }
+            if let Some(depth) = settings.bit_depth {
+                (*enc).bits_per_raw_sample = depth as i32;
+            }
+        } else {
+            if config.channels.is_none() && channels == (*dec).ch_layout.nb_channels {
+                check(
+                    sys::av_channel_layout_copy(&mut (*enc).ch_layout, &(*dec).ch_layout),
+                    "Encode",
+                )?;
             } else {
-                sys::AV_SAMPLE_FMT_S16
+                sys::av_channel_layout_default(&mut (*enc).ch_layout, channels);
             }
-        } else {
-            sys::AV_SAMPLE_FMT_FLTP
-        };
+            (*enc).sample_fmt = if plan.expected_codec == "pcm_s16le" {
+                sys::AV_SAMPLE_FMT_S16
+            } else if plan.expected_codec == "flac" {
+                let precision = plan.bit_depth.unwrap_or_else(|| {
+                    let coded = sys::av_get_bits_per_sample((*dec).codec_id);
+                    if (*dec).bits_per_raw_sample > 0 {
+                        (*dec).bits_per_raw_sample as u32
+                    } else if coded > 0 {
+                        coded as u32
+                    } else {
+                        24
+                    }
+                });
+                if !(1..=24).contains(&precision) {
+                    return Err(EngineError::Configuration {
+                        detail: "FLAC encoding requires a supported precision of at most 24 bits."
+                            .into(),
+                    });
+                }
+                (*enc).bits_per_raw_sample = precision as i32;
+                if precision > 16 {
+                    sys::AV_SAMPLE_FMT_S32
+                } else {
+                    sys::AV_SAMPLE_FMT_S16
+                }
+            } else {
+                sys::AV_SAMPLE_FMT_FLTP
+            };
+        }
         (*enc).time_base = sys::AVRational {
             num: 1,
             den: (*enc).sample_rate,
         };
-        if plan.expected_codec == "aac" || plan.expected_codec == "mp3" {
+        if plan.encoding.is_none() && (plan.expected_codec == "aac" || plan.expected_codec == "mp3")
+        {
             (*enc).bit_rate = i64::from(config.audio_bitrate.unwrap_or_else(|| {
                 crate::configuration::automatic_audio_bitrate(
                     &plan.expected_codec,
@@ -425,6 +617,32 @@ unsafe fn make_transform(
                 )
             }));
         }
+    }
+    if let Some(settings) = &plan.encoding {
+        if let Some(rate) = settings.bit_rate {
+            (*enc).bit_rate = i64::try_from(rate).map_err(|_| failure(-libc::EINVAL, "Encode"))?;
+        }
+        if let Some(qscale) = settings.qscale {
+            (*enc).flags |= sys::AV_CODEC_FLAG_QSCALE as i32;
+            (*enc).global_quality = i32::try_from(qscale)
+                .ok()
+                .and_then(|value| value.checked_mul(sys::FF_QP2LAMBDA as i32))
+                .ok_or_else(|| failure(-libc::EINVAL, "Encode"))?;
+        }
+        for option in &settings.options {
+            check(
+                sys::av_opt_set(
+                    enc.cast(),
+                    text(&option.key)?.as_ptr(),
+                    text(&option.value)?.as_ptr(),
+                    sys::AV_OPT_SEARCH_CHILDREN as i32,
+                ),
+                "Encode",
+            )?;
+        }
+    }
+    if is_video {
+        copy_hdr_encoder_side_data((*input).codecpar, enc, transform.tone_map)?;
     }
     let opened = sys::avcodec_open2(enc, encoder_codec, ptr::null_mut());
     if opened < 0 {
@@ -496,14 +714,34 @@ unsafe fn make_transform(
         } else {
             ""
         };
+        let pixel_name = sys::av_get_pix_fmt_name((*enc).pix_fmt);
+        if pixel_name.is_null() {
+            return Err(failure(-libc::EINVAL, "Filter"));
+        }
+        let mut color = String::new();
+        if let Some(settings) = &plan.encoding {
+            if let Some(space) = &settings.color_space {
+                // The scale option aliases are not av_color_space_name names
+                // (notably bt2020nc and smpte170m). Use the accepted enum value.
+                let matrix = sys::av_color_space_from_name(text(space)?.as_ptr());
+                if matrix < 0 {
+                    return Err(failure(-libc::EINVAL, "Filter"));
+                }
+                color.push_str(&format!(":out_color_matrix={matrix}"));
+            }
+            if let Some(range) = &settings.color_range {
+                color.push_str(&format!(":out_range={range}"));
+            }
+        }
         (
             "buffer",
             "buffersink",
             args,
             format!(
-                "{trim}{tone}scale={}:{}:flags=bicubic,format=pix_fmts=yuv420p{fps}",
+                "{trim}{tone}scale={}:{}:flags=bicubic{color},format=pix_fmts={}{fps}",
                 (*enc).width,
-                (*enc).height
+                (*enc).height,
+                CStr::from_ptr(pixel_name).to_string_lossy()
             ),
         )
     } else {
@@ -677,7 +915,19 @@ impl Transform {
             (*frame.0).duration = if (*self.encoder).codec_type == sys::AVMEDIA_TYPE_VIDEO
                 && self.constant_video_rate
             {
-                1
+                let rate = (*self.encoder).framerate;
+                if rate.num <= 0 || rate.den <= 0 {
+                    return Err(failure(-libc::EINVAL, "Encode"));
+                }
+                sys::av_rescale_q(
+                    1,
+                    sys::AVRational {
+                        num: rate.den,
+                        den: rate.num,
+                    },
+                    (*self.encoder).time_base,
+                )
+                .max(1)
             } else if (*frame.0).duration > 0 {
                 sys::av_rescale_q(
                     (*frame.0).duration,
@@ -702,6 +952,9 @@ impl Transform {
                 (*frame.0).color_trc = sys::AVCOL_TRC_BT709;
                 (*frame.0).colorspace = sys::AVCOL_SPC_BT709;
                 (*frame.0).color_range = sys::AVCOL_RANGE_MPEG;
+            }
+            if (*self.encoder).flags & sys::AV_CODEC_FLAG_QSCALE as i32 != 0 {
+                (*frame.0).quality = (*self.encoder).global_quality;
             }
             let result = sys::avcodec_send_frame(self.encoder, frame.0);
             sys::av_frame_unref(frame.0);
@@ -1120,6 +1373,114 @@ pub(crate) fn convert(
 #[cfg(test)]
 mod timestamp_tests {
     use super::*;
+
+    struct HdrFixture {
+        source: *mut sys::AVCodecParameters,
+        encoder: *mut sys::AVCodecContext,
+    }
+    impl HdrFixture {
+        fn new() -> Self {
+            let fixture = unsafe {
+                Self {
+                    source: sys::avcodec_parameters_alloc(),
+                    encoder: sys::avcodec_alloc_context3(ptr::null()),
+                }
+            };
+            assert!(!fixture.source.is_null() && !fixture.encoder.is_null());
+            fixture
+        }
+        unsafe fn add<T>(&self, kind: sys::AVPacketSideDataType, value: &T) -> *mut u8 {
+            let side = sys::av_packet_side_data_new(
+                &mut (*self.source).coded_side_data,
+                &mut (*self.source).nb_coded_side_data,
+                kind,
+                std::mem::size_of::<T>(),
+                0,
+            );
+            assert!(!side.is_null());
+            ptr::copy_nonoverlapping(
+                (value as *const T).cast::<u8>(),
+                (*side).data,
+                std::mem::size_of::<T>(),
+            );
+            (*side).data
+        }
+    }
+    impl Drop for HdrFixture {
+        fn drop(&mut self) {
+            unsafe {
+                sys::avcodec_parameters_free(&mut self.source);
+                sys::avcodec_free_context(&mut self.encoder);
+            }
+        }
+    }
+
+    #[test]
+    fn hdr_encoder_initialization_owns_independent_static_metadata() {
+        let fixture = HdrFixture::new();
+        unsafe {
+            (*fixture.encoder).codec_id = sys::AV_CODEC_ID_HEVC;
+            let mut mastering: sys::AVMasteringDisplayMetadata = std::mem::zeroed();
+            mastering.display_primaries = [[sys::AVRational { num: 1, den: 2 }; 2]; 3];
+            mastering.white_point = [sys::AVRational { num: 1, den: 2 }; 2];
+            mastering.min_luminance = sys::AVRational { num: 1, den: 10000 };
+            mastering.max_luminance = sys::AVRational { num: 1000, den: 1 };
+            mastering.has_primaries = 1;
+            mastering.has_luminance = 1;
+            fixture.add(sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA, &mastering);
+            let source_light = fixture.add(
+                sys::AV_PKT_DATA_CONTENT_LIGHT_LEVEL,
+                &sys::AVContentLightMetadata {
+                    MaxCLL: 1000,
+                    MaxFALL: 400,
+                },
+            );
+            copy_hdr_encoder_side_data(fixture.source, fixture.encoder, false).unwrap();
+            assert_eq!((*fixture.encoder).nb_decoded_side_data, 2);
+            let copied = sys::av_frame_side_data_get_c(
+                (*fixture.encoder).decoded_side_data.cast(),
+                (*fixture.encoder).nb_decoded_side_data,
+                sys::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL,
+            );
+            assert!(!copied.is_null());
+            assert_ne!((*copied).data, source_light);
+            ptr::write_unaligned(
+                source_light.cast::<sys::AVContentLightMetadata>(),
+                sys::AVContentLightMetadata {
+                    MaxCLL: 2000,
+                    MaxFALL: 800,
+                },
+            );
+            let light = ptr::read_unaligned((*copied).data.cast::<sys::AVContentLightMetadata>());
+            assert_eq!((light.MaxCLL, light.MaxFALL), (1000, 400));
+            // Cleanup also exercises an encoder context that was never opened.
+        }
+    }
+
+    #[test]
+    fn malformed_hdr_is_rejected_and_tone_mapping_excludes_static_hdr() {
+        let fixture = HdrFixture::new();
+        unsafe {
+            fixture.add(sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA, &0u8);
+            copy_hdr_encoder_side_data(fixture.source, fixture.encoder, true).unwrap();
+            assert_eq!((*fixture.encoder).nb_decoded_side_data, 0);
+            assert!(matches!(
+                copy_hdr_encoder_side_data(fixture.source, fixture.encoder, false),
+                Err(EngineError::InvalidMedia { .. })
+            ));
+        }
+        let fixture = HdrFixture::new();
+        unsafe {
+            let mut mastering: sys::AVMasteringDisplayMetadata = std::mem::zeroed();
+            mastering.has_primaries = 1;
+            fixture.add(sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA, &mastering);
+            assert!(matches!(
+                copy_hdr_encoder_side_data(fixture.source, fixture.encoder, false),
+                Err(EngineError::InvalidMedia { .. })
+            ));
+            assert_eq!((*fixture.encoder).nb_decoded_side_data, 0);
+        }
+    }
 
     #[test]
     fn common_positive_origin_retains_relative_offsets_and_encoder_delay() {

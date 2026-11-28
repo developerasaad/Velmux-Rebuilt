@@ -44,13 +44,13 @@ mod tests {
     #[test]
     fn explicit_representations_match_the_canonical_media_catalog() {
         for format in [
-            OutputFormat::Mp4,
-            OutputFormat::Matroska,
-            OutputFormat::M4a,
-            OutputFormat::Wav,
-            OutputFormat::Flac,
-            OutputFormat::Mp3,
-        ] {
+            super::super::Operation::VideoConverter,
+            super::super::Operation::AudioConverter,
+        ]
+        .into_iter()
+        .flat_map(super::super::catalog::product_formats)
+        .filter(|format| *format != OutputFormat::Original)
+        {
             let output = OutputRepresentation::from_format(format);
             output.validate().unwrap();
             assert_eq!(output.extension, format.extension());
@@ -60,6 +60,9 @@ mod tests {
 
     #[test]
     fn persisted_output_descriptors_cannot_select_arbitrary_paths_or_muxers() {
+        assert!(OutputRepresentation::from_format(OutputFormat::Original)
+            .validate()
+            .is_err());
         for extension in ["../mp4", "mp4/escape", ".mp4", "mp4\0", "", "MP4"] {
             let mut output = OutputRepresentation::from_format(OutputFormat::Mp4);
             output.extension = extension.into();

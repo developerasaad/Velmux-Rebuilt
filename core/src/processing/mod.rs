@@ -1,3 +1,4 @@
+pub(crate) mod encoding;
 mod transcode;
 
 use crate::{configuration::*, ffmpeg::sys, EngineError, MediaInfo, StreamKind};
@@ -20,6 +21,8 @@ pub(crate) struct StreamPlan {
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
     pub bit_depth: Option<u32>,
+    #[serde(default)]
+    pub encoding: Option<encoding::EncodingSettings>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -172,6 +175,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             sample_rate: None,
             channels: None,
             bit_depth: None,
+            encoding: None,
         });
     }
     if let Some(stream) = audio {
@@ -205,6 +209,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             sample_rate: Some(rate),
             channels: Some(channels),
             bit_depth: None,
+            encoding: None,
         });
     }
     if streams.is_empty() {
@@ -247,6 +252,8 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
         custom_width: None,
         custom_height: None,
         custom_frame_rate: None,
+        audio_precision: None,
+        channel_layout: None,
     };
     Ok(Plan {
         output: Some(OutputRepresentation::from_format(config.format)),
@@ -302,10 +309,14 @@ pub(crate) fn validate_operation(
 pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, EngineError> {
     validate_fields(config)?;
     validate_operation(info, config.operation)?;
-    if !info.chapters.is_empty() && config.format != OutputFormat::Matroska {
-        return Err(invalid(
-            "Choose Matroska to preserve this source's chapters with the current converter route.",
-        ));
+    let format = resolve_format(info, config)?;
+    let mut resolved = config.clone();
+    resolved.format = format;
+    // Original remains immutable user intent; compatibility is evaluated against
+    // its actual resolved representation before a job can be accepted.
+    validate_fields(&resolved)?;
+    if !info.chapters.is_empty() && format != OutputFormat::Matroska {
+        return Err(invalid("Choose Matroska to preserve the source chapters."));
     }
     if !info
         .streams
@@ -314,19 +325,35 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
         && (!matches!(config.audio_codec, AudioCodec::Automatic | AudioCodec::Copy)
             || config.audio_bitrate.is_some()
             || config.sample_rate.is_some()
-            || config.channels.is_some())
+            || config.channels.is_some()
+            || config
+                .channel_layout
+                .is_some_and(|layout| layout != AudioLayout::Original)
+            || config
+                .audio_precision
+                .is_some_and(|precision| precision != AudioPrecision::Original))
     {
         return Err(invalid(
-            "This source has no audio stream to apply these audio settings to.",
+            "This source has no audio stream to apply these settings to.",
         ));
     }
-    let muxer_name = CString::new(config.format.muxer()).unwrap();
+    let muxer_name = CString::new(format.muxer()).unwrap();
     let muxer =
         unsafe { sys::av_guess_format(muxer_name.as_ptr(), std::ptr::null(), std::ptr::null()) };
     if muxer.is_null() {
         return Err(invalid(
             "The selected output format is unavailable in this build.",
         ));
+    }
+    if format == OutputFormat::Flv
+        && info
+            .streams
+            .iter()
+            .filter(|stream| stream.kind == StreamKind::Audio)
+            .count()
+            > 1
+    {
+        return Err(invalid("FLV supports one audio track. Preserve all tracks in another container or explicitly choose the intended tracks."));
     }
     let mut streams = Vec::new();
     for stream in &info.streams {
@@ -339,9 +366,13 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             sample_rate: None,
             channels: None,
             bit_depth: None,
+            encoding: None,
         };
         if stream.kind == StreamKind::Video
-            && !stream.video.as_ref().is_some_and(|v| v.attached_picture)
+            && !stream
+                .video
+                .as_ref()
+                .is_some_and(|video| video.attached_picture)
         {
             let video = stream
                 .video
@@ -353,136 +384,89 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             let transform =
                 size_change || config.frame_rate != FrameRate::Original || config.quality != 23;
             if config.video_codec == VideoCodec::Copy && transform {
-                return Err(invalid(
-                    "The selected video settings require encoding; use Automatic or H.264.",
-                ));
+                return Err(invalid("These video settings require encoding. Choose an applicable codec or Automatic."));
             }
-            let copy_compatible =
+            let compatible =
                 unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
-            let encode = config.video_codec == VideoCodec::H264
-                || (config.video_codec == VideoCodec::Automatic && (transform || !copy_compatible));
+            let encode = !matches!(config.video_codec, VideoCodec::Automatic | VideoCodec::Copy)
+                || config.video_codec == VideoCodec::Automatic && (transform || !compatible);
             if encode {
                 if !stream.decoder_available {
                     return Err(invalid(
-                        "This source requires a video decoder that is unavailable.",
+                        "This source requires an unavailable video decoder.",
                     ));
                 }
-                if video.bit_depth.is_some_and(|depth| depth > 8)
-                    || video.mastering_display.is_some()
-                    || video.content_light.is_some()
-                    || video
-                        .color_transfer
+                let settings =
+                    video_encoding_settings(format, config.video_codec, video, config.quality)?;
+                let dimensions = configured_encoding_dimensions(
+                    video,
+                    config,
+                    settings
+                        .pixel_format
                         .as_deref()
-                        .is_some_and(|v| matches!(v, "smpte2084" | "arib-std-b67"))
-                {
-                    return Err(invalid("The current H.264 encoding route cannot preserve this source's high bit depth or HDR. Use compatible stream copying; HDR conversion will be added later."));
-                }
-                let (out_w, out_h) = configured_h264_dimensions(video, config)?;
-                crate::ffmpeg::encoders::require_video_format("libx264", "yuv420p")?;
-                item.encoder = Some("libx264".into());
-                item.expected_codec = "h264".into();
-                item.width = Some(out_w);
-                item.height = Some(out_h);
+                        .ok_or_else(|| invalid("The encoder pixel representation is missing."))?,
+                )?;
+                item.encoder = Some(settings.encoder.clone());
+                item.expected_codec = settings.codec.clone();
+                item.width = Some(dimensions.0);
+                item.height = Some(dimensions.1);
+                item.bit_depth = settings.bit_depth;
+                item.encoding = Some(settings);
             }
         } else if stream.kind == StreamKind::Audio {
             let audio = stream
                 .audio
                 .as_ref()
                 .ok_or_else(|| invalid("Audio properties could not be inspected."))?;
-            let desired = crate::configuration::audio_target(config.format);
-            let encoder = if desired == "mp3" {
-                "libmp3lame"
-            } else {
-                desired
-            };
-            let transform = audio_transform_requested(stream, config);
-            let compatible = (unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) })
+            let compatible = unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }
                 > 0
-                && audio_copy_allowed(config.format, &stream.codec);
-            if config.audio_codec == AudioCodec::Copy && transform {
-                return Err(invalid(
-                    "The selected audio settings require encoding; choose a compatible encoder.",
-                ));
+                && audio_copy_allowed(format, &stream.codec);
+            if config.audio_codec == AudioCodec::Copy && audio_transform_requested(stream, config) {
+                return Err(invalid("These audio settings require encoding. Choose an applicable codec or Automatic."));
             }
-            let encode = crate::configuration::audio_encoding_required(stream, config, compatible);
-            if encode {
+            if config
+                .audio_precision
+                .is_some_and(|precision| precision != AudioPrecision::Original)
+            {
+                let target = if config.audio_codec == AudioCodec::Automatic && compatible {
+                    stream.codec.as_str()
+                } else {
+                    resolve_audio_codec(format, config.audio_codec, stream)?
+                        .codec_name()
+                        .unwrap_or("")
+                };
+                if !target.starts_with("pcm_") && !matches!(target, "flac" | "alac" | "wavpack") {
+                    return Err(invalid("Sample precision applies to PCM and supported lossless encoders. Reset precision or choose an applicable codec."));
+                }
+            }
+            if audio_encoding_required(stream, config, compatible) {
                 if !stream.decoder_available {
                     return Err(invalid(
-                        "This source requires an audio decoder that is unavailable.",
+                        "This source requires an unavailable audio decoder.",
                     ));
                 }
+                let codec = resolve_audio_codec(format, config.audio_codec, stream)?;
                 let rate = config
                     .sample_rate
                     .or(audio.sample_rate)
                     .ok_or_else(|| invalid("The source sample rate is unknown."))?;
-                let channels = config
-                    .channels
-                    .or(audio.channels)
-                    .ok_or_else(|| invalid("The source channel layout is unknown."))?;
-                if channels == 0 || channels > 8 || !(8000..=192000).contains(&rate) {
-                    return Err(invalid("The selected sampling or channel layout is outside this route's supported range."));
-                }
-                if desired == "aac"
-                    && ![
-                        8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200,
-                        96000,
-                    ]
-                    .contains(&rate)
-                {
-                    return Err(invalid(
-                        "AAC cannot use this sample rate. Select 44.1 or 48 kHz.",
-                    ));
-                }
-                if desired == "mp3"
-                    && (channels > 2
-                        || ![8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000]
-                            .contains(&rate))
-                {
-                    return Err(invalid("MP3 requires a supported sample rate and Mono or Stereo channels. Choose explicit conversion settings."));
-                }
-                if config.audio_bitrate.is_some_and(|bitrate| {
-                    !crate::configuration::audio_bitrate_supported(desired, rate, channels, bitrate)
-                }) {
-                    return Err(invalid("This audio bitrate cannot be encoded at the selected sample rate and channel count. Choose an applicable bitrate or Automatic."));
-                }
-                if desired == "flac" {
-                    if audio.bit_depth.is_some_and(|depth| depth > 24) {
-                        return Err(invalid("This FLAC encoding route preserves up to 24-bit integer precision. The source requires greater precision; choose another compatible representation."));
-                    }
-                    // A decoded lossy source may not have a meaningful coded
-                    // precision. Use 24-bit FLAC instead of silently choosing 16.
-                    item.bit_depth = Some(audio.bit_depth.unwrap_or(24));
-                }
-                let sample = if desired == "pcm_s16le"
-                    || desired == "flac" && item.bit_depth.is_some_and(|depth| depth <= 16)
-                {
-                    "s16"
-                } else if desired == "flac" {
-                    "s32"
-                } else {
-                    "fltp"
-                };
-                let layout = if config.channels.is_some()
-                    || audio
-                        .channel_layout
-                        .as_deref()
-                        .is_none_or(|layout| layout == "1 channels" || layout == "2 channels")
-                {
-                    if channels == 1 {
-                        "mono"
-                    } else if channels == 2 {
-                        "stereo"
-                    } else {
-                        ""
-                    }
-                } else {
-                    audio.channel_layout.as_deref().unwrap()
-                };
-                crate::ffmpeg::encoders::require_audio_format(encoder, sample, rate, layout)?;
-                item.encoder = Some(encoder.into());
-                item.expected_codec = desired.into();
+                let (channels, layout) = requested_audio_layout(audio, config)?;
+                let settings = encoding::audio_settings(
+                    codec,
+                    format,
+                    audio,
+                    rate,
+                    channels,
+                    &layout,
+                    config.audio_precision.unwrap_or(AudioPrecision::Original),
+                    config.audio_bitrate,
+                )?;
+                item.encoder = Some(settings.encoder.clone());
+                item.expected_codec = settings.codec.clone();
                 item.sample_rate = Some(rate);
                 item.channels = Some(channels);
+                item.bit_depth = settings.bit_depth;
+                item.encoding = Some(settings);
             }
         }
         let target_id = if let Some(encoder) = &item.encoder {
@@ -490,16 +474,15 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
         } else {
             stream.codec_id
         };
-        if (unsafe { sys::avformat_query_codec(muxer, target_id as _, 0) }) <= 0
-            || (stream.kind == StreamKind::Audio
-                && !audio_copy_allowed(config.format, &item.expected_codec))
+        if unsafe { sys::avformat_query_codec(muxer, target_id as _, 0) } <= 0
+            || stream.kind == StreamKind::Audio && !audio_copy_allowed(format, &item.expected_codec)
         {
-            return Err(invalid(format!("{} stream {} is incompatible with this container. Choose a compatible format; tracks are never silently discarded.",stream.codec,stream.index)));
+            return Err(invalid(format!("{} stream {} is incompatible with this container. Choose a compatible representation or an explicit track decision; tracks are never silently discarded.",stream.codec,stream.index)));
         }
         streams.push(item);
     }
     Ok(Plan {
-        output: Some(OutputRepresentation::from_format(config.format)),
+        output: Some(OutputRepresentation::from_format(format)),
         config: config.clone(),
         streams,
         preview_range: None,
@@ -556,6 +539,54 @@ pub(crate) fn verify_output(
                             "The finalized frame rate does not match the accepted configuration."
                                 .into(),
                     });
+                }
+            }
+        }
+        if let Some(settings) = &expected.encoding {
+            if expected.width.is_some() {
+                let video = stream
+                    .video
+                    .as_ref()
+                    .ok_or_else(|| invalid("The encoded video stream is missing."))?;
+                if settings
+                    .bit_depth
+                    .is_some_and(|depth| video.bit_depth != Some(depth))
+                    || settings
+                        .color_space
+                        .as_ref()
+                        .is_some_and(|value| video.color_space.as_ref() != Some(value))
+                    || settings
+                        .color_range
+                        .as_ref()
+                        .is_some_and(|value| video.color_range.as_ref() != Some(value))
+                {
+                    return Err(EngineError::InvalidMedia { detail:"The finalized video precision or color representation differs from the accepted requirements.".into() });
+                }
+                let original = source
+                    .streams
+                    .iter()
+                    .find(|item| item.index == expected.index)
+                    .and_then(|item| item.video.as_ref())
+                    .ok_or_else(|| invalid("The accepted video source is missing."))?;
+                encoding::verify_video_representation(video, original, settings)?;
+                if original.color_primaries.is_some()
+                    && video.color_primaries != original.color_primaries
+                    || original.color_transfer.is_some()
+                        && video.color_transfer != original.color_transfer
+                {
+                    return Err(EngineError::InvalidMedia { detail:"The finalized output did not preserve the accepted video color characteristics.".into() });
+                }
+            }
+            if let Some(layout) = &settings.channel_layout {
+                let actual = stream
+                    .audio
+                    .as_ref()
+                    .and_then(|audio| audio.channel_layout.as_deref())
+                    .ok_or_else(|| {
+                        invalid("The finalized speaker layout could not be verified.")
+                    })?;
+                if actual != layout {
+                    return Err(EngineError::InvalidMedia { detail:"The finalized audio speaker layout differs from the accepted requirements.".into() });
                 }
             }
         }

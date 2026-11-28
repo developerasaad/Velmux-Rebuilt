@@ -4,6 +4,7 @@ import array
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -59,6 +60,19 @@ def check_tones(path, expected_channels, expected_frequencies=None):
             assert amplitude > 0.02, f"{path}: expected {frequency} Hz missing in channel {channel}"
 
 
+def decoded_audio(path, representation='s32le', codec='pcm_s32le'):
+    return run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(path), '-map', '0:a:0',
+                '-f', representation, '-acodec', codec, '-'])
+
+
+def float_samples(raw):
+    values = array.array('d')
+    values.frombytes(raw)
+    if sys.byteorder != 'little':
+        values.byteswap()
+    return values
+
+
 def first_rgb(path, width, height, start=0, tone_map=False):
     filters = []
     if tone_map:
@@ -92,6 +106,10 @@ def check_case(case):
     if "video_codec" in case:
         assert len(video) == 1 and video[0]["codec_name"] == case["video_codec"], path
         assert (video[0]["width"], video[0]["height"]) == (case["width"], case["height"]), path
+        for property_name, expected_name in [('pix_fmt', 'pixel_format'), ('color_transfer', 'color_transfer'),
+                                               ('color_primaries', 'color_primaries'), ('color_space', 'color_space')]:
+            if expected_name in case:
+                assert video[0].get(property_name) == case[expected_name], f'{path}: {property_name} differs from accepted representation'
         if "display_aspect_ratio" in case:
             actual = Fraction(video[0]["display_aspect_ratio"].replace(":", "/"))
             assert_close(float(actual), float(Fraction(case["display_aspect_ratio"])), 0.0001, f"{path}: display aspect ratio")
@@ -106,6 +124,11 @@ def check_case(case):
     for stream in audio:
         assert int(stream["sample_rate"]) == case["sample_rate"], path
         assert stream["channels"] == case["channels"], path
+        if 'channel_layout' in case:
+            assert stream.get('channel_layout') == case['channel_layout'], f'{path}: speaker layout changed'
+        if 'audio_bits' in case:
+            bits = int(stream.get('bits_per_raw_sample', 0) or stream.get('bits_per_sample', 0))
+            assert bits == case['audio_bits'], f'{path}: sample precision changed: {bits}'
     if "duration" in case:
         duration = float(info["format"]["duration"])
         if case.get("gapless_duration"):
@@ -133,6 +156,58 @@ def check_case(case):
          "-i", str(path), "-map", "0:v?", "-map", "0:a?", "-f", "null", "-"])
     if case.get("tones"):
         check_tones(path, case["channels"], case.get("tone_frequencies"))
+    if 'exact_audio_source' in case:
+        actual = decoded_audio(path)
+        expected = decoded_audio(FIXTURES / case['exact_audio_source'])
+        assert actual and actual == expected, f'{path}: lossless encoding changed sample values, speaker order or duration'
+    if 'pcm_precision_source' in case:
+        actual = float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
+        expected = float_samples(decoded_audio(FIXTURES / case['pcm_precision_source'], 'f64le', 'pcm_f64le'))
+        assert len(actual) == len(expected) > 0, f'{path}: PCM conversion changed sample count or channel count'
+        tolerance = 2.0 ** (1 - case['pcm_quantization_bits'])
+        assert max(abs(a - b) for a, b in zip(actual, expected)) <= tolerance, f'{path}: PCM samples exceed explicit quantization error or channels were reordered'
+    if 'ten_bit_reference' in case:
+        def decoded_ten_bit(media):
+            raw = run(['ffmpeg', '-v', 'error', '-nostdin', '-threads', '1', '-i', str(media),
+                       '-map', '0:v:0', '-pix_fmt', 'yuv420p10le', '-f', 'rawvideo', '-'])
+            values = array.array('H')
+            values.frombytes(raw)
+            if sys.byteorder != 'little':
+                values.byteswap()
+            return values
+        actual = decoded_ten_bit(path)
+        expected = decoded_ten_bit(FIXTURES / case['ten_bit_reference'])
+        assert len(actual) == len(expected) == case['width'] * case['height'] * 3 // 2 * 12, f'{path}: ten-bit frame content/count changed'
+        assert any(value % 4 for value in expected), 'Independent ten-bit fixture lacks low-bit content'
+        assert any(value % 4 for value in actual), f'{path}: decoded output contains only promoted eight-bit samples'
+        error = math.sqrt(sum((a - b) ** 2 for a, b in zip(actual, expected)) / len(actual))
+        assert error < 32, f'{path}: ten-bit decoded content differs from source: RMSE={error}'
+    if case.get('hdr10_elementary_sei'):
+        # Probe decoded elementary HEVC, excluding all MP4/TS container-side
+        # metadata. These side data must come from actual encoded SEI NAL units.
+        coded_pictures = []
+        for media in [FIXTURES / case['source'], path]:
+            elementary = run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(media), '-map', '0:v:0',
+                              '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-f', 'hevc', '-'])
+            vcl = [nal for nal in re.split(b'\x00\x00(?:\x00)?\x01', elementary) if len(nal) >= 2 and ((nal[0] >> 1) & 63) <= 31]
+            assert len(vcl) >= 12, f'{media}: missing HEVC coded pictures'
+            coded_pictures.append(vcl)
+            decoded = subprocess.run(['ffprobe', '-v', 'error', '-f', 'hevc', '-show_frames', '-of', 'json', '-'],
+                                     input=elementary, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            frames = json.loads(decoded.stdout)['frames']
+            sides = [side for frame in frames for side in frame.get('side_data_list', [])]
+            mastering = [side for side in sides if side['side_data_type'] == 'Mastering display metadata']
+            light = [side for side in sides if side['side_data_type'] == 'Content light level metadata']
+            assert len(frames) == 12 and mastering and light, f'{media}: missing decoded HDR10 elementary SEI'
+            expected_mastering = {'red_x': '34000/50000', 'red_y': '16000/50000',
+                                  'green_x': '13250/50000', 'green_y': '34500/50000',
+                                  'blue_x': '7500/50000', 'blue_y': '3000/50000',
+                                  'white_point_x': '15635/50000', 'white_point_y': '16450/50000',
+                                  'max_luminance': '10000000/10000', 'min_luminance': '50/10000'}
+            for entry in mastering:
+                assert all(Fraction(entry.get(key, '0')) == Fraction(value) for key, value in expected_mastering.items()), f'{media}: mastering SEI values changed'
+            assert all(entry.get('max_content') == 1000 and entry.get('max_average') == 400 for entry in light), f'{media}: MaxCLL/MaxFALL SEI changed'
+        assert coded_pictures[0] != coded_pictures[1], f'{path}: HEVC frames were only remuxed instead of re-encoded'
     if "quality_reference" in case:
         def decoded_luma(media):
             return run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(media), "-map", "0:v:0",
@@ -160,6 +235,10 @@ def check_case(case):
             after = [packet["data_hash"] for packet in info["packets"] if packet["stream_index"] == pictures[0]["index"]]
             assert len(before) == 1 and before == after, f"{path}: copied artwork payload changed"
             assert first_rgb(path, 32, 32) == first_rgb(FIXTURES / case["source"], 32, 32), f"{path}: decoded artwork changed"
+        if case.get('preserve_audio_packets'):
+            before = [packet['data_hash'] for packet in media_packets(source, 'audio')]
+            after = [packet['data_hash'] for packet in media_packets(info, 'audio')]
+            assert before and before == after, f'{path}: Original/Automatic changed compatible encoded audio payloads'
         if case.get("preserve_video_packets"):
             original = media_packets(source, "video")
             result = media_packets(info, "video")

@@ -183,7 +183,7 @@ fn main() {
         .header("src/ffmpeg/wrapper.h")
         .allowlist_function("av_.*|avcodec_.*|avformat_.*|avio_.*|avfilter_.*|av_buffersrc_.*|av_buffersink_.*|sws_.*|swr_.*")
         .allowlist_type("AV.*|SwsContext|SwrContext")
-        .allowlist_var("AV.*|LIBAV.*|SWS.*|SWR.*")
+        .allowlist_var("AV.*|LIBAV.*|SWS.*|SWR.*|FF_QP2LAMBDA")
         .prepend_enum_name(false)
         .layout_tests(false)
         .generate_comments(false)

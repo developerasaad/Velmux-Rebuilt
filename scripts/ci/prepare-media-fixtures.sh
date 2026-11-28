@@ -37,6 +37,36 @@ run_ffmpeg -f lavfi -i 'aevalsrc=0.1*sin(2*PI*440*t)|0.1*sin(2*PI*660*t)|0.1*sin
   -c:a flac "$fixtures/surround.flac"
 run_ffmpeg -f lavfi -i 'sine=frequency=440:sample_rate=8000:duration=2' -c:a flac "$fixtures/low-rate.flac"
 run_ffmpeg -i "$fixtures/stereo.wav" -c:a pcm_s32le "$fixtures/pcm32.wav"
+# Distinct speaker tones and nonzero low sample bits expose channel swaps,
+# precision truncation and accidental mixing in lossless conversion routes.
+run_ffmpeg -f lavfi -i 'aevalsrc=0.1*sin(2*PI*220*t)|0.1*sin(2*PI*330*t)|0.1*sin(2*PI*440*t)|0.1*sin(2*PI*55*t)|0.1*sin(2*PI*660*t)|0.1*sin(2*PI*880*t):s=48000:d=2:c=5.1' \
+  -c:a pcm_s24le -map_metadata -1 "$fixtures/precision24.wav"
+# Generate genuine ten-bit samples, including low bits that an eight-bit
+# test pattern promoted to ten-bit would never exercise.
+python3 - "$fixtures/precision10.yuv" <<'TEN_BIT_SAMPLES'
+import array, sys
+with open(sys.argv[1], 'wb') as output:
+    for frame in range(12):
+        for plane, width, height in [(0, 160, 90), (1, 80, 45), (2, 80, 45)]:
+            values = array.array('H', (
+                64 + (x * 7 + y * 11 + frame * 13) % 877 if plane == 0
+                else 384 + (x * 3 + y * 5 + frame * 7 + plane * 31) % 256
+                for y in range(height) for x in range(width)))
+            if sys.byteorder != 'little':
+                values.byteswap()
+            values.tofile(output)
+TEN_BIT_SAMPLES
+run_ffmpeg -f rawvideo -pixel_format yuv420p10le -video_size 160x90 -framerate 12 \
+  -i "$fixtures/precision10.yuv" -c:v ffv1 -level 3 -threads:v 1 \
+  -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv "$fixtures/precision10.mkv"
+run_ffmpeg -i "$fixtures/precision10.mkv" -c:v libx265 -preset ultrafast -crf 18 \
+  -x265-params 'pools=1:frame-threads=1:log-level=error' -pix_fmt yuv420p10le \
+  -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv "$fixtures/camera10.mp4"
+# HDR10 static metadata is encoded as HEVC SEI, independently of container tags.
+run_ffmpeg -i "$fixtures/precision10.mkv" -c:v libx265 -preset ultrafast -crf 18 \
+  -x265-params 'pools=1:frame-threads=1:log-level=error:hdr10=1:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50):max-cll=1000,400' \
+  -pix_fmt yuv420p10le -color_primaries bt2020 -color_trc smpte2084 \
+  -colorspace bt2020nc -color_range tv "$fixtures/camera10-hdr.mp4"
 run_ffmpeg -f lavfi -i 'testsrc=size=321x181:rate=12:duration=1' \
   -vf format=yuv444p -c:v ffv1 -threads:v 1 "$fixtures/odd-video.mkv"
 run_ffmpeg -f lavfi -i 'testsrc2=size=960x540:rate=24:duration=1' -c:v libx264 \
@@ -79,9 +109,13 @@ title=Closing
 CHAPTERS
 run_ffmpeg -i "$fixtures/multi-track.mkv" -f ffmetadata -i "$fixtures/chapters.txt" \
   -map 0 -map_metadata 0 -map_chapters 1 -c copy "$fixtures/chaptered.mkv"
-run_ffmpeg -f lavfi -i 'testsrc2=size=160x90:rate=12:duration=1' \
-  -vf format=yuv420p10le -c:v ffv1 -level 3 -threads:v 1 \
-  -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc "$fixtures/hdr.mkv"
+for transfer in smpte2084 arib-std-b67; do
+  name=hdr
+  [ "$transfer" != arib-std-b67 ] || name=hlg
+  run_ffmpeg -f rawvideo -pixel_format yuv420p10le -video_size 160x90 -framerate 12 \
+    -i "$fixtures/precision10.yuv" -c:v ffv1 -level 3 -threads:v 1 \
+    -color_primaries bt2020 -color_trc "$transfer" -colorspace bt2020nc -color_range tv "$fixtures/$name.mkv"
+done
 python3 - "$fixtures" <<'MANIFEST'
 import hashlib, json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
@@ -93,6 +127,19 @@ for path in root.iterdir():
         probes[path.name] = json.loads(subprocess.check_output(
             ['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-show_chapters', '-of', 'json', str(path)], text=True, timeout=15))
 (root / 'probes.json').write_text(json.dumps(probes, indent=2) + '\n')
+precision = probes['precision24.wav']['streams'][0]
+assert precision['channels'] == 6 and precision['channel_layout'] == '5.1' and int(precision['bits_per_sample']) == 24
+for name in ['precision10.mkv', 'camera10.mp4', 'camera10-hdr.mp4', 'hdr.mkv', 'hlg.mkv']:
+    assert probes[name]['streams'][0]['pix_fmt'] == 'yuv420p10le', f'{name}: fixture lost required ten-bit samples'
+assert probes['camera10.mp4']['streams'][0]['codec_name'] == 'hevc'
+assert probes['camera10.mp4']['streams'][0]['profile'] == 'Main 10'
+hdr_frames = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+    '-show_frames', '-of', 'json', str(root / 'camera10-hdr.mp4')], text=True, timeout=15))['frames']
+hdr_sides = [side for frame in hdr_frames for side in frame.get('side_data_list', [])]
+assert any(side['side_data_type'] == 'Mastering display metadata' for side in hdr_sides), 'Independent HEVC fixture lacks mastering SEI'
+assert any(side['side_data_type'] == 'Content light level metadata' and side.get('max_content') == 1000 and side.get('max_average') == 400 for side in hdr_sides), 'Independent HEVC fixture lacks content-light SEI'
+
+
 rotation = probes['rotated-sar.mp4']['streams'][0].get('side_data_list', [])
 print('Independent rotation facts:', rotation)
 assert any(abs(item.get('rotation', 0)) == 90 for item in rotation), 'The independently generated rotation fixture lacks its required display matrix'
