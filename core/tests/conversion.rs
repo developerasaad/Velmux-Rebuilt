@@ -3516,6 +3516,7 @@ fn eof_fades_use_decoded_gapless_mp3_samples_at_nominal_and_changed_playback_rat
         let mut config = harness.defaults(&source, Operation::AudioConverter);
         config.format = OutputFormat::Wav;
         config.audio_codec = AudioCodec::Pcm;
+        config.audio_precision = Some(AudioPrecision::Pcm16);
         config.audio_adjustments = Some(AudioAdjustments {
             speed_milli,
             preserve_pitch,
@@ -3559,6 +3560,7 @@ fn eof_fades_use_decoded_gapless_mp3_samples_at_nominal_and_changed_playback_rat
     let mut config = harness.defaults(&source, Operation::AudioConverter);
     config.format = OutputFormat::Wav;
     config.audio_codec = AudioCodec::Pcm;
+    config.audio_precision = Some(AudioPrecision::Pcm16);
     config.audio_adjustments = Some(AudioAdjustments {
         speed_milli: 2000,
         preserve_pitch: false,
