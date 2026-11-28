@@ -89,6 +89,13 @@ else:
 PY
 }
 
+# patch_ffmpeg_aiff_layouts <ffmpeg-source-dir> — preserve actual CoreAudio
+# speaker identities in AIFF, with an exact, idempotent pinned-source repair.
+patch_ffmpeg_aiff_layouts() {
+  python3 "$BUILDER_ROOT/patch-aiff-layouts.py" "$1"
+  log "verified FFmpeg AIFF speaker-description repair"
+}
+
 # patch_x265_cmake4_compat <x265-source-dir> — make x265 3.6's CMake files
 # work under CMake >= 4 (and stay fine under 3.x). Upstream 3.6 pins
 # CMP0025/CMP0054 to OLD behaviors that CMake 4 removed and declares
@@ -431,6 +438,7 @@ inputs = {"schema": 3, "target": target, "policy": sorted(sys.argv[3:])}
 # Hash the complete target recipe. An Apple-only correction must not evict
 # valid Android/host artifacts; shared helper or version changes affect all.
 files = [builder / "lib.sh", builder / "versions.json", builder / "validate.py",
+         builder / "patch-aiff-layouts.py",
          builder / f"build-{target}.sh",
          root / "scripts/ffmpeg/fetch.sh", root / "scripts/ffmpeg/identity.sh",
          root / "scripts/lib/common.sh", root / "scripts/lib/config.sh"]

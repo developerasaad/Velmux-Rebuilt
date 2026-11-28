@@ -382,6 +382,7 @@ fi
 # ---------------------------------------------------------------------------
 ffmpeg_tb="$(fetch_ffmpeg)"
 ffmpeg_src="$(extract_tarball "$ffmpeg_tb")"
+patch_ffmpeg_aiff_layouts "$ffmpeg_src"
 FFBUILD="$SRC_DIR/build-host/ffmpeg"
 if [ ! -f "$HOST_PREFIX/lib/libavcodec.a" ]; then
   log "configuring FFmpeg (host)"

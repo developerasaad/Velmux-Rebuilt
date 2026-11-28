@@ -1017,8 +1017,8 @@ fn real_inspection_and_invalid_direct_core_requests() {
         .unwrap();
     assert_eq!(video.bit_depth, Some(10));
     assert_eq!(video.color_transfer.as_deref(), Some("smpte2084"));
-    let mut config = harness.defaults(&hdr, Operation::VideoConverter);
-    assert_eq!(config.format, OutputFormat::Matroska);
+    let mut config = harness.engine().default_configuration(hdr.id.clone(),Operation::VideoConverter).unwrap();
+    assert_eq!(config.format, OutputFormat::Original);
     harness
         .engine()
         .validate_configuration(hdr.id.clone(), config.clone())

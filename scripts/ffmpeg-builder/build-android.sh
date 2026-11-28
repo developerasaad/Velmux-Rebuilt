@@ -606,6 +606,7 @@ AR_SCRIPT
   # --- FFmpeg (out of tree) -----------------------------------------------------------------
   ffmpeg_tb="$(fetch_ffmpeg)"
   ffmpeg_src="$(extract_tarball "$ffmpeg_tb")"
+  patch_ffmpeg_aiff_layouts "$ffmpeg_src"
   local ffbuild="$build_tmp/ffmpeg"
   if [ ! -f "$prefix/lib/libavcodec.a" ]; then
     log "[$abi] configuring FFmpeg"

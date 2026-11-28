@@ -214,7 +214,7 @@ pub(crate) fn video_settings(
             VideoCodec::Hevc | VideoCodec::Av1 | VideoCodec::Vp9 | VideoCodec::Ffv1
         )
     {
-        return Err(unsupported("This codec route cannot preserve the source HDR representation. Choose a compatible HDR codec, compatible copying, or explicitly request HDR-to-SDR conversion."));
+        return Err(invalid("This codec route cannot preserve the source HDR representation. Choose a compatible HDR codec, compatible copying, or explicitly request HDR-to-SDR conversion."));
     }
     let mut result = match codec {
         VideoCodec::H264 => {

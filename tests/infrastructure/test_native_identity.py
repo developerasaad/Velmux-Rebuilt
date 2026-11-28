@@ -83,6 +83,7 @@ with tempfile.TemporaryDirectory(prefix='velmux-identity-direct-') as folder:
     mutations = [
         ('scripts/ffmpeg-builder/build-ios.sh', {'ios'}),
         ('scripts/ffmpeg-builder/lib.sh', set(policies)),
+        ('scripts/ffmpeg-builder/patch-aiff-layouts.py', set(policies)),
         ('scripts/lib/common.sh', set(policies)),
         ('scripts/ffmpeg-builder/versions.json', set(policies)),
         ('scripts/ffmpeg-builder/probe/velmux-ffmpeg-probe.c', {'host'}),
@@ -126,5 +127,5 @@ with tempfile.TemporaryDirectory(prefix='velmux-identity-direct-') as folder:
         ).strip(),
         'verification': 'direct compute_identity; explicit policy; stderr required empty',
         'checks': checks,
-        'result': 'all 9 checks passed',
+        'result': 'all 10 checks passed',
     }, indent=2))
