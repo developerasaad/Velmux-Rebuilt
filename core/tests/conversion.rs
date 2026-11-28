@@ -2750,7 +2750,7 @@ fn incompatible_catalog_requests_are_rejected_directly_by_the_core() {
                 config,
                 CancellationToken::new()
             ),
-            Err(EngineError::Configuration { .. } | EngineError::Unsupported { .. })
+            Err(EngineError::Configuration { .. } | EngineError::UnsupportedMedia { .. })
         ));
     }
     assert!(harness.engine().jobs().unwrap().is_empty());
@@ -2780,4 +2780,185 @@ fn original_automatic_keeps_compatible_video_and_audio_payloads() {
             "channels":2,"sample_rate":48000,"duration":2.0,"source":"stereo.flac",
             "preserve_audio_packets":true,"exact_audio_source":"stereo.flac"}),
     ]);
+}
+
+#[test]
+fn every_advertised_explicit_codec_and_container_pair_produces_verified_media() {
+    fn container(format: OutputFormat) -> &'static str {
+        match format {
+            OutputFormat::Mp4
+            | OutputFormat::Mov
+            | OutputFormat::M4v
+            | OutputFormat::ThreeGp
+            | OutputFormat::M4a => "mov",
+            OutputFormat::Matroska => "matroska",
+            OutputFormat::Webm => "webm",
+            OutputFormat::Avi => "avi",
+            OutputFormat::MpegTs => "mpegts",
+            OutputFormat::Flv => "flv",
+            OutputFormat::Asf | OutputFormat::Wma => "asf",
+            OutputFormat::Mp3 => "mp3",
+            OutputFormat::Wav => "wav",
+            OutputFormat::Flac => "flac",
+            OutputFormat::Ogg | OutputFormat::Opus => "ogg",
+            OutputFormat::Aac => "aac",
+            OutputFormat::Aiff => "aiff",
+            OutputFormat::Amr => "amr",
+            OutputFormat::Wavpack => "wv",
+            OutputFormat::Original => panic!("Original has dedicated copy tests"),
+        }
+    }
+    fn video_name(codec: VideoCodec) -> &'static str {
+        match codec {
+            VideoCodec::H264 => "h264",
+            VideoCodec::Hevc => "hevc",
+            VideoCodec::Av1 => "av1",
+            VideoCodec::Vp8 => "vp8",
+            VideoCodec::Vp9 => "vp9",
+            VideoCodec::Mpeg4 => "mpeg4",
+            VideoCodec::Ffv1 => "ffv1",
+            VideoCodec::Mjpeg => "mjpeg",
+            VideoCodec::Automatic | VideoCodec::Copy => panic!("An explicit encoder is required"),
+        }
+    }
+    fn audio_name(codec: AudioCodec, format: OutputFormat) -> &'static str {
+        match codec {
+            AudioCodec::Aac | AudioCodec::HeAac => "aac",
+            AudioCodec::Mp3 => "mp3",
+            AudioCodec::Pcm if format == OutputFormat::Aiff => "pcm_s16be",
+            AudioCodec::Pcm | AudioCodec::PcmS16le => "pcm_s16le",
+            AudioCodec::Flac => "flac",
+            AudioCodec::Alac => "alac",
+            AudioCodec::Opus => "opus",
+            AudioCodec::Vorbis => "vorbis",
+            AudioCodec::Ac3 => "ac3",
+            AudioCodec::Eac3 => "eac3",
+            AudioCodec::Wavpack => "wavpack",
+            AudioCodec::Wma => "wmav2",
+            AudioCodec::AmrNb => "amr_nb",
+            AudioCodec::AmrWb => "amr_wb",
+            AudioCodec::Automatic | AudioCodec::Copy => panic!("An explicit encoder is required"),
+        }
+    }
+
+    let harness = Harness::new("m3-advertised-pairs");
+    let video = harness.inspect("video.mp4", Operation::VideoConverter);
+    let audio = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut cases = Vec::new();
+    let mut video_formats = Vec::new();
+    let mut video_codecs = Vec::new();
+    let mut audio_formats = Vec::new();
+    let mut audio_codecs = Vec::new();
+    for option in harness
+        .engine()
+        .media_catalog_for_source(video.id.clone(), Operation::VideoConverter)
+        .unwrap()
+    {
+        if option.format == OutputFormat::Original {
+            continue;
+        }
+        let audio_can_copy = option.audio_codecs.contains(&AudioCodec::Copy);
+        for codec in option
+            .video_codecs
+            .into_iter()
+            .filter(|codec| !matches!(codec, VideoCodec::Automatic | VideoCodec::Copy))
+        {
+            let mut config = harness.defaults(&video, Operation::VideoConverter);
+            config.format = option.format;
+            config.video_codec = codec;
+            config.audio_codec = AudioCodec::Automatic;
+            config.file_name = format!("advertised_{:?}_{codec:?}", option.format);
+            let result = harness.complete(&harness.submit(&video, config).id);
+            // Automatic must preserve the fixture's AAC whenever the source
+            // catalog advertises compatible copying, including legacy muxers.
+            let expected_audio = if audio_can_copy {
+                "aac"
+            } else {
+                match option.format {
+                    OutputFormat::Webm => "opus",
+                    OutputFormat::Avi => "mp3",
+                    OutputFormat::Asf => "wmav2",
+                    _ => "aac",
+                }
+            };
+            cases.push(json!({"path":result.output.unwrap().locator,"container":container(option.format),
+                "video_codec":video_name(codec),"width":320,"height":180,"audio_codecs":[expected_audio],
+                "channels":2,"sample_rate":48000,"duration":2.0,"tones":true,"source":"video.mp4",
+                "decoded_video_frames":48,"match_source_frame":true}));
+            if !video_formats.contains(&option.format) {
+                video_formats.push(option.format);
+            }
+            if !video_codecs.contains(&codec) {
+                video_codecs.push(codec);
+            }
+        }
+    }
+    for option in harness
+        .engine()
+        .media_catalog_for_source(audio.id.clone(), Operation::AudioConverter)
+        .unwrap()
+    {
+        if option.format == OutputFormat::Original {
+            continue;
+        }
+        for codec in option
+            .audio_codecs
+            .into_iter()
+            .filter(|codec| !matches!(codec, AudioCodec::Automatic | AudioCodec::Copy))
+        {
+            let mut config = harness.defaults(&audio, Operation::AudioConverter);
+            config.format = option.format;
+            config.audio_codec = codec;
+            config.file_name = format!("advertised_{:?}_{codec:?}", option.format);
+            let (channels, rate) = match codec {
+                AudioCodec::AmrNb => (1, 8000),
+                AudioCodec::AmrWb => (1, 16000),
+                _ => (2, 48000),
+            };
+            if channels == 1 {
+                config.channels = Some(channels);
+                config.sample_rate = Some(rate);
+            }
+            let result = harness.complete(&harness.submit(&audio, config).id);
+            let mut expected =
+                expectation(&result, audio_name(codec, option.format), channels, rate);
+            expected["container"] = json!(container(option.format));
+            if matches!(
+                codec,
+                AudioCodec::Flac
+                    | AudioCodec::Alac
+                    | AudioCodec::Pcm
+                    | AudioCodec::PcmS16le
+                    | AudioCodec::Wavpack
+            ) {
+                expected["exact_audio_source"] = json!("stereo.wav");
+            }
+            cases.push(expected);
+            if !audio_formats.contains(&option.format) {
+                audio_formats.push(option.format);
+            }
+            if !audio_codecs.contains(&codec) {
+                audio_codecs.push(codec);
+            }
+        }
+    }
+    assert_eq!(
+        video_formats.len(),
+        10,
+        "An unconditional video representation lacks actual encoder coverage: {video_formats:?}"
+    );
+    assert_eq!(
+        video_codecs.len(),
+        8,
+        "An unconditional video encoder lacks actual coverage: {video_codecs:?}"
+    );
+    assert!(
+        audio_formats.len() >= 10,
+        "An unconditional audio representation lacks actual encoder coverage: {audio_formats:?}"
+    );
+    assert!(
+        audio_codecs.len() >= 11,
+        "An unconditional audio encoder lacks actual coverage: {audio_codecs:?}"
+    );
+    harness.expect(cases);
 }

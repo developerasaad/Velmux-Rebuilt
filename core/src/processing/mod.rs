@@ -396,8 +396,13 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                         "This source requires an unavailable video decoder.",
                     ));
                 }
-                let settings =
-                    video_encoding_settings(format, config.video_codec, video, config.quality)?;
+                let settings = video_encoding_settings(
+                    format,
+                    config.video_codec,
+                    video,
+                    &stream.codec,
+                    config.quality,
+                )?;
                 let dimensions = configured_encoding_dimensions(
                     video,
                     config,

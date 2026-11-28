@@ -64,17 +64,15 @@ pub(crate) fn resolve_audio_codec(
             codec.codec_name() == Some(stream.codec.as_str())
         };
         if same
-            && codec.encoder().is_some_and(|name| {
-                crate::ffmpeg::encoders::encoder_formats(name)
-                    .is_ok_and(|formats| formats.is_some())
-            })
+            && codec
+                .encoder()
+                .is_some_and(|name| super::encoder_accepted(format, name))
         {
             return Ok(*codec);
         }
     }
-    definition.audio_codecs.iter().copied().find(|codec| codec.encoder().is_some_and(|name| {
-        crate::ffmpeg::encoders::encoder_formats(name).is_ok_and(|formats| formats.is_some())
-    })).ok_or_else(|| invalid("No compatible audio encoder is available for this representation. Preserve a compatible source stream or choose another format."))
+    definition.audio_codecs.iter().copied().find(|codec| codec.encoder().is_some_and(|name| super::encoder_accepted(format, name)))
+        .ok_or_else(|| invalid("No compatible audio encoder is available for this representation. Preserve a compatible source stream or choose another format."))
 }
 
 pub(crate) fn requested_audio_layout(

@@ -326,6 +326,7 @@ pub(crate) fn video_encoding_settings(
     format: OutputFormat,
     requested: VideoCodec,
     source: &crate::VideoInfo,
+    source_codec: &str,
     quality: u8,
 ) -> Result<crate::processing::encoding::EncodingSettings, EngineError> {
     use crate::processing::encoding::video_settings;
@@ -334,9 +335,20 @@ pub(crate) fn video_encoding_settings(
     }
     let codecs = format.definition().video_codecs;
     let mut last = None;
-    for codec in codecs {
+    for codec in codecs
+        .iter()
+        .filter(|codec| codec.codec_name() == Some(source_codec))
+        .chain(
+            codecs
+                .iter()
+                .filter(|codec| codec.codec_name() != Some(source_codec)),
+        )
+    {
         match video_settings(*codec, source, quality) {
-            Ok(settings) => return Ok(settings),
+            Ok(settings) if super::encoder_accepted(format, &settings.encoder) => {
+                return Ok(settings)
+            }
+            Ok(_) => continue,
             Err(error) => last = Some(error),
         }
     }

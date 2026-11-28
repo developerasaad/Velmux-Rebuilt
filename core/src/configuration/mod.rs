@@ -497,7 +497,7 @@ fn source_option(
             copy_compatible(format, stream)
                 || stream.decoder_available
                     && stream.video.as_ref().is_some_and(|source| {
-                        video_encoding_settings(format, *codec, source, 23)
+                        video_encoding_settings(format, *codec, source, &stream.codec, 23)
                             .is_ok_and(|settings| encoder_accepted(format, &settings.encoder))
                     })
         }),
@@ -741,6 +741,7 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
                             format,
                             candidate.video_codec,
                             source,
+                            &stream.codec,
                             candidate.quality,
                         )
                         .is_ok_and(|settings| {

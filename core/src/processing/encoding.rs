@@ -522,7 +522,7 @@ fn pcm_settings(
     Ok(result)
 }
 
-fn lossy_bitrate(
+pub(crate) fn lossy_bitrate(
     codec: AudioCodec,
     rate: u32,
     channels: u32,
