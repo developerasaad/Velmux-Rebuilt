@@ -533,9 +533,12 @@ mod tests {
         let mut sole = self::source(vec![audio(0, "pcm_s16le", 2000000)]);
         sole.streams[0].duration_us = None;
         sole.start_time_us = Some(0);
-        assert_eq!(duration(&sole, &sole.streams[0]), Some(2000000));
+        assert_eq!(
+            super::super::stream_duration(&sole, &sole.streams[0]),
+            Some(2000000)
+        );
         sole.streams[0].start_time_us = Some(500000);
-        assert_eq!(duration(&sole, &sole.streams[0]), None);
+        assert_eq!(super::super::stream_duration(&sole, &sole.streams[0]), None);
     }
 
     #[test]
