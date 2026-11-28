@@ -164,7 +164,13 @@ def check_audio_speed_timing(path, case):
         assert len(actual) == len(expected), f'{path}: speed dropped timestamp silence or track samples: {len(actual)} != {len(expected)}'
         assert max(abs(a - b) for a, b in zip(actual, expected)) <= 3 / 32768, f'{path}: independently reconstructed audio timeline differs'
         expected_start = (start - source_origin) / speed
-        assert_close(float(result['streams'][index]['start_time']), expected_start, 0.0011, f'{path}: transformed track origin')
+        output_start = result['streams'][index].get('start_time')
+        if output_start is None:
+            output_frames = json.loads(run(['ffprobe', '-v', 'error', '-select_streams', f'a:{index}',
+                                            '-show_frames', '-of', 'json', str(path)]))['frames']
+            assert output_frames and 'best_effort_timestamp_time' in output_frames[0], f'{path}: missing independently decoded track origin'
+            output_start = output_frames[0]['best_effort_timestamp_time']
+        assert_close(float(output_start), expected_start, 0.0011, f'{path}: transformed track origin')
     if case['timing_speed_source'] == 'audio-gap.mkv':
         assert len(reconstructed) // channels >= rate * 3.9, 'Long-gap fixture no longer has a gap exceeding one second'
 

@@ -3473,7 +3473,7 @@ fn audio_speed_normalizes_positive_source_origins_and_materializes_long_timestam
             );
         }
         let mut config = harness.defaults(&source, Operation::AudioConverter);
-        config.format = OutputFormat::Original;
+        config.format = OutputFormat::Wav;
         config.audio_codec = AudioCodec::Pcm;
         config.audio_adjustments = Some(AudioAdjustments {
             speed_milli: 2000,
