@@ -304,7 +304,7 @@ unsafe fn make_transform(
         (*enc).width = plan.width.unwrap() as i32;
         (*enc).height = plan.height.unwrap() as i32;
         (*enc).pix_fmt = sys::AV_PIX_FMT_YUV420P;
-        (*enc).sample_aspect_ratio =
+        let source_sar =
             if (*input).sample_aspect_ratio.num > 0 && (*input).sample_aspect_ratio.den > 0 {
                 (*input).sample_aspect_ratio
             } else if (*dec).sample_aspect_ratio.num > 0 && (*dec).sample_aspect_ratio.den > 0 {
@@ -312,6 +312,7 @@ unsafe fn make_transform(
             } else {
                 sys::AVRational { num: 1, den: 1 }
             };
+        (*enc).sample_aspect_ratio = source_sar;
         (*enc).sample_aspect_ratio = sys::av_mul_q(
             (*enc).sample_aspect_ratio,
             sys::AVRational {
@@ -449,13 +450,25 @@ unsafe fn make_transform(
     copy_side_data((*input).codecpar, (*out).codecpar, transform.tone_map)?;
     (*(*out).codecpar).codec_tag = 0;
     (*out).time_base = (*enc).time_base;
+    if is_video {
+        (*out).sample_aspect_ratio = (*enc).sample_aspect_ratio;
+    }
     transform.graph = sys::avfilter_graph_alloc();
     if transform.graph.is_null() {
         return Err(failure(-libc::ENOMEM, "Filter"));
     }
     (*transform.graph).nb_threads = 2;
     let (src_name, sink_name, args, chain) = if is_video {
-        let sar = (*enc).sample_aspect_ratio;
+        // The buffer describes decoded source pixels. Scale computes the
+        // destination SAR; passing its already-adjusted SAR here applies the
+        // alignment compensation twice.
+        let sar = if (*input).sample_aspect_ratio.num > 0 && (*input).sample_aspect_ratio.den > 0 {
+            (*input).sample_aspect_ratio
+        } else if (*dec).sample_aspect_ratio.num > 0 && (*dec).sample_aspect_ratio.den > 0 {
+            (*dec).sample_aspect_ratio
+        } else {
+            sys::AVRational { num: 1, den: 1 }
+        };
         let args = format!(
             "video_size={}x{}:pix_fmt={}:time_base={}/{}:pixel_aspect={}/{}",
             (*dec).width,
