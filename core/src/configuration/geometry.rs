@@ -263,7 +263,11 @@ fn validate_h264(video: &VideoInfo, dimensions: (u32, u32)) -> Result<(u32, u32)
             "The source geometry exceeds this processing route's limits.",
         ));
     }
-    if dimensions.0 < 2 || dimensions.1 < 2 || dimensions.0 % 2 != 0 || dimensions.1 % 2 != 0 {
+    if dimensions.0 < 2
+        || dimensions.1 < 2
+        || !dimensions.0.is_multiple_of(2)
+        || !dimensions.1.is_multiple_of(2)
+    {
         return Err(invalid("H.264 requires even dimensions. Choose explicit custom bounds or compatible stream copying."));
     }
     Ok(dimensions)

@@ -1,5 +1,7 @@
 use std::{ffi::CStr, ptr};
 
+pub(crate) mod encoders;
+
 // These style allowances are confined to bindgen's unmodified C declarations
 // and bitfield helpers; handwritten resource and processing code remains linted.
 #[allow(

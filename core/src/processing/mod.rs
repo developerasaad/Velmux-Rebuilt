@@ -362,6 +362,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                     return Err(invalid("The current H.264 encoding route cannot preserve this source's high bit depth or HDR. Use compatible stream copying; HDR conversion will be added later."));
                 }
                 let (out_w, out_h) = configured_h264_dimensions(video, config)?;
+                crate::ffmpeg::encoders::require_video_format("libx264", "yuv420p")?;
                 item.encoder = Some("libx264".into());
                 item.expected_codec = "h264".into();
                 item.width = Some(out_w);
@@ -436,6 +437,32 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                     // precision. Use 24-bit FLAC instead of silently choosing 16.
                     item.bit_depth = Some(audio.bit_depth.unwrap_or(24));
                 }
+                let sample = if desired == "pcm_s16le"
+                    || desired == "flac" && item.bit_depth.is_some_and(|depth| depth <= 16)
+                {
+                    "s16"
+                } else if desired == "flac" {
+                    "s32"
+                } else {
+                    "fltp"
+                };
+                let layout = if config.channels.is_some()
+                    || audio
+                        .channel_layout
+                        .as_deref()
+                        .is_none_or(|layout| layout == "1 channels" || layout == "2 channels")
+                {
+                    if channels == 1 {
+                        "mono"
+                    } else if channels == 2 {
+                        "stereo"
+                    } else {
+                        ""
+                    }
+                } else {
+                    audio.channel_layout.as_deref().unwrap()
+                };
+                crate::ffmpeg::encoders::require_audio_format(encoder, sample, rate, layout)?;
                 item.encoder = Some(encoder.into());
                 item.expected_codec = desired.into();
                 item.sample_rate = Some(rate);
