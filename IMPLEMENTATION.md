@@ -14,11 +14,25 @@ Milestones 1 and 2 are complete and accepted; their inspected host, Android and 
 | 6. Reliability and refinement | Verified M5 | Actual retained-work recovery, lifecycle/publication/cleanup failures, accessibility and measured performance |
 | 7. Independent acceptance | Verified M6 | Requirement audit, corrected defects, realistic media/state/UI tests and clean CI reproduction |
 
-## Foundation decisions
+## Current architecture and migration decisions
 
-- Preserve com.velmux.mobile on Android/iOS, Android API 29 and iOS 15.0 from reference identity. The selected Compose version supports retaining that floor; target compilation remains the acceptance check.
+The 28 November 2026 amendment replaces the presentation architecture within Milestone 3. Final roots are core/, android/ and ios/, with lowercase native src/ui directories. Android adapts the existing Kotlin UI to native Jetpack Compose/Material 3 and direct generated UniFFI Kotlin. iOS implements SwiftUI with direct generated UniFFI Swift, retaining Swift document/security-scope/publication/playback providers. Rust, direct FFmpeg, SQLite, accepted requests, source ownership, storage policy and native construction/linking corrections remain authoritative and are preserved.
+
+The native session on each platform owns exactly one process-lifetime engine, request cancellation, callback adapters and observation delivery. Screens own transient state and native navigation, never media policy or engine shutdown. The iOS app must have no Kotlin/Native, Compose framework or Kotlin-exported controller in its accepted final dependency closure.
+
+Sequence: preserve the current worktree; amend requirements/records; verify generated Kotlin and direct Swift calls/callbacks/lifetimes against the real engine; adapt Android and implement equivalent SwiftUI functional workflows; adopt neutral native themes and deliberate layouts; renew affected M1/M2 runtime/media/UI gates; remove obsolete shared infrastructure after replacements are demonstrated; then complete the remaining M3 functionality. Do not replace the application with diagnostics or claim migration from compilation alone.
+
+Temporary bridge/build coexistence is allowed only to prove replacements before deletion. Update source paths, Gradle/Xcode, scripts/workflows/tests/ignore rules and exact cache identities together. App/UI edits must not invalidate FFmpeg dependencies. Use actual macOS CI for Apple builds, with unchanged iOS15.0 and Android API29 floors.
+
+Use neutral platform semantic surfaces/text/actions, native typography/controls and restrained grouping. Reference colors are in REQUIREMENTS.md; orange #E8833A remains primarily identity. Preserve System/Light/Dark persistence, error semantics and stale-event prevention. Native design equivalence replaces pixel-identical UI and mandatory custom dialogs.
+
+The seven-milestone roadmap above remains intact. Historical decisions below explain the accepted M1/M2 implementation; their shared presentation and framework descriptions are superseded, not instructions to restore that architecture.
+
+## Preserved foundation and historical decisions
+
+- Preserve com.velmux.mobile on Android/iOS, Android API 29 and iOS 15.0 from reference identity. Native API availability and target compilation remain acceptance checks.
 - Use Kotlin 2.2.20, Compose 1.9.3, AGP 8.10.1, Gradle 8.14.3, JDK 21, Rust 1.99.1, Gobley 0.3.7 and UniFFI 0.29.4 as an explicitly pinned integration candidate. Compatibility is a verification gate, not a claim inferred from version numbers. Android NDK 27.2.12479018; Apple builds select Xcode 16.4.
-- Gobley generates common Kotlin bindings plus JVM/Native implementations. Swift hosts the exported Compose controller and supplies native services through a small Kotlin-exported interface. It does not link a second Rust library or create a second engine. Swift-to-Rust interoperability therefore traverses the same generated Kotlin binding instance.
+- Direct UniFFI Kotlin/Swift bindings are the amended interoperability boundary. The previously verified Kotlin-mediated Swift bridge is retained temporarily only until direct Swift calls and callbacks are demonstrated. Android-only Gobley reuse is being evaluated for its proven NDK variants and packaging; it may not keep KMP or Kotlin/Native in the final architecture.
 - Generate a narrow FFmpeg function allowlist from the actual target headers using bindgen; link the complete static pkg-config closure. This avoids handwritten ABI declarations and confines unsafe registry iteration to core/src/ffmpeg. Expand safe resource ownership only when real processing requires it. Target sysroots are supplied explicitly; Android uses one shared NDK C++ runtime packaged by Gobley, with ELF alignment checked in the actual APK.
 - Rust native linking uses pkg-config only for dependency discovery. Only real archives inside the managed FFmpeg prefix are bundled; platform SDK libraries stay dynamic. No explicit SDK link-search directories override the NDK driver’s API-first lookup. These boundaries prevent platform libc globals from being duplicated inside the engine. Android uses exactly one shared C++ runtime.
 - Foundation diagnostics exercise direct linked library registries, provider callbacks, records, errors, cancellation and worker-thread calls. They do not constitute the product media catalog or pretend to perform conversion.
@@ -28,10 +42,10 @@ Milestones 1 and 2 are complete and accepted; their inspected host, Android and 
 - Future configuration uses deterministic Rust catalog rules over already inspected sources; full execution planning belongs at submission. No mutable remote-style configuration sessions or global cache revisions.
 - Future recovery validates actual retained artifacts and preserves manual pause intent. Cancellation must acknowledge worker termination before resource deletion. Publication and transient alerts remain distinct from durable job semantics.
 
-## Primary references
+## Historical interoperability references
 
 - [Gobley Android/iOS integration](https://gobley.dev/docs/tutorial/) and [Cargo configuration](https://gobley.dev/docs/gradle-plugins/cargo/)
-- [Kotlin compatibility table](https://kotlinlang.org/docs/multiplatform/multiplatform-compatibility-guide.html) and [Compose 1.9 changes](https://kotlinlang.org/docs/multiplatform/whats-new-compose-190.html)
+- Previous KMP compatibility research is historical only; final native toolchain compatibility requires direct Android and Apple build/runtime evidence.
 - [bindgen allowlisting](https://rust-lang.github.io/rust-bindgen/allowlisting.html)
 
 Milestone 2 introduces the Rust-owned durable store through rusqlite with bundled SQLite, avoiding separate platform schemas. The database dependency was introduced with its actual operational store. FFmpeg construction retains the complete pinned software-codec chain, while runtime hardware availability and 10-bit x265 encoding remain separate verification obligations.
@@ -52,11 +66,11 @@ rusqlite's bundled SQLite keeps one Rust-owned operational schema. Its selected 
 
 The initial explicit H.264 quality control uses x264 constant-quality encoding. Direct software FFmpeg preserves the accepted filtering/timing/track semantics for this route; compatible streams copy without encoding. Hardware-route availability remains a separate capability and is not inferred from compiled codec names. There is no user backend selector or universal backend ranking.
 
-Accepted configurations and job records live in one Rust-owned SQLite store with one bounded worker. Workspace inspection handles are transient; accepted requests retain their own durable native locators and immutable source facts. Completion and cancellation transitions serialize around worker ownership; verified saving retries compare retained size/hash/media and reconcile actual native publication before requiring a working path. Native open/share failures return to the shared custom alert lifecycle.
+Accepted configurations and job records live in one Rust-owned SQLite store with one bounded worker. Workspace inspection handles are transient; accepted requests retain their own durable native locators and immutable source facts. Completion and cancellation transitions serialize around worker ownership; verified saving retries compare retained size/hash/media and reconcile actual native publication before requiring a working path. Native open/share failures retain scoped error/feedback semantics through each native presentation lifecycle.
 
 Android verification uses a separate test-only fixture APK under tests/android-fixtures. Instrumentation APK dependencies are deduplicated against the target app, leaving remotely launched Kotlin fixture providers without their runtime. Isolating manufactured sources in a standalone test package solves that actual class-loader failure and exercises real document grants without adding providers or fixture assets to product builds.
 
-Apple shared frameworks are cached only under an exact identity covering their Rust/UI source, dependency lockfiles, Gradle/toolchain configuration and verified native dependency identity. Device Release and simulator Debug caches are independent. Native Swift or XCTest-only edits can reuse the unchanged shared binary; source or native ABI changes invalidate it. Direct development commands rebuild unless a CI-owned identity matches. Host/app linkage and runtime tests still execute after reuse.
+The historical Apple framework cache used exact source/toolchain/dependency identities. Its replacement must independently key Rust static libraries and generated Swift bindings by engine source, lockfile, binding generator, target SDK/toolchain and verified FFmpeg identity. Native UI-only edits must reuse compatible core artifacts while still executing app linkage and runtime tests. No cached artifact may be relabeled across the old and new bridges.
 
 iOS picker verification uses a simulator-only native fixture app with a separate sandbox and Files-visible Documents. UI tests select those generated originals through the actual system picker; the host runner checks hashes before and after conversion. Fixture seeding uses exclusive creation and preserves unidentified pre-existing data. Neither platform's fixture provider/app is part of the released product target.
 
@@ -70,13 +84,13 @@ Configuration choices use a synchronous, cheap Rust rule query over inspected fa
 
 Android grant cleanup coordinates with the OS picker handoff. A release is deferred while selection is open or while one delivered locator awaits its Rust claim; cancellation, a subsequent selection and startup reconciliation retire obsolete handoffs. This protects a new persistable offer from an older reference's release without assigning job policy to Kotlin. Unclaimed handoffs are bounded to one primary locator.
 
-The original orange action fill remains separate from light-theme foreground copper. Shared primary buttons retain orange/dark text, while action labels, selected controls and progress use the darker palette tone for legibility. Native screen captures and simple foreground/background luminance calculations guide this basic contrast correction; full accessibility/performance refinement remains Milestone 6.
+Historical M2 verification corrected orange/copper contrast and inspected native captures. The authorized neutral visual system supersedes those colors; equivalent rendered light/dark contrast and system-bar checks must be renewed after migration.
 
 Native document selection accepts generic openable data, with operation-specific guidance. Provider MIME labels and OS UTI families cannot reliably describe every source the core can inspect. Rust remains responsible for identifying actual contents and required streams; the UI tests select a generated video through a generic-data document alias. Previews adapt to the available workspace height so native controls do not consume the entire landscape scroll viewport.
 
-Shared alerts extract the authoritative typed core error detail rather than the generated exception debug description. Accepted-request submission temporarily locks configuration controls while leaving unrelated UI and engine work responsive. Mobile acceptance also independently decodes retained published outputs with system FFmpeg tools; those tools belong only to CI verification, never production processing.
+Native alerts must extract the authoritative typed core error detail rather than generated exception debug descriptions. Accepted-request submission temporarily locks configuration controls while leaving unrelated UI and engine work responsive. Mobile acceptance also independently decodes retained published outputs with system FFmpeg tools; those tools belong only to CI verification, never production processing.
 
-The shared theme reports its resolved light/dark appearance to the native host. Android applies system-bar icon styles and the corresponding window background, including transparent-bar behavior on API35. Runtime checks require rendered content/bar colors as well as icon-mode flags and preserve the setting across Activity recreation. iOS sanitization retains the complete accepted 180-byte filename stem plus its actual extension and reserves bounded space for native collision suffixes.
+The native presentation resolves its persisted light/dark appearance and updates the native host. Android applies system-bar icon styles and the corresponding window background, including transparent-bar behavior on API35. Runtime checks require rendered content/bar colors as well as icon-mode flags and preserve the setting across Activity recreation. iOS sanitization retains the complete accepted 180-byte filename stem plus its actual extension and reserves bounded space for native collision suffixes.
 
 ## Milestone 3 implementation sequence
 

@@ -1,5 +1,7 @@
 # Reference findings
 
+
+Historical reference audit: the 28 November 2026 native architecture/layout/neutral-design amendment in REQUIREMENTS.md supersedes earlier presentation/palette decisions below. Original application code remains read-only reference.
 Read-only audit of `developerasaad/Velmux` at `5971e648c303dd9f044e6c5ac67c852fe46e886f`.
 Only FFmpeg construction infrastructure is reused; application findings inform fresh design.
 
