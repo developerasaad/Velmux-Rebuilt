@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 mod adjustments;
 mod audio;
 pub(crate) use adjustments::{stream_duration, timing as audio_timing, AudioTiming};
-pub use adjustments::{AudioAdjustmentLimits, AudioAdjustments};
+pub use adjustments::{AudioAdjustmentLimits, AudioAdjustments, AudioLoudnessPolicy};
 mod catalog;
 mod compression;
 mod compression_choices;

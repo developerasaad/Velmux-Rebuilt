@@ -9,6 +9,7 @@ import struct
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from fractions import Fraction
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -173,6 +174,81 @@ def check_audio_speed_timing(path, case):
         assert_close(float(output_start), expected_start, 0.0011, f'{path}: transformed track origin')
     if case['timing_speed_source'] == 'audio-gap.mkv':
         assert len(reconstructed) // channels >= rate * 3.9, 'Long-gap fixture no longer has a gap exceeding one second'
+
+
+def measured_loudness(path):
+    measured = subprocess.run(['ffmpeg', '-hide_banner', '-nostdin', '-threads', '1', '-i', str(path),
+                               '-af', 'ebur128=peak=true:framelog=quiet', '-f', 'null', '-'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    text = measured.stderr.decode('utf-8', errors='replace')
+    integrated = re.search(r'Integrated loudness:\s*I:\s*([-+0-9.inf]+) LUFS', text)
+    peak = re.search(r'True peak:\s*Peak:\s*([-+0-9.inf]+) dBFS', text)
+    assert integrated and peak, f'{path}: missing independent R128 measurement'
+    return float(integrated[1]), float(peak[1])
+
+
+def check_normalization(path, case):
+    channels, rate = case['channels'], case['sample_rate']
+    actual = float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
+    assert actual and all(math.isfinite(sample) for sample in actual), f'{path}: non-finite normalized samples'
+    assert max(abs(sample) for sample in actual) < 0.99, f'{path}: normalization/manual gain lost peak protection'
+    frames = len(actual) // channels
+    if 'normalization_reference_output' in case:
+        # Explicit gain and fades follow normalization. Compare every sample to
+        # the actual unchanged normalized stage, including its true EOF length.
+        reference = float_samples(decoded_audio(case['normalization_reference_output'], 'f64le', 'pcm_f64le'))
+        assert len(actual) == len(reference), f'{path}: manual adjustments changed normalized duration'
+        gain = 10 ** (case['normalization_gain_centidb'] / 2000)
+        fade_in = case['normalization_fade_in_us'] * rate / 1_000_000
+        fade_out = case['normalization_fade_out_us'] * rate / 1_000_000
+        def expected(index):
+            frame = index // channels
+            envelope = min(1, frame / fade_in if fade_in else 1,
+                           (frames - frame) / fade_out if fade_out else 1)
+            return reference[index] * gain * max(0, envelope)
+        error = max(abs(value - expected(index)) for index, value in enumerate(actual))
+        assert error <= 3 / 32768, f'{path}: gain/fades were ignored, reordered before normalization or missed EOF: {error}'
+        if fade_out:
+            assert max(abs(value) for value in actual[-channels:]) <= 2 / 32768, f'{path}: normalized EOF fade is truncated'
+        return
+    integrated, true_peak = measured_loudness(path)
+    source = FIXTURES / case['normalization_source']
+    if case['normalization_source'] == 'normalization-modulated.wav':
+        # Dynamic R128 follows running gated measurements; it does not promise
+        # exact whole-file integrated LUFS across large level changes. Verify
+        # the chosen algorithm against a separately executed real reference.
+        with tempfile.TemporaryDirectory(prefix='velmux-normalization-reference-') as temporary:
+            reference_path = Path(temporary) / 'dynamic.wav'
+            run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(source), '-af',
+                 f'loudnorm=linear=false:I=-16:TP=-1:LRA=11,aresample={rate}', '-c:a', 'pcm_f64le', str(reference_path)])
+            reference_i, _ = measured_loudness(reference_path)
+            assert_close(integrated, reference_i, 0.3, f'{path}: independently measured dynamic normalization LUFS')
+            reference = float_samples(decoded_audio(reference_path, 'f64le', 'pcm_f64le'))
+            assert len(actual) == len(reference), f'{path}: dynamic normalization changed reference duration'
+            for begin in range(0, len(actual), rate * channels):
+                actual_block = actual[begin:begin + rate * channels]
+                reference_block = reference[begin:begin + rate * channels]
+                actual_rms = math.sqrt(sum(sample * sample for sample in actual_block) / len(actual_block))
+                reference_rms = math.sqrt(sum(sample * sample for sample in reference_block) / len(reference_block))
+                assert abs(actual_rms / reference_rms - 1) < 0.03, f'{path}: dynamic normalization envelope differs from independent reference'
+        original_i, _ = measured_loudness(source)
+        assert abs(integrated - original_i) > 1.0, f'{path}: modulated audio was not normalized'
+    else:
+        assert_close(integrated, -16.0, 0.6, f'{path}: measured stationary normalization stage LUFS')
+    assert math.isfinite(true_peak) and true_peak < 0.0, f'{path}: independently measured normalized output clips'
+    if case['normalization_source'] in ('normalization-quiet.wav', 'normalization-loud.wav'):
+        original, _ = measured_loudness(source)
+        assert abs(original + 16) > 7, f'{source}: loudness fixture no longer challenges normalization'
+        assert abs(integrated + 16) < abs(original + 16) / 5, f'{path}: real integrated loudness did not approach the accepted stage target'
+    begin = frames // 4
+    count = min(frames // 4, rate // 2)
+    assert count > rate // 20, f'{path}: missing normalized media content'
+    for channel, frequency in enumerate(case['normalization_frequencies']):
+        values = actual[begin * channels + channel:(begin + count) * channels:channels]
+        amplitude = 2 * math.hypot(
+            sum(value * math.cos(2 * math.pi * frequency * index / rate) for index, value in enumerate(values)),
+            sum(value * math.sin(2 * math.pi * frequency * index / rate) for index, value in enumerate(values))) / len(values)
+        assert amplitude > 0.005, f'{path}: normalization lost/reordered channel {channel} tone {frequency} Hz'
 
 
 def described_aiff_pcm(path, case):
@@ -359,6 +435,8 @@ def check_case(case):
         actual = described_aiff['s32'] if described_aiff is not None else decoded_audio(path)
         expected = decoded_audio(FIXTURES / case['exact_audio_source'])
         assert actual and actual == expected, f'{path}: lossless encoding changed sample values, speaker order or duration'
+    if 'normalization_source' in case:
+        check_normalization(path, case)
     if 'speed_source' in case:
         check_audio_speed(path, case)
     if 'timing_speed_source' in case:

@@ -31,6 +31,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiScrollable
 import androidx.test.uiautomator.UiSelector
@@ -287,7 +288,7 @@ class ConversionIntegrationTest {
                 // rather than the prior representable 32000 configuration.
                 try {
                     openSettledSampleRateSheet()
-                    clickText("48000 Hz", exact = true)
+                    selectSampleRateForward("48000 Hz")
                     waitUntil("The Sample rate sheet did not acknowledge its selection") {
                         !hasOptionSheetHeading("Sample rate")
                     }
@@ -491,14 +492,78 @@ class ConversionIntegrationTest {
                         abs(track.getLong(MediaFormat.KEY_DURATION) - expectedDurationUs) <= if (preservePitch) 85_334 else 1_000)
                 val ratio = if (preservePitch) 1.0 else speed.toDouble() / 1000
                 verifySpeedTones(pcm, 440.0 * ratio, 660.0 * ratio)
+                val facts = "Actual native decoded PCM16 stereo at 48,000 Hz: $frames frames; speedMilli=$speed; preservePitch=$preservePitch; expectedFrames=$expectedFrames.\n$track"
+                Log.i("VelmuxMediaVerification", facts)
+                retainText(name.removeSuffix(".wav") + "-facts.txt", facts)
                 retainOutput(name, output)
-                retainText(name.removeSuffix(".wav") + "-facts.txt",
-                    "Actual native decoded PCM16 stereo at 48,000 Hz: $frames frames; speedMilli=$speed; preservePitch=$preservePitch; expectedFrames=$expectedFrames.\n$track")
                 assertEquals("Speed conversion altered its user original", sourceHash, hash(uri))
             }
         } finally {
             media.releaseNative(source.id)
             acceptedIds.forEach { cleanupJob(it) }
+            revoke("stereo.wav")
+        }
+    }
+
+    @Test
+    fun audioLoudnessNormalizationChangesRealPcmAndPreservesItsTracksAndTimeline() {
+        media.beginNative()
+        val uri = grant("stereo.wav")
+        val sourceHash = hash(uri)
+        val source = media.inspectNative(uri.toString(), "stereo.wav", false)
+        var acceptedId: String? = null
+        try {
+            val defaults = media.audioAdjustmentDefaults()
+            assertFalse("Loudness normalization must be opt-in", defaults.normalizeLoudness)
+            val configuration = media.defaultsNative(source.id, false).copy(
+                format = OutputFormat.WAV, audioCodec = AudioCodec.PCM,
+                fileName = "native-normalized-${UUID.randomUUID()}",
+                audioAdjustments = defaults.copy(normalizeLoudness = true),
+            )
+            val accepted = media.submitNative(source.id, UUID.randomUUID().toString(), configuration)
+            acceptedId = accepted.id
+            val frozen = acceptedRequestJson(accepted.id)
+            assertTrue(JSONObject(frozen).getJSONObject("plan").getJSONObject("config")
+                .getJSONObject("audio_adjustments").getBoolean("normalize_loudness"))
+            val completed = awaitJob(accepted.id)
+            assertEquals("completed", completed.state)
+            assertEquals("Normalization changed immutable accepted intent", frozen, acceptedRequestJson(accepted.id))
+            val output = Uri.parse(requireNotNull(completed.outputLocator))
+            val track = tracks(output).single()
+            assertEquals("audio/raw", track.getString(MediaFormat.KEY_MIME))
+            assertEquals(48_000, track.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+            assertEquals(2, track.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+            assertDuration(track)
+            val actual = decodeAudio(output)
+            val original = instrumentation.context.assets.open("stereo.wav").use { wavPcm(it.readBytes()) }
+            assertEquals("Normalization changed the known 96,000-frame stereo timeline", 384_000, actual.size)
+            assertEquals(original.size, actual.size)
+            verifyTones(actual)
+            fun rms(bytes: ByteArray): Double {
+                val samples = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                val count = samples.remaining()
+                var squares = 0.0
+                while (samples.hasRemaining()) {
+                    val sample = samples.get().toDouble() / 32768
+                    squares += sample * sample
+                }
+                return sqrt(squares / count)
+            }
+            val sourceRms = rms(original)
+            val outputRms = rms(actual)
+            assertTrue("Normalization did not apply the expected gain to the known tones", outputRms >= sourceRms * 1.08)
+            assertTrue("The normalized fixture's actual sample amplitude is unexpected", outputRms in 0.115..0.130)
+            val samples = ByteBuffer.wrap(actual).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            var peak = 0
+            while (samples.hasRemaining()) peak = maxOf(peak, abs(samples.get().toInt()))
+            assertTrue("Normalization produced an implausible sample peak for the known tones", peak / 32768.0 < 0.3)
+            retainOutput("android-audio-normalized.wav", output)
+            retainText("android-audio-normalized-facts.txt",
+                "Actual native PCM16 stereo at 48,000 Hz: 96,000 frames; source RMS=$sourceRms; normalized RMS=$outputRms; sample peak=${peak / 32768.0}. This sample check does not claim final LUFS or intersample true-peak accuracy.\n$track")
+            assertEquals("Normalization altered its user original", sourceHash, hash(uri))
+        } finally {
+            media.releaseNative(source.id)
+            acceptedId?.let { cleanupJob(it) }
             revoke("stereo.wav")
         }
     }
@@ -1218,6 +1283,28 @@ class ConversionIntegrationTest {
             }
         }
         return instrumentation.uiAutomation.rootInActiveWindow?.let { visit(it, 0) } == true
+    }
+
+    private fun selectSampleRateForward(label: String) {
+        repeat(4) { attempt ->
+            assertTrue("The Sample rate sheet disappeared before its value was selected", hasOptionSheetHeading("Sample rate"))
+            // The retained hierarchy identifies the sheet's LazyColumn as a
+            // scrollable View; the underlying workspace is a ScrollView. Do
+            // not reset to the top: a downward drag there dismisses the sheet.
+            val list = requireNotNull(device.findObjects(By.clazz("android.view.View").scrollable(true)).singleOrNull()) {
+                "The actual Sample rate sheet list is not uniquely reachable"
+            }
+            val option = list.findObject(By.text(label))
+            if (option != null) {
+                assertTrue("The requested rate is outside the actual sheet list", list.visibleBounds.contains(option.visibleBounds))
+                capture("ui-audio-custom-sample-rate-choice.png")
+                option.click()
+                return
+            }
+            check(attempt < 3) { "The requested rate was absent after bounded forward sheet scrolling: $label" }
+            list.scroll(Direction.DOWN, 0.6f)
+            device.waitForIdle(2_000)
+        }
     }
 
     private fun labeledEditText(description: String): UiObject2? {

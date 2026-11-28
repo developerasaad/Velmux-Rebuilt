@@ -102,8 +102,9 @@ pub(crate) fn execute_conversion(
     mut progress: impl FnMut(ProcessingProgress) -> Result<(), EngineError>,
 ) -> Result<MediaInfo, EngineError> {
     // Coded duration includes lossy priming/padding, and WSOLA boundaries are
-    // content-dependent. Measure the exact accepted sampling tuple before an
-    // EOF fade without encoding intermediate samples.
+    // content-dependent. Analyze the accepted graph before an EOF fade or
+    // normalization, checking actual decoded timing and measurable finite audio.
+    // This never encodes intermediate samples.
     // This execution-local plan never rewrites the persisted accepted request.
     let measured_plan = if plan.streams.iter().any(|stream| {
         stream

@@ -25,6 +25,25 @@ run_ffmpeg -i "$fixtures/video.mp4" -vf transpose=clock -c:v libx264 \
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
   -c:a pcm_s16le -map_metadata -1 "$fixtures/stereo.wav"
 run_ffmpeg -i "$fixtures/stereo.wav" -c:a flac -compression_level 5 "$fixtures/stereo.flac"
+# Actual level, dynamics and gating cases for the Rust-owned loudness stage.
+for amplitude in 0.02 0.60; do
+  label=quiet
+  [ "$amplitude" != 0.60 ] || label=loud
+  run_ffmpeg -f lavfi -i "aevalsrc=$amplitude*sin(2*PI*440*t)|$amplitude*sin(2*PI*660*t):s=48000:d=8" \
+    -c:a pcm_s16le "$fixtures/normalization-$label.wav"
+done
+run_ffmpeg -f lavfi -i 'aevalsrc=if(lt(t\,4)\,0.02\,if(lt(t\,8)\,0.3\,0.07))*sin(2*PI*440*t)|if(lt(t\,4)\,0.02\,if(lt(t\,8)\,0.3\,0.07))*sin(2*PI*660*t):s=48000:d=12' \
+  -c:a pcm_s16le "$fixtures/normalization-modulated.wav"
+run_ffmpeg -f lavfi -i 'anullsrc=r=48000:cl=stereo:d=2' \
+  -c:a pcm_f64le "$fixtures/normalization-silence.wav"
+run_ffmpeg -f lavfi -i 'anullsrc=r=48000:cl=5.1:d=0.417' \
+  -c:a pcm_f64le "$fixtures/normalization-short-silence.wav"
+run_ffmpeg -f lavfi -i 'aevalsrc=0.04*sin(2*PI*440*t)|0.04*sin(2*PI*660*t):s=48000:d=0.217' \
+  -c:a pcm_s16le "$fixtures/normalization-short.wav"
+run_ffmpeg -f lavfi -i 'aevalsrc=0.04*sin(2*PI*440*t)|0.04*sin(2*PI*660*t):s=48000:d=0.617' \
+  -c:a pcm_s16le "$fixtures/normalization-fractional.wav"
+run_ffmpeg -f lavfi -i 'aevalsrc=0.000001*sin(2*PI*440*t)|0.000001*sin(2*PI*660*t):s=48000:d=2' \
+  -c:a pcm_f64le "$fixtures/normalization-below-gate.wav"
 # PCM fixtures exercise fractional playback-rate arithmetic and real timestamp
 # gaps without an intervening lossy codec. MOV preserves per-track durations.
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t):s=11025:d=2' \

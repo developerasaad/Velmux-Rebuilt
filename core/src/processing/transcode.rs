@@ -124,6 +124,7 @@ struct Transform {
     audio_speed: Option<AudioSpeedRuntime>,
     measure_only: bool,
     measured_samples: u64,
+    normalization_meter: *mut sys::AVFilterContext,
 }
 struct AudioSpeedRuntime {
     next_sample: i64,
@@ -530,6 +531,7 @@ unsafe fn make_transform(
         audio_speed: None,
         measure_only,
         measured_samples: 0,
+        normalization_meter: ptr::null_mut(),
     };
     if let Some(range) = preview {
         let end = origin_in_time_base(Some(range.duration_us), (*input).time_base)?;
@@ -936,7 +938,16 @@ unsafe fn make_transform(
             "Filter",
         )?;
         let sample_name = sys::av_get_sample_fmt_name((*dec).sample_fmt);
-        let output_sample = sys::av_get_sample_fmt_name((*enc).sample_fmt);
+        let analyzing_normalization = measure_only
+            && plan
+                .audio_filters
+                .as_ref()
+                .is_some_and(|filters| filters.normalization_enabled());
+        let output_sample = if analyzing_normalization {
+            c"dbl".as_ptr()
+        } else {
+            sys::av_get_sample_fmt_name((*enc).sample_fmt)
+        };
         if sample_name.is_null() || output_sample.is_null() {
             return Err(failure(-libc::EINVAL, "Filter"));
         }
@@ -972,6 +983,7 @@ unsafe fn make_transform(
                         (*enc).sample_rate,
                         &CStr::from_ptr(out_layout.as_ptr()).to_string_lossy(),
                         &CStr::from_ptr(output_sample).to_string_lossy(),
+                        measure_only,
                     )
                 })
                 .transpose()?
@@ -1047,6 +1059,22 @@ unsafe fn make_transform(
         sys::avfilter_graph_config(transform.graph, ptr::null_mut()),
         "Filter",
     )?;
+    if measure_only
+        && plan
+            .audio_filters
+            .as_ref()
+            .is_some_and(|filters| filters.normalization_enabled())
+    {
+        transform.normalization_meter = sys::avfilter_graph_get_filter(
+            transform.graph,
+            c"ebur128@velmux_normalization_input".as_ptr(),
+        );
+        if transform.normalization_meter.is_null() {
+            return Err(EngineError::Filtering {
+                detail: "The normalization analysis meter could not be initialized.".into(),
+            });
+        }
+    }
     if !is_video && (*enc).frame_size > 0 && !measure_only {
         sys::av_buffersink_set_frame_size(transform.sink, (*enc).frame_size as u32);
     }
@@ -1126,6 +1154,31 @@ impl Transform {
             }
             check(result, "Filter")?;
             if self.measure_only {
+                if !self.normalization_meter.is_null() {
+                    // Validate actual double samples before any integer encoder
+                    // conversion could hide non-finite loudnorm output as zero.
+                    let count = usize::try_from((*frame.0).nb_samples)
+                        .ok()
+                        .zip(usize::try_from((*frame.0).ch_layout.nb_channels).ok())
+                        .and_then(|(samples, channels)| samples.checked_mul(channels))
+                        .filter(|count| *count <= 16 * 1024 * 1024)
+                        .ok_or_else(|| failure(-libc::EINVAL, "Filter"))?;
+                    if (*frame.0).format != sys::AV_SAMPLE_FMT_DBL
+                        || (*frame.0).data[0].is_null()
+                        || (*frame.0).linesize[0] < 0
+                        || count
+                            .checked_mul(std::mem::size_of::<f64>())
+                            .is_none_or(|bytes| bytes > (*frame.0).linesize[0] as usize)
+                    {
+                        return Err(failure(-libc::EINVAL, "Filter"));
+                    }
+                    if std::slice::from_raw_parts((*frame.0).data[0].cast::<f64>(), count)
+                        .iter()
+                        .any(|sample| !sample.is_finite())
+                    {
+                        return Err(EngineError::Configuration {detail:"Loudness normalization could not produce finite samples. The source may be silent, too short or outside the measurable loudness range. Turn normalization off to preserve it.".into()});
+                    }
+                }
                 self.measured_samples = self
                     .measured_samples
                     .checked_add(
@@ -1244,7 +1297,7 @@ impl Transform {
                 check_work(token, self.deadline)?;
                 let count = (current - next).min(1024) as i32;
                 let silent = Frame::new()?;
-                (*silent.0).format = (*self.decoder).sample_fmt as i32;
+                (*silent.0).format = (*self.decoder).sample_fmt;
                 (*silent.0).sample_rate = rate as i32;
                 (*silent.0).nb_samples = count;
                 check(
@@ -1378,8 +1431,8 @@ impl Transform {
     }
 }
 
-/// Decode/filter tracks whose actual decoded endpoint is needed for an EOF
-/// fade, including lossy priming/padding, resampling and WSOLA boundaries. The graph is drained incrementally and only a sample count survives.
+/// Analyze the accepted audio graph for decoded timing and normalization
+/// safety. It is drained incrementally; only owned sample counts survive.
 /// No encoded intermediate, output file, source seek or media-length buffer exists.
 pub(super) fn measure_audio_duration(
     input: Input,
@@ -1529,6 +1582,21 @@ pub(super) fn measure_audio_duration(
                 "Filter",
             )?;
             transform.drain_filter(output.context, &mut filtered, &mut unused_packet, &token)?;
+            if !transform.normalization_meter.is_null() {
+                let mut integrated = 0.0;
+                check(
+                    sys::av_opt_get_double(
+                        transform.normalization_meter.cast(),
+                        c"integrated".as_ptr(),
+                        sys::AV_OPT_SEARCH_CHILDREN as i32,
+                        &mut integrated,
+                    ),
+                    "Filter",
+                )?;
+                if !integrated.is_finite() || integrated <= -70.0 {
+                    return Err(EngineError::Configuration {detail:"This source has no measurable gated loudness after the accepted speed and channel conversion. It may be silent or shorter than the loudness measurement window. Turn normalization off to preserve it.".into()});
+                }
+            }
             let rate = u32::try_from((*transform.encoder).sample_rate)
                 .map_err(|_| failure(-libc::EINVAL, "Filter"))?;
             counts.push((index as u32, transform.measured_samples, rate));

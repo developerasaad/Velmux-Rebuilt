@@ -55,6 +55,7 @@ fun ConverterWorkspace(
     var fadeOutText by remember(source.id, adjustments.fadeOutUs) { mutableStateOf(BigDecimal(adjustments.fadeOutUs.toString()).movePointLeft(6).toPlainString()) }
     var speedText by remember(source.id, adjustments.speedMilli) { mutableStateOf(BigDecimal(adjustments.speedMilli.toString()).movePointLeft(3).toPlainString()) }
     var preservePitch by remember(source.id) { mutableStateOf(adjustments.preservePitch) }
+    var normalizeLoudness by remember(source.id) { mutableStateOf(adjustments.normalizeLoudness) }
     val gain = scaledDecimal(gainText, 2, true)?.toString()?.toIntOrNull()
     val fadeIn = scaledDecimal(fadeInText, 6, false)?.takeIf { it >= 0 }?.toULong()
     val fadeOut = scaledDecimal(fadeOutText, 6, false)?.takeIf { it >= 0 }?.toULong()
@@ -62,10 +63,12 @@ fun ConverterWorkspace(
     val speedValid = speed != null && choices.audioAdjustmentLimits?.let { speed in it.minimumSpeedMilli..it.maximumSpeedMilli } == true
     val adjustmentsValid = video || gain != null && fadeIn != null && fadeOut != null && speedValid
     val visibleAdjustments = if (gain != null && fadeIn != null && fadeOut != null && speed != null) {
-        adjustments.copy(gainCentidb = gain, fadeInUs = fadeIn, fadeOutUs = fadeOut, speedMilli = speed, preservePitch = preservePitch)
+        adjustments.copy(gainCentidb = gain, fadeInUs = fadeIn, fadeOutUs = fadeOut, speedMilli = speed,
+            preservePitch = preservePitch, normalizeLoudness = normalizeLoudness)
     } else adjustments
     fun updateAdjustments(gainValue: String = gainText, inValue: String = fadeInText, outValue: String = fadeOutText,
-                          speedValue: String = speedText, pitchValue: Boolean = preservePitch) {
+                          speedValue: String = speedText, pitchValue: Boolean = preservePitch,
+                          normalizeValue: Boolean = normalizeLoudness) {
         val g = scaledDecimal(gainValue, 2, true)?.toString()?.toIntOrNull()
         val i = scaledDecimal(inValue, 6, false)?.takeIf { it >= 0 }?.toULong()
         val o = scaledDecimal(outValue, 6, false)?.takeIf { it >= 0 }?.toULong()
@@ -73,7 +76,7 @@ fun ConverterWorkspace(
         val validSpeed = s != null && choices.audioAdjustmentLimits?.let { s in it.minimumSpeedMilli..it.maximumSpeedMilli } == true
         if (g != null && i != null && o != null && s != null && validSpeed) {
             onChange(config.copy(audioAdjustments = adjustments.copy(gainCentidb = g, fadeInUs = i, fadeOutUs = o,
-                speedMilli = s, preservePitch = pitchValue)))
+                speedMilli = s, preservePitch = pitchValue, normalizeLoudness = normalizeValue)))
         }
     }
     val compressionEditor = remember(source.id) { CompressionEditorState(config.compression) }
@@ -195,6 +198,20 @@ fun ConverterWorkspace(
                         Text(if (adjustmentsExpanded) "Hide audio adjustments" else "Audio adjustments")
                     }
                     if (adjustmentsExpanded) {
+                        limits.loudnessNormalization?.let { policy ->
+                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                .toggleable(value = normalizeLoudness, enabled = !submitting, role = Role.Switch,
+                                    onValueChange = { value -> normalizeLoudness = value; updateAdjustments(normalizeValue = value) })
+                                .semantics { contentDescription = "Normalize audio loudness" }, verticalAlignment = Alignment.CenterVertically) {
+                                Text("Normalize loudness", Modifier.weight(1f))
+                                Switch(checked = normalizeLoudness, onCheckedChange = null, enabled = !submitting)
+                            }
+                            if (normalizeLoudness) {
+                                val target = BigDecimal(policy.targetCentiLufs).movePointLeft(2).stripTrailingZeros().toPlainString()
+                                val peak = BigDecimal(policy.maximumTruePeakCentidb).movePointLeft(2).stripTrailingZeros().toPlainString()
+                                Text("Targets $target LUFS and $peak dBTP before gain and fades. Results vary with the audio and encoding.", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                         OutlinedTextField(speedText, onValueChange = { value -> speedText = value; updateAdjustments(speedValue = value) },
                             label = { Text("Playback speed") }, suffix = { Text("×") }, singleLine = true, enabled = !submitting,
                             isError = !speedValid, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),

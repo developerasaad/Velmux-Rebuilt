@@ -12,6 +12,7 @@ pub struct AudioAdjustments {
     pub fade_out_us: u64,
     pub speed_milli: u32,
     pub preserve_pitch: bool,
+    pub normalize_loudness: bool,
 }
 
 impl Default for AudioAdjustments {
@@ -22,7 +23,45 @@ impl Default for AudioAdjustments {
             fade_out_us: 0,
             speed_milli: 1000,
             preserve_pitch: true,
+            normalize_loudness: false,
         }
+    }
+}
+
+/// Dynamic EBU R128 stage policy, applied before explicit gain and fades.
+/// Integer hundredths retain precise accepted settings without non-finite input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AudioLoudnessPolicy {
+    pub target_centi_lufs: i32,
+    pub maximum_true_peak_centidb: i32,
+    pub range_centi_lu: u32,
+}
+impl Default for AudioLoudnessPolicy {
+    fn default() -> Self {
+        Self {
+            target_centi_lufs: -1600,
+            maximum_true_peak_centidb: -100,
+            range_centi_lu: 1100,
+        }
+    }
+}
+impl AudioLoudnessPolicy {
+    pub(crate) fn available() -> Option<Self> {
+        [c"loudnorm", c"ebur128"]
+            .iter()
+            .all(|name| !unsafe {
+                crate::ffmpeg::sys::avfilter_get_by_name(name.as_ptr()).is_null()
+            })
+            .then(Self::default)
+    }
+    pub(crate) fn validate(&self) -> Result<(), EngineError> {
+        if !(-7000..=-500).contains(&self.target_centi_lufs)
+            || !(-900..=0).contains(&self.maximum_true_peak_centidb)
+            || !(100..=5000).contains(&self.range_centi_lu)
+        {
+            return Err(invalid("The accepted loudness normalization policy is outside the filter's supported range."));
+        }
+        Ok(())
     }
 }
 
@@ -33,6 +72,7 @@ pub struct AudioAdjustmentLimits {
     pub maximum_fade_us: Option<u64>,
     pub minimum_speed_milli: u32,
     pub maximum_speed_milli: u32,
+    pub loudness_normalization: Option<AudioLoudnessPolicy>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +168,7 @@ pub(crate) fn limits(
             .map(|duration| duration.min(600_000_000)),
         minimum_speed_milli: 500,
         maximum_speed_milli: 2000,
+        loudness_normalization: AudioLoudnessPolicy::available(),
     }
 }
 
@@ -154,6 +195,7 @@ impl AudioAdjustments {
             || self.fade_in_us != 0
             || self.fade_out_us != 0
             || self.speed_milli != 1000
+            || self.normalize_loudness
     }
 }
 
@@ -169,6 +211,7 @@ mod tests {
         .unwrap();
         assert_eq!(saved.speed_milli, 1000);
         assert!(saved.preserve_pitch);
+        assert!(!saved.normalize_loudness);
         assert_eq!(saved.gain_centidb, -300);
         for (value, speed, required) in [
             (2_000_000, 500, 4_000_000),

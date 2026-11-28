@@ -807,7 +807,7 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         })
         .unwrap();
     let mut legacy: Value = serde_json::from_str(&request).unwrap();
-    assert_eq!(legacy["version"], 3);
+    assert_eq!(legacy["version"], 4);
     assert_eq!(legacy["plan"]["output"]["format"], "Mp4");
     legacy.as_object_mut().unwrap().remove("version");
     legacy["plan"].as_object_mut().unwrap().remove("output");
@@ -3353,7 +3353,7 @@ fn audio_speed_pitch_fractional_sampling_and_measured_fades_process_actual_sampl
             let job = harness.complete(&harness.submit(&source, config).id);
             let accepted: Value =
                 serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
-            assert_eq!(accepted["version"], 3);
+            assert_eq!(accepted["version"], 4);
             assert_eq!(
                 accepted["plan"]["streams"][0]["audio_filters"]["speed"]["speed_milli"],
                 speed_milli
@@ -3600,6 +3600,377 @@ fn eof_fades_use_decoded_gapless_mp3_samples_at_nominal_and_changed_playback_rat
     harness.expect(cases);
 }
 
+#[test]
+fn dynamic_loudness_normalization_uses_real_levels_and_preserves_layout_precision_and_duration() {
+    let harness = Harness::new("m3-loudness-normalization");
+    let mut cases = Vec::new();
+    for (name, channels, precision, codec, bits, seconds, frequencies) in [
+        (
+            "normalization-quiet.wav",
+            2,
+            AudioPrecision::Pcm16,
+            "pcm_s16le",
+            16,
+            8.0,
+            vec![440, 660],
+        ),
+        (
+            "normalization-loud.wav",
+            2,
+            AudioPrecision::Pcm16,
+            "pcm_s16le",
+            16,
+            8.0,
+            vec![440, 660],
+        ),
+        (
+            "normalization-modulated.wav",
+            2,
+            AudioPrecision::Pcm16,
+            "pcm_s16le",
+            16,
+            12.0,
+            vec![440, 660],
+        ),
+        (
+            "normalization-fractional.wav",
+            2,
+            AudioPrecision::Pcm16,
+            "pcm_s16le",
+            16,
+            0.617,
+            vec![440, 660],
+        ),
+        (
+            "precision24.wav",
+            6,
+            AudioPrecision::Pcm24,
+            "pcm_s24le",
+            24,
+            2.0,
+            vec![220, 330, 440, 55, 660, 880],
+        ),
+        (
+            "stereo.wav",
+            2,
+            AudioPrecision::Float64,
+            "pcm_f64le",
+            64,
+            2.0,
+            vec![440, 660],
+        ),
+    ] {
+        let source = harness.inspect(name, Operation::AudioConverter);
+        let before = digest(&fixture(name));
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_precision = Some(precision);
+        config.audio_adjustments = Some(AudioAdjustments {
+            normalize_loudness: true,
+            ..Default::default()
+        });
+        let choices = harness
+            .engine()
+            .configuration_choices(source.id.clone(), config.clone())
+            .unwrap();
+        let policy = choices
+            .audio_adjustment_limits
+            .unwrap()
+            .loudness_normalization
+            .unwrap();
+        assert_eq!(
+            (
+                policy.target_centi_lufs,
+                policy.maximum_true_peak_centidb,
+                policy.range_centi_lu
+            ),
+            (-1600, -100, 1100)
+        );
+        let submitted = harness.submit(&source, config.clone());
+        config
+            .audio_adjustments
+            .as_mut()
+            .unwrap()
+            .normalize_loudness = false;
+        let job = harness.complete(&submitted.id);
+        let saved: Value = serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+        assert_eq!(saved["version"], 4);
+        assert_eq!(
+            saved["plan"]["config"]["audio_adjustments"]["normalize_loudness"],
+            true
+        );
+        assert_eq!(
+            saved["plan"]["streams"][0]["audio_filters"]["normalization"],
+            json!({"target_centi_lufs":-1600,"maximum_true_peak_centidb":-100,"range_centi_lu":1100})
+        );
+        let mut case = expectation(&job, codec, channels, 48000);
+        case["tones"] = json!(false);
+        case["duration"] = json!(seconds);
+        case["duration_tolerance"] = json!(2.0 / 48000.0);
+        case["decoded_samples"] = json!((seconds * 48000.0).round() as u64);
+        case["audio_bits"] = json!(bits);
+        case["normalization_source"] = json!(name);
+        case["normalization_frequencies"] = json!(frequencies);
+        cases.push(case);
+        assert_eq!(digest(&fixture(name)), before);
+        harness.engine().release_inspection(source.id).unwrap();
+    }
+    // Normalize the accepted stereo/downsampled representation, not the
+    // source's six-channel weighted loudness followed by an unrelated mix.
+    let source = harness.inspect("precision24.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.channels = Some(2);
+    config.sample_rate = Some(44100);
+    config.audio_precision = Some(AudioPrecision::Pcm24);
+    config.audio_adjustments = Some(AudioAdjustments {
+        normalize_loudness: true,
+        ..Default::default()
+    });
+    let job = harness.complete(&harness.submit(&source, config).id);
+    let mut case = expectation(&job, "pcm_s24le", 2, 44100);
+    case["tones"] = json!(false);
+    case["decoded_samples"] = json!(88200);
+    case["audio_bits"] = json!(24);
+    case["normalization_source"] = json!("precision24.wav");
+    case["normalization_frequencies"] = json!([220, 330]);
+    cases.push(case);
+    harness.engine().release_inspection(source.id).unwrap();
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.format = OutputFormat::M4a;
+    config.audio_codec = AudioCodec::Aac;
+    config.audio_adjustments = Some(AudioAdjustments {
+        normalize_loudness: true,
+        ..Default::default()
+    });
+    let job = harness.complete(&harness.submit(&source, config).id);
+    let mut case = expectation(&job, "aac", 2, 48000);
+    case["tones"] = json!(false);
+    case["normalization_source"] = json!("stereo.wav");
+    case["normalization_frequencies"] = json!([440, 660]);
+    cases.push(case);
+    harness.engine().release_inspection(source.id).unwrap();
+    harness.expect(cases);
+}
+
+#[test]
+fn normalization_composes_with_speed_gain_fades_and_retry_without_reencoding() {
+    let mut harness = Harness::new("m3-normalization-composition");
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let before = digest(&fixture("stereo.wav"));
+    let mut cases = Vec::new();
+    for (speed_milli, preserve_pitch) in [(1000, true), (500, true), (2000, false)] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_precision = Some(AudioPrecision::Pcm16);
+        config.audio_adjustments = Some(AudioAdjustments {
+            normalize_loudness: true,
+            speed_milli,
+            preserve_pitch,
+            ..Default::default()
+        });
+        let plain = harness.complete(&harness.submit(&source, config.clone()).id);
+        let mut baseline = expectation(&plain, "pcm_s16le", 2, 48000);
+        baseline["tones"] = json!(false);
+        baseline["duration"] = json!(2000.0 / f64::from(speed_milli));
+        baseline["duration_tolerance"] = json!(if preserve_pitch && speed_milli != 1000 {
+            4096.0 / 48000.0
+        } else {
+            2.0 / 48000.0
+        });
+        baseline["normalization_source"] = json!("stereo.wav");
+        baseline["normalization_frequencies"] = json!(if preserve_pitch {
+            vec![440, 660]
+        } else {
+            vec![880, 1320]
+        });
+        baseline["normalization_speed_milli"] = json!(speed_milli);
+        baseline["normalization_preserve_pitch"] = json!(preserve_pitch);
+        cases.push(baseline.clone());
+        for (gain_centidb, fade_in_us, fade_out_us) in
+            [(0, 100_000, 250_000), (602, 0, 0), (-602, 100_000, 250_000)]
+        {
+            config.audio_adjustments = Some(AudioAdjustments {
+                normalize_loudness: true,
+                speed_milli,
+                preserve_pitch,
+                gain_centidb,
+                fade_in_us,
+                fade_out_us,
+            });
+            if speed_milli == 2000 && gain_centidb == -602 {
+                harness
+                    .provider
+                    .fail_publications
+                    .store(1, Ordering::SeqCst);
+            }
+            let submitted = harness.submit(&source, config.clone());
+            let job = if speed_milli == 2000 && gain_centidb == -602 {
+                let failed = harness.finished(&submitted.id);
+                assert_eq!(failed.state, JobState::Failed);
+                assert!(failed.verified);
+                let intent = accepted_request_text(&harness, &submitted.id);
+                let opens = harness.provider.open_calls.load(Ordering::SeqCst);
+                harness.close();
+                harness.reopen();
+                after_worker_ack(|| harness.engine().retry_publication(submitted.id.clone()));
+                let done = harness.complete(&submitted.id);
+                assert_eq!(accepted_request_text(&harness, &submitted.id), intent);
+                assert_eq!(harness.provider.open_calls.load(Ordering::SeqCst), opens);
+                done
+            } else {
+                harness.complete(&submitted.id)
+            };
+            let mut case = baseline.clone();
+            case["path"] = json!(job.output.as_ref().unwrap().locator);
+            case["normalization_reference_output"] = json!(plain.output.as_ref().unwrap().locator);
+            case["normalization_gain_centidb"] = json!(gain_centidb);
+            case["normalization_fade_in_us"] = json!(fade_in_us);
+            case["normalization_fade_out_us"] = json!(fade_out_us);
+            cases.push(case);
+        }
+    }
+    assert_eq!(digest(&fixture("stereo.wav")), before);
+    harness.expect(cases);
+}
+
+#[test]
+fn normalization_rejects_unmeasurable_audio_and_incompatible_direct_core_requests() {
+    let harness = Harness::new("m3-unmeasurable-normalization");
+    for name in [
+        "normalization-silence.wav",
+        "normalization-short-silence.wav",
+        "normalization-short.wav",
+        "normalization-below-gate.wav",
+    ] {
+        let source = harness.inspect(name, Operation::AudioConverter);
+        let before = digest(&fixture(name));
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_precision = Some(AudioPrecision::Pcm16);
+        config.audio_adjustments = Some(AudioAdjustments {
+            normalize_loudness: true,
+            ..Default::default()
+        });
+        let job = harness.finished(&harness.submit(&source, config).id);
+        assert_eq!(job.state, JobState::Failed, "{job:?}");
+        assert_eq!(job.error_category.as_deref(), Some("configuration"));
+        assert!(!job.verified);
+        assert!(job.output.is_none());
+        assert!(
+            !harness.work(&job).exists(),
+            "Analysis failure must precede output encoding"
+        );
+        assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(digest(&fixture(name)), before);
+        harness.engine().release_inspection(source.id).unwrap();
+    }
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut invalid = harness.defaults(&source, Operation::AudioConverter);
+    invalid.format = OutputFormat::Wav;
+    invalid.audio_codec = AudioCodec::Copy;
+    invalid.audio_adjustments = Some(AudioAdjustments {
+        normalize_loudness: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), invalid),
+        Err(EngineError::Configuration { .. })
+    ));
+    let video = harness.inspect("video.mp4", Operation::VideoConverter);
+    let mut invalid = harness.defaults(&video, Operation::VideoConverter);
+    invalid.audio_adjustments = Some(AudioAdjustments {
+        normalize_loudness: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(video.id.clone(), invalid),
+        Err(EngineError::Configuration { .. })
+    ));
+    let silence = harness.inspect("normalization-silence.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&silence, Operation::AudioConverter);
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.audio_adjustments = Some(AudioAdjustments::default());
+    let saved = harness.complete(&harness.submit(&silence, config).id);
+    let request: Value = serde_json::from_str(&accepted_request_text(&harness, &saved.id)).unwrap();
+    assert!(request["plan"]["streams"][0]["encoder"].is_null(),"Disabling normalization must preserve compatible silent samples without an invented transformation");
+    let mut case = expectation(&saved, "pcm_f64le", 2, 48000);
+    case["tones"] = json!(false);
+    case["decoded_samples"] = json!(96000);
+    case["exact_audio_source"] = json!("normalization-silence.wav");
+    harness.expect(vec![case]);
+}
+
+#[test]
+fn v3_speed_request_without_normalization_restarts_with_unchanged_accepted_bytes() {
+    let mut harness = Harness::new("m3-v3-speed-request");
+    harness
+        .provider
+        .fail_publications
+        .store(1, Ordering::SeqCst);
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let before = digest(&fixture("stereo.wav"));
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.audio_precision = Some(AudioPrecision::Pcm16);
+    config.audio_adjustments = Some(AudioAdjustments {
+        speed_milli: 2000,
+        preserve_pitch: false,
+        ..Default::default()
+    });
+    let job = harness.submit(&source, config);
+    let mut record = harness.finished(&job.id);
+    assert_eq!(record.state, JobState::Failed);
+    harness.close();
+    let mut saved: Value = serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+    saved["version"] = json!(3);
+    saved["plan"]["config"]["audio_adjustments"]
+        .as_object_mut()
+        .unwrap()
+        .remove("normalize_loudness");
+    saved["plan"]["streams"][0]["audio_filters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("normalization");
+    let exact = serde_json::to_string(&saved).unwrap();
+    Connection::open(harness.root.join("operational/operations.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE jobs SET request=?1 WHERE id=?2",
+            params![exact, job.id],
+        )
+        .unwrap();
+    record.state = JobState::Interrupted;
+    record.verified = false;
+    record.verified_size = None;
+    record.verified_hash = None;
+    harness.persist_record(&record, "interrupted");
+    harness.reopen();
+    harness.engine().restart_job(job.id.clone()).unwrap();
+    let done = harness.complete(&job.id);
+    assert_eq!(accepted_request_text(&harness, &job.id), exact);
+    assert_eq!(digest(&fixture("stereo.wav")), before);
+    let mut case = expectation(&done, "pcm_s16le", 2, 48000);
+    case["tones"] = json!(false);
+    case["duration"] = json!(1.0);
+    case["decoded_samples"] = json!(48000);
+    case["speed_source"] = json!("stereo.wav");
+    case["speed_milli"] = json!(2000);
+    case["preserve_pitch"] = json!(false);
+    harness.expect(vec![case]);
+}
+
 struct CancelDuringAudioAnalysis {
     engine: Weak<Engine>,
     observed: Arc<AtomicBool>,
@@ -3642,6 +4013,7 @@ fn cancellation_during_real_speed_gap_analysis_terminates_before_cleanup_or_publ
     config.audio_codec = AudioCodec::Pcm;
     config.audio_adjustments = Some(AudioAdjustments {
         speed_milli: 500,
+        normalize_loudness: true,
         fade_out_us: 250_000,
         ..Default::default()
     });
@@ -3690,7 +4062,7 @@ fn v2_accepted_audio_adjustments_restart_with_nominal_speed_and_immutable_record
     let database = harness.root.join("operational/operations.sqlite3");
     let mut saved: Value = serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
     saved["version"] = json!(2);
-    for field in ["speed_milli", "preserve_pitch"] {
+    for field in ["speed_milli", "preserve_pitch", "normalize_loudness"] {
         saved["plan"]["config"]["audio_adjustments"]
             .as_object_mut()
             .unwrap()
@@ -3704,6 +4076,10 @@ fn v2_accepted_audio_adjustments_restart_with_nominal_speed_and_immutable_record
         .as_object_mut()
         .unwrap()
         .remove("measure_decoded_duration");
+    saved["plan"]["streams"][0]["audio_filters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("normalization");
     let exact = serde_json::to_string(&saved).unwrap();
     Connection::open(&database)
         .unwrap()

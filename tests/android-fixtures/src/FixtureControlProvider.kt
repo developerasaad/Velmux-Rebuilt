@@ -33,7 +33,7 @@ class FixtureControlProvider : ContentProvider() {
 
     private fun retainEvidence(context: android.content.Context, name: String, extras: Bundle): Bundle {
         require(name.matches(Regex("[A-Za-z0-9_.-]{1,96}")) &&
-            name.substringAfterLast('.') in setOf("png", "xml", "txt", "mp4", "m4a", "flac")) { "Invalid verification artifact name" }
+            name.substringAfterLast('.') in setOf("png", "xml", "txt", "json", "mp4", "m4a", "mp3", "flac", "wav")) { "Invalid verification artifact name" }
         val bytes = requireNotNull(extras.getByteArray("bytes"))
         val offset = extras.getLong("offset", -1)
         require(bytes.size <= 256 * 1024 && offset in 0..4L * 1024 * 1024 && offset + bytes.size <= 4L * 1024 * 1024)

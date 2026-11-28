@@ -50,6 +50,7 @@ struct ConverterView: View {
     @State private var fadeOutText: String
     @State private var speedText: String
     @State private var preservePitch: Bool
+    @State private var normalizeLoudness: Bool
     @State private var width = ""
     @State private var height = ""
     @State private var numerator = ""
@@ -79,6 +80,7 @@ struct ConverterView: View {
         _fadeOutText = State(initialValue: String(Double(adjustments.fadeOutUs) / 1_000_000))
         _speedText = State(initialValue: String(format: "%.3f", Double(adjustments.speedMilli) / 1000))
         _preservePitch = State(initialValue: adjustments.preservePitch)
+        _normalizeLoudness = State(initialValue: adjustments.normalizeLoudness)
     }
 
     private var video: Bool { seed.operation == .videoConverter }
@@ -126,6 +128,14 @@ struct ConverterView: View {
             if !video, let limits = choices?.audioAdjustmentLimits {
                 Section {
                     DisclosureGroup("Audio adjustments", isExpanded: $adjustmentsExpanded) {
+                        if let policy = limits.loudnessNormalization {
+                            Toggle("Normalize loudness", isOn: $normalizeLoudness)
+                                .accessibilityIdentifier("audio-normalize-loudness")
+                            if normalizeLoudness {
+                                Text("Targets \(String(format: "%.1f", Double(policy.targetCentiLufs) / 100)) LUFS and \(String(format: "%.1f", Double(policy.maximumTruePeakCentidb) / 100)) dBTP before gain and fades. Results vary with the audio and encoding.")
+                                    .font(.footnote).foregroundColor(.secondary)
+                            }
+                        }
                         HStack {
                             Text("Gain")
                             TextField("dB", text: $gainText).keyboardType(.numbersAndPunctuation)
@@ -211,6 +221,7 @@ struct ConverterView: View {
         .onChange(of: fadeOutText) { _ in commitAdjustments() }
         .onChange(of: speedText) { _ in commitAdjustments() }
         .onChange(of: preservePitch) { _ in commitAdjustments() }
+        .onChange(of: normalizeLoudness) { _ in commitAdjustments() }
     }
 
     private var compressionControls: CompressionControls {
@@ -365,6 +376,7 @@ struct ConverterView: View {
         adjustments.fadeOutUs = outUs
         adjustments.speedMilli = speed
         adjustments.preservePitch = preservePitch
+        adjustments.normalizeLoudness = normalizeLoudness
         return adjustments
     }
 

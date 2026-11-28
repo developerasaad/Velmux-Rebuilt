@@ -1,6 +1,6 @@
 use crate::{
     configuration::{audio_timing, invalid, AudioTiming},
-    AudioAdjustments, EngineError, MediaInfo, StreamInfo,
+    AudioAdjustments, AudioLoudnessPolicy, EngineError, MediaInfo, StreamInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,8 @@ pub(crate) struct AudioFilterPlan {
     start_us: i64,
     #[serde(default)]
     pub(super) speed: Option<AudioSpeedPlan>,
+    #[serde(default)]
+    normalization: Option<AudioLoudnessPolicy>,
     // Missing in v1/v2: retain their frozen nominal fade graph on restart.
     #[serde(default)]
     measure_decoded_duration: bool,
@@ -64,6 +66,14 @@ pub(crate) fn audio_plan(
         return Ok(None);
     };
     settings.validate()?;
+    let normalization = if settings.normalize_loudness {
+        Some(
+            AudioLoudnessPolicy::available()
+                .ok_or_else(|| invalid("Loudness normalization is unavailable in this build."))?,
+        )
+    } else {
+        None
+    };
     let timing = audio_timing(source, stream, Some(settings))?;
     let duration = timing.output_duration_us;
     if (settings.fade_in_us != 0 || settings.fade_out_us != 0)
@@ -90,7 +100,10 @@ pub(crate) fn audio_plan(
     }
     // Every newly accepted EOF fade uses decoded sample timing. Coded duration
     // can include lossy encoder padding even at nominal playback speed.
-    let speed = if settings.speed_milli != 1000 || settings.fade_out_us > 0 {
+    let speed = if settings.speed_milli != 1000
+        || settings.fade_out_us > 0
+        || settings.normalize_loudness
+    {
         if settings.speed_milli != 1000
             && (!source.chapters.is_empty()
                 || source.streams.iter().any(|stream| {
@@ -151,7 +164,9 @@ pub(crate) fn audio_plan(
         duration_us: duration.unwrap_or(0),
         start_us: timing.output_start_us,
         speed,
-        measure_decoded_duration: settings.fade_out_us > 0
+        normalization,
+        measure_decoded_duration: settings.normalize_loudness
+            || settings.fade_out_us > 0
             || settings.speed_milli != 1000
                 && !stream.codec.starts_with("pcm_")
                 && !matches!(stream.codec.as_str(), "flac" | "alac" | "wavpack"),
@@ -160,6 +175,10 @@ pub(crate) fn audio_plan(
 }
 
 impl AudioFilterPlan {
+    pub(super) fn normalization_enabled(&self) -> bool {
+        self.normalization.is_some()
+    }
+
     pub(crate) fn timing(&self) -> Option<AudioTiming> {
         self.speed.as_ref().map(|speed| {
             let mut timing = speed.timing.clone();
@@ -214,7 +233,7 @@ impl AudioFilterPlan {
     }
 
     pub(crate) fn needs_measurement(&self) -> bool {
-        self.measure_decoded_duration && self.measured.is_none()
+        (self.measure_decoded_duration || self.normalization.is_some()) && self.measured.is_none()
     }
 
     pub(super) fn measurement_clone(&self) -> Self {
@@ -247,6 +266,7 @@ impl AudioFilterPlan {
         output_rate: i32,
         output_layout: &str,
         output_sample: &str,
+        measure_only: bool,
     ) -> Result<Option<String>, EngineError> {
         let Some(speed) = &self.speed else {
             return Ok(None);
@@ -287,19 +307,41 @@ impl AudioFilterPlan {
             .map_err(|_| invalid("The output audio sample origin exceeds supported bounds."))?;
         // Integer sample ticks avoid N/SR/TB floating truncation shifting a
         // frame by one sample, which is audible at a short fade boundary.
-        chain.push_str(&format!("aresample={output_rate},aformat=sample_fmts=dbl:sample_rates={output_rate}:channel_layouts={output_layout},asettb=1/{output_rate},asetpts=N{offset:+},"));
+        chain.push_str(&format!("aresample={output_rate},aformat=sample_fmts=dbl:sample_rates={output_rate}:channel_layouts={output_layout},"));
+        if let Some(policy) = &self.normalization {
+            policy.validate()?;
+            if measure_only {
+                // Read only integrated LUFS. True-peak metering is deliberately
+                // left to loudnorm; no private ebur128 resampler tail is used.
+                chain.push_str("ebur128@velmux_normalization_input=peak=none:framelog=quiet,");
+            }
+            // Dynamic mode measures actual EBU R128 loudness within the filter.
+            // It requires 192 kHz internally; explicitly restore the accepted
+            // sampling and integer clock before deliberate gain and fades.
+            chain.push_str(&format!("loudnorm=linear=false:I={:.2}:TP={:.2}:LRA={:.2},aresample={output_rate},aformat=sample_fmts=dbl:sample_rates={output_rate}:channel_layouts={output_layout},",
+                f64::from(policy.target_centi_lufs) / 100.0,
+                f64::from(policy.maximum_true_peak_centidb) / 100.0,
+                f64::from(policy.range_centi_lu) / 100.0));
+        }
+        chain.push_str(&format!("asettb=1/{output_rate},asetpts=N{offset:+},"));
         chain.push_str(&self.filters()?);
         chain.push_str(&format!("aformat=sample_fmts={output_sample}:sample_rates={output_rate}:channel_layouts={output_layout}"));
         Ok(Some(chain))
     }
 
     pub(super) fn filters(&self) -> Result<String, EngineError> {
+        if self.normalization.is_some() && self.speed.is_none() {
+            return Err(invalid(
+                "The accepted normalization plan has no sample-clock timing.",
+            ));
+        }
         let settings = AudioAdjustments {
             gain_centidb: self.gain_centidb,
             fade_in_us: self.fade_in_us,
             fade_out_us: self.fade_out_us,
             speed_milli: self.speed.as_ref().map_or(1000, |speed| speed.speed_milli),
             preserve_pitch: self.speed.as_ref().is_none_or(|speed| speed.preserve_pitch),
+            normalize_loudness: self.normalization.is_some(),
         };
         settings.validate()?;
         let duration_us = self
@@ -346,6 +388,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalization_policy_is_frozen_and_measurement_preserves_the_actual_stage() {
+        let mut accepted: AudioFilterPlan = serde_json::from_str(r#"{"gain_centidb":-300,"fade_in_us":100000,"fade_out_us":250000,"duration_us":2000000,"start_us":0}"#).unwrap();
+        assert!(accepted.normalization.is_none());
+        accepted.speed = Some(AudioSpeedPlan {
+            speed_milli: 1000,
+            preserve_pitch: true,
+            input_rate: 48000,
+            processing_rate: 48000,
+            playback_rate: 48000,
+            timing: AudioTiming {
+                input_start_us: 0,
+                output_start_us: 0,
+                input_duration_us: Some(2000000),
+                output_duration_us: Some(2000000),
+            },
+        });
+        accepted.normalization = Some(AudioLoudnessPolicy::default());
+        assert!(
+            accepted.needs_measurement(),
+            "Normalization must not bypass analysis even in an older flag shape"
+        );
+        let measurement = accepted.measurement_clone();
+        assert_eq!(measurement.normalization, accepted.normalization);
+        let measured_chain = measurement
+            .speed_filters(48000, "stereo", "dbl", true)
+            .unwrap()
+            .unwrap();
+        assert!(measured_chain.contains("ebur128@velmux_normalization_input"));
+        assert!(measured_chain.contains("loudnorm=linear=false:I=-16.00:TP=-1.00:LRA=11.00"));
+        assert!(!measured_chain.contains("volume="));
+        assert!(!measured_chain.contains("afade="));
+        accepted.apply_measurement(96000, 48000).unwrap();
+        let chain = accepted
+            .speed_filters(48000, "stereo", "s16", false)
+            .unwrap()
+            .unwrap();
+        assert!(chain.find("channel_layouts=stereo").unwrap() < chain.find("loudnorm=").unwrap());
+        assert!(chain.find("loudnorm=").unwrap() < chain.find("volume=").unwrap());
+        assert!(chain.find("volume=").unwrap() < chain.find("afade=").unwrap());
+        let saved = serde_json::to_string(&accepted).unwrap();
+        let restored: AudioFilterPlan = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.normalization, accepted.normalization);
+        assert!(
+            restored.needs_measurement(),
+            "Execution measurements are not accepted intent"
+        );
+        accepted.normalization.as_mut().unwrap().target_centi_lufs = i32::MIN;
+        assert!(accepted
+            .speed_filters(48000, "stereo", "s16", false)
+            .is_err());
+    }
+
+    #[test]
     fn legacy_fade_policy_stays_frozen_and_new_policy_uses_measured_sample_endpoint() {
         let saved: AudioFilterPlan = serde_json::from_str(r#"{"gain_centidb":0,"fade_in_us":0,"fade_out_us":250000,"duration_us":2160000,"start_us":0}"#).unwrap();
         assert!(!saved.needs_measurement());
@@ -369,7 +464,10 @@ mod tests {
         assert!(current.needs_measurement());
         current.apply_measurement(16000, 8000).unwrap();
         assert_eq!(current.timing().unwrap().output_duration_us, Some(2000000));
-        let chain = current.speed_filters(8000, "mono", "s16").unwrap().unwrap();
+        let chain = current
+            .speed_filters(8000, "mono", "s16", false)
+            .unwrap()
+            .unwrap();
         assert!(chain.contains("st=1.750000"));
         assert!(chain.contains("asettb=1/8000,asetpts=N"));
         assert!(!chain.contains("atempo="));

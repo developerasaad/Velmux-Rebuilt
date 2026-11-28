@@ -216,7 +216,7 @@ final class ConversionIntegrationTests: XCTestCase {
 
     /// An independent read-only SQLite connection verifies the durable row,
     /// rather than asking the Rust cache to confirm its own representation.
-    private func assertStoredJob(_ job: JobRecord, key: String) throws {
+    private func assertStoredJob(_ job: JobRecord, key: String, normalized: Bool? = nil, gainCentidb: Int32? = nil) throws {
         let path = URL(fileURLWithPath: IosServices().storageRoot()).appendingPathComponent("operations.sqlite3").path
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
@@ -224,7 +224,7 @@ final class ConversionIntegrationTests: XCTestCase {
         defer { sqlite3_close(connection) }
         sqlite3_busy_timeout(connection, 2_000)
         var statement: OpaquePointer?
-        let sql = "SELECT state, record, (SELECT COUNT(*) FROM jobs WHERE submission_key=?2) FROM jobs WHERE id=?1"
+        let sql = "SELECT state, record, (SELECT COUNT(*) FROM jobs WHERE submission_key=?2), request FROM jobs WHERE id=?1"
         XCTAssertEqual(sqlite3_prepare_v2(connection, sql, -1, &statement, nil), SQLITE_OK)
         let query = try XCTUnwrap(statement)
         defer { sqlite3_finalize(query) }
@@ -237,6 +237,15 @@ final class ConversionIntegrationTests: XCTestCase {
         let encoded = String(cString: try XCTUnwrap(sqlite3_column_text(query, 1)))
         let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
         XCTAssertEqual(record["id"] as? String, job.id)
+        if let normalized {
+            let encodedRequest = String(cString: try XCTUnwrap(sqlite3_column_text(query, 3)))
+            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encodedRequest.utf8)) as? [String: Any])
+            let plan = try XCTUnwrap(request["plan"] as? [String: Any])
+            let configuration = try XCTUnwrap(plan["config"] as? [String: Any])
+            let adjustments = try XCTUnwrap(configuration["audio_adjustments"] as? [String: Any])
+            XCTAssertEqual(adjustments["normalize_loudness"] as? Bool, normalized)
+            if let gainCentidb { XCTAssertEqual((adjustments["gain_centidb"] as? NSNumber)?.int32Value, gainCentidb) }
+        }
         if job.state == .completed {
             XCTAssertEqual(record["verified"] as? Bool, true)
             let output = try XCTUnwrap(record["output"] as? [String: Any])
@@ -288,6 +297,7 @@ final class ConversionIntegrationTests: XCTestCase {
         let leftHz: Double
         let rightHz: Double
         let rms: Double
+        let samplePeak: Double
         let duration: Double
         let subtype: FourCharCode
     }
@@ -332,6 +342,7 @@ final class ConversionIntegrationTests: XCTestCase {
         var previous = [Int16](repeating: 0, count: channels)
         var crossings = [Int](repeating: 0, count: channels)
         var energy = 0.0
+        var samplePeak = 0.0
         pcm.withUnsafeBytes { bytes in
             for frame in 0..<frames {
                 for channel in 0..<channels {
@@ -340,13 +351,14 @@ final class ConversionIntegrationTests: XCTestCase {
                     previous[channel] = sample
                     let value = Double(sample) / 32768
                     energy += value * value
+                    samplePeak = max(samplePeak, abs(value))
                 }
             }
         }
         let seconds = Double(frames) / format.mSampleRate
         return AudioProof(frames: frames, sampleRate: format.mSampleRate, channels: channels,
                           leftHz: Double(crossings[0]) / seconds, rightHz: Double(crossings[1]) / seconds,
-                          rms: sqrt(energy / Double(frames * channels)), duration: asset.duration.seconds,
+                          rms: sqrt(energy / Double(frames * channels)), samplePeak: samplePeak, duration: asset.duration.seconds,
                           subtype: CMFormatDescriptionGetMediaSubType(description))
     }
 
@@ -516,6 +528,68 @@ final class ConversionIntegrationTests: XCTestCase {
         XCTAssertEqual(try digest(original), originalHash)
         let proof = XCTAttachment(string: evidence.joined(separator: "\n"))
         proof.name = "Independent native audio speed and pitch verification"
+        proof.lifetime = .keepAlways; add(proof)
+    }
+
+    @MainActor
+    func testAudioNormalizationPrecedesManualGainInRealNativeDecodedSamples() async throws {
+        let session = try await applicationSession()
+        let original = try fixture("stereo.wav")
+        let originalHash = try digest(original)
+        originalHashes[original] = originalHash
+        let source = try await session.inspect(IosMediaServices.selectedSource(url: original), operation: .audioConverter)
+        ownedInspections.insert(source.id)
+        let baseline = try await onWorker { try self.decodeAudio(original) }
+        XCTAssertEqual(baseline.frames, 96_000)
+        let defaults = session.audioAdjustmentDefaults()
+        XCTAssertFalse(defaults.normalizeLoudness)
+        var normalizedRms: Double?
+        var evidence: [String] = []
+        for gain: Int32 in [0, -602] {
+            var configuration = try await session.defaults(sourceId: source.id, operation: .audioConverter)
+            configuration.format = .wav; configuration.audioCodec = .pcm
+            configuration.sampleRate = 48_000
+            configuration.fileName = "ios-normalization-" + UUID().uuidString.lowercased()
+            var adjustments = defaults
+            adjustments.normalizeLoudness = true; adjustments.gainCentidb = gain
+            configuration.audioAdjustments = adjustments
+            let choices = try session.choices(sourceId: source.id, configuration: configuration)
+            _ = try XCTUnwrap(choices.audioAdjustmentLimits?.loudnessNormalization,
+                              "Normalization must expose an actual compiled filter policy")
+            let key = configuration.fileName
+            let accepted = try await session.submit(sourceId: source.id, key: key, configuration: configuration)
+            ownedJobs[accepted.id] = key + ".wav"
+            // Later workspace edits must not alter the accepted flag or gain.
+            adjustments.normalizeLoudness = false; adjustments.gainCentidb = 0
+            configuration.audioAdjustments = adjustments
+            let completed = try await waitForTerminal(session, id: accepted.id)
+            let output = try completedURL(completed)
+            ownedOutputs.insert(output)
+            let proof = try await onWorker {
+                try self.assertStoredJob(completed, key: key, normalized: true, gainCentidb: gain)
+                return try self.decodeAudio(output)
+            }
+            XCTAssertEqual(proof.frames, baseline.frames)
+            XCTAssertEqual(proof.sampleRate, 48_000); XCTAssertEqual(proof.channels, 2)
+            XCTAssertEqual(proof.subtype, kAudioFormatLinearPCM)
+            XCTAssertEqual(proof.leftHz, 440, accuracy: 1); XCTAssertEqual(proof.rightHz, 660, accuracy: 1)
+            XCTAssertEqual(proof.duration, 2, accuracy: 0.002)
+            XCTAssertGreaterThan(proof.samplePeak, 0)
+            XCTAssertLessThan(proof.samplePeak, 0.3, "This is decoded PCM sample peak, not a true-peak certification")
+            if gain == 0 {
+                normalizedRms = proof.rms
+                XCTAssertGreaterThan(proof.rms, 0.115); XCTAssertLessThan(proof.rms, 0.130)
+                XCTAssertGreaterThan(proof.rms, baseline.rms * 1.08)
+            } else {
+                let expected = try XCTUnwrap(normalizedRms) * pow(10, Double(gain) / 2000)
+                XCTAssertEqual(proof.rms, expected, accuracy: 0.001,
+                               "Manual gain must remain after normalization rather than being normalized away")
+            }
+            evidence.append("gain=\(gain)/100 dB: \(proof.frames) PCM frames, RMS=\(proof.rms), samplePeak=\(proof.samplePeak), tones=\(proof.leftHz)/\(proof.rightHz)Hz")
+        }
+        XCTAssertEqual(try digest(original), originalHash)
+        let proof = XCTAttachment(string: evidence.joined(separator: "\n"))
+        proof.name = "Independent native normalization sample verification"
         proof.lifetime = .keepAlways; add(proof)
     }
 
