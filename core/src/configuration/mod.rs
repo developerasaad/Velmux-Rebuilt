@@ -16,14 +16,17 @@ pub use compression::{
     VideoRateControl,
 };
 mod geometry;
+mod video;
 pub(crate) use audio::{
     audio_copy_allowed, audio_encoding_required, audio_transform_requested,
-    automatic_audio_bitrate, requested_audio_layout, resolve_audio_codec,
+    automatic_audio_bitrate, requested_audio_layout, resolve_audio_codec, resolve_audio_output,
+    AudioOutput,
 };
 use audio::{AUDIO_LAYOUTS, AUDIO_PRECISIONS, SAMPLE_RATES};
 use catalog::product_formats;
 pub(crate) use catalog::{original_format, resolve_format, video_encoding_settings};
 pub use catalog::{AudioCodec, AudioLayout, AudioPrecision, OutputFormat, VideoCodec};
+pub(crate) use video::{effective_config, resolve_video_output, video_codec};
 mod representation;
 pub(crate) use geometry::{
     configured_encoding_dimensions, configured_video_dimensions, scaled_video_dimensions,

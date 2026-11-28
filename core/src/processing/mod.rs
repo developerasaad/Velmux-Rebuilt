@@ -334,7 +334,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
     validate_operation(info, config.operation)?;
     let audio_filters = adjustments::audio_plan(info, config.audio_adjustments.as_ref())?;
     let accepted = config;
-    let effective = compression::effective_config(info, config)?;
+    let effective = effective_config(info, config)?;
     let config = &effective;
     let format = resolve_format(info, config)?;
     let mut resolved = accepted.clone();
@@ -406,106 +406,26 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 .as_ref()
                 .is_some_and(|video| video.attached_picture)
         {
-            let video = stream
-                .video
-                .as_ref()
-                .ok_or_else(|| invalid("Video geometry could not be inspected."))?;
-            let size_change = config.video_size != VideoSize::Original
-                && configured_video_dimensions(video, config)?
-                    != scaled_video_dimensions(video, VideoSize::Original)?;
-            let transform =
-                size_change || config.frame_rate != FrameRate::Original || config.quality != 23;
-            let compression_encode = compression::force_video(stream, format, config)?;
-            if config.video_codec == VideoCodec::Copy && transform {
-                return Err(invalid("These video settings require encoding. Choose an applicable codec or Automatic."));
-            }
-            let compatible = muxer_accepts(format, stream.codec_id);
-            let encode = !matches!(config.video_codec, VideoCodec::Automatic | VideoCodec::Copy)
-                || config.video_codec == VideoCodec::Automatic
-                    && (transform || !compatible || compression_encode);
-            if encode {
-                if !stream.decoder_available {
-                    return Err(invalid(
-                        "This source requires an unavailable video decoder.",
-                    ));
-                }
-                let settings = video_encoding_settings(
-                    format,
-                    config.video_codec,
-                    video,
-                    &stream.codec,
-                    config.quality,
-                )?;
-                let dimensions = configured_encoding_dimensions(
-                    video,
-                    config,
-                    settings
-                        .pixel_format
-                        .as_deref()
-                        .ok_or_else(|| invalid("The encoder pixel representation is missing."))?,
-                )?;
-                item.encoder = Some(settings.encoder.clone());
-                item.expected_codec = settings.codec.clone();
-                item.width = Some(dimensions.0);
-                item.height = Some(dimensions.1);
-                item.bit_depth = settings.bit_depth;
-                item.frame_rate = config
-                    .frame_rate
-                    .rational(config.custom_frame_rate.as_ref())?;
-                item.encoding = Some(settings);
+            if let Some(output) = resolve_video_output(stream, format, config)? {
+                item.encoder = Some(output.settings.encoder.clone());
+                item.expected_codec = output.settings.codec.clone();
+                item.width = Some(output.width);
+                item.height = Some(output.height);
+                item.bit_depth = output.settings.bit_depth;
+                item.frame_rate = output.frame_rate;
+                item.encoding = Some(output.settings);
             }
         } else if stream.kind == StreamKind::Audio {
             item.audio_filters = audio_filters.clone();
-            compression::validate_audio_copy(stream, config)?;
-            let audio = stream
-                .audio
-                .as_ref()
-                .ok_or_else(|| invalid("Audio properties could not be inspected."))?;
-            let compatible =
-                muxer_accepts(format, stream.codec_id) && audio_copy_allowed(format, &stream.codec);
-            if config.audio_codec == AudioCodec::Copy && audio_transform_requested(stream, config) {
-                return Err(invalid("These audio settings require encoding. Choose an applicable codec or Automatic."));
-            }
-            if config
-                .audio_precision
-                .is_some_and(|precision| precision != AudioPrecision::Original)
+            if let Some(AudioOutput {
+                sample_rate,
+                channels,
+                settings,
+            }) = resolve_audio_output(stream, format, config)?
             {
-                let target = if config.audio_codec == AudioCodec::Automatic && compatible {
-                    stream.codec.as_str()
-                } else {
-                    resolve_audio_codec(format, config.audio_codec, stream)?
-                        .codec_name()
-                        .unwrap_or("")
-                };
-                if !target.starts_with("pcm_") && !matches!(target, "flac" | "alac" | "wavpack") {
-                    return Err(invalid("Sample precision applies to PCM and supported lossless encoders. Reset precision or choose an applicable codec."));
-                }
-            }
-            if audio_encoding_required(stream, config, compatible) {
-                if !stream.decoder_available {
-                    return Err(invalid(
-                        "This source requires an unavailable audio decoder.",
-                    ));
-                }
-                let codec = resolve_audio_codec(format, config.audio_codec, stream)?;
-                let rate = config
-                    .sample_rate
-                    .or(audio.sample_rate)
-                    .ok_or_else(|| invalid("The source sample rate is unknown."))?;
-                let (channels, layout) = requested_audio_layout(audio, config)?;
-                let settings = encoding::audio_settings(
-                    codec,
-                    format,
-                    audio,
-                    rate,
-                    channels,
-                    &layout,
-                    config.audio_precision.unwrap_or(AudioPrecision::Original),
-                    config.audio_bitrate,
-                )?;
                 item.encoder = Some(settings.encoder.clone());
                 item.expected_codec = settings.codec.clone();
-                item.sample_rate = Some(rate);
+                item.sample_rate = Some(sample_rate);
                 item.channels = Some(channels);
                 item.bit_depth = settings.bit_depth;
                 item.encoding = Some(settings);
