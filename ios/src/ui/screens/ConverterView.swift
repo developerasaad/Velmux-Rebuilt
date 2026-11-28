@@ -26,6 +26,10 @@ struct ConverterView: View {
     @State private var advanced = false
     @State private var compressionDraft: CompressionDraft
     @State private var compressionError: String?
+    @State private var outputEstimate: OutputEstimate?
+    @State private var estimateIssue: String?
+    @State private var estimatedConfiguration: ConversionConfig?
+    @State private var estimatedDraft: CompressionDraft?
     @State private var adjustmentsExpanded = false
     @State private var gainText: String
     @State private var fadeInText: String
@@ -127,6 +131,7 @@ struct ConverterView: View {
                     }
                 }.disabled(submitting)
             }
+            estimateSection
             Section {
                 Button(action: submit) { HStack { Spacer(); if submitting { ProgressView() }; Text(submitting ? "Submitting" : "Convert"); Spacer() } }
                     .disabled(submitting || !validNumbers || compatibility != nil)
@@ -189,6 +194,66 @@ struct ConverterView: View {
                 }
             }
         }
+    }
+
+    private var estimateCacheKey: ConversionConfig {
+        var key = configuration
+        // Filename is ignored only in this presentation cache key. The core
+        // always receives actual user intent and owns estimate validation.
+        key.fileName = ""
+        return key
+    }
+
+    private var estimateIsCurrent: Bool {
+        validNumbers && compatibility == nil
+            && estimatedConfiguration == estimateCacheKey
+            && estimatedDraft == compressionDraft
+    }
+
+    private var estimateSection: some View {
+        Section("Output size") {
+            if estimateIsCurrent, let estimate = outputEstimate {
+                switch estimate.size {
+                case .sourceSizeReference(let bytes):
+                    LabeledContentRow(title: "Source-size reference", value: nativeBytes(bytes))
+                        .accessibilityIdentifier("output-estimate")
+                case .mediaPayloadApproximation(let bytes, _):
+                    LabeledContentRow(title: "Approximate media payload", value: nativeBytes(bytes))
+                        .accessibilityIdentifier("output-estimate")
+                    Text("Variable container and metadata overhead adds bytes.")
+                        .font(.footnote).foregroundColor(.secondary)
+                case .unavailable:
+                    Text("Estimate unavailable").foregroundColor(.secondary)
+                        .accessibilityIdentifier("output-estimate")
+                }
+                Text(estimate.explanation).font(.footnote).foregroundColor(.secondary)
+                    .accessibilityIdentifier("estimate-explanation")
+                if let bytes = estimate.requestedTargetBytes {
+                    LabeledContentRow(title: "Requested target", value: nativeBytes(bytes))
+                        .accessibilityIdentifier("requested-target-size")
+                }
+            } else if estimateIsCurrent, let estimateIssue {
+                Text("Estimate unavailable").foregroundColor(.secondary)
+                Text(estimateIssue).font(.footnote).foregroundColor(.secondary)
+            } else {
+                Text("Resolve the current settings to show an output-size reference or estimate.")
+                    .font(.footnote).foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func refreshEstimate() {
+        guard validNumbers, compatibility == nil else {
+            outputEstimate = nil; estimateIssue = nil
+            estimatedConfiguration = nil; estimatedDraft = nil
+            return
+        }
+        let key = estimateCacheKey
+        guard estimatedConfiguration != key || estimatedDraft != compressionDraft else { return }
+        outputEstimate = nil; estimateIssue = nil
+        estimatedConfiguration = key; estimatedDraft = compressionDraft
+        do { outputEstimate = try session.estimate(sourceId: seed.source.id, configuration: configuration) }
+        catch { estimateIssue = session.errorDetail(error) }
     }
 
     @ViewBuilder private var audioSettings: some View {
@@ -288,7 +353,10 @@ struct ConverterView: View {
             configuration.audioBitrate = nil
             compressionError = nil
             if refresh { refreshChoices() }
+            refreshEstimate()
         } catch {
+            outputEstimate = nil; estimateIssue = nil
+            estimatedConfiguration = nil; estimatedDraft = nil
             // Retain the last representable configuration, but never submit it
             // while the visible active draft is invalid or incompatible.
             compressionError = session.errorDetail(error)

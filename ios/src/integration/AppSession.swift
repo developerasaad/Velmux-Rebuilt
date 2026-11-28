@@ -175,6 +175,11 @@ final class AppSession: ObservableObject {
         return try engine.configurationChoices(id: sourceId, configuration: configuration)
     }
 
+    func estimate(sourceId: String, configuration: ConversionConfig) throws -> OutputEstimate {
+        try requireReady()
+        return try engine.estimateOutput(id: sourceId, configuration: configuration)
+    }
+
     func parseTarget(value: String, unit: TargetSizeUnit) throws -> TargetSize {
         try engine.parseTargetSize(value: value, unit: unit)
     }

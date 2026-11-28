@@ -8,6 +8,7 @@ pub use adjustments::{AudioAdjustmentLimits, AudioAdjustments};
 mod catalog;
 mod compression;
 mod compression_choices;
+mod estimate;
 pub(crate) use compression::{
     apply_compression, compression_copy_policy, target_budget, CompressionCopyPolicy,
     CompressionMedia, RetainedPayload, TargetBudget, TargetBudgetInput,
@@ -19,6 +20,8 @@ pub use compression::{
 pub use compression_choices::{
     CompressionChoices, CompressionControlKind, CompressionControlOption,
 };
+pub(crate) use estimate::estimate;
+pub use estimate::{EstimateUnavailableReason, EstimatedOutputSize, OutputEstimate};
 mod geometry;
 mod video;
 pub(crate) use audio::{

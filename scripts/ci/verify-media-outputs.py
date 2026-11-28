@@ -215,6 +215,13 @@ def check_case(case):
         if 'audio_bits' in case:
             bits = int(stream.get('bits_per_raw_sample', 0) or stream.get('bits_per_sample', 0))
             assert bits == case['audio_bits'], f'{path}: sample precision changed: {bits}'
+    if 'estimated_pcm_payload_bytes' in case:
+        # Measure the produced sample payload independently of Rust's estimate
+        # and distinguish it from container/metadata bytes in the saved file.
+        assert len(audio) == 1 and audio[0]['codec_name'] == 'pcm_s24le', path
+        payload = decoded_audio(path, 's24le', 'pcm_s24le')
+        assert len(payload) == case['estimated_pcm_payload_bytes'], f'{path}: actual PCM payload differs from the sample-count projection'
+        assert path.stat().st_size > len(payload), f'{path}: media payload was misrepresented as finalized file bytes'
     if "duration" in case:
         duration = float(info["format"]["duration"])
         if case.get("gapless_duration"):

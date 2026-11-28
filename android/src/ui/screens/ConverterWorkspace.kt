@@ -69,6 +69,13 @@ fun ConverterWorkspace(
     val customDenominatorValid = customRateDenominatorText.toIntOrNull()?.let { it > 0 } == true
     val customSizeValid = config.videoSize != VideoSize.CUSTOM || customWidthValid && customHeightValid
     val customRateValid = config.frameRate != FrameRate.CUSTOM || customNumeratorValid && customDenominatorValid
+    val estimateInputsValid = customSizeValid && customRateValid && adjustmentsValid && compressionEdit.error == null
+    // Compare all media intent while excluding filename-only edits. The core
+    // receives the actual configuration and owns estimation applicability.
+    val estimateKey = config.copy(fileName = "")
+    val estimate = remember(media, source.id, estimateKey, estimateInputsValid) {
+        if (estimateInputsValid) runCatching { media.estimateOutput(source.id, config) } else null
+    }
     val selectedLayout = config.channelLayout ?: when (config.channels) {
         null -> AudioLayout.ORIGINAL
         1u -> AudioLayout.MONO
@@ -196,6 +203,7 @@ fun ConverterWorkspace(
                 }
                 OutlinedTextField(config.fileName, onValueChange = { onChange(config.copy(fileName = it)) }, label = { Text("Output name") }, suffix = { Text(".${format?.extension ?: ""}") },
                     singleLine = true, enabled = !submitting, isError = config.fileName.isBlank(), modifier = Modifier.fillMaxWidth().testTag("output-name"))
+                OutputEstimateRow(estimate)
                 Text("The source is checked again before acceptance. Incompatible tracks are reported instead of being discarded.", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(12.dp))
             }
@@ -263,6 +271,30 @@ fun ConverterWorkspace(
                 else -> config
             }); sheet = null
         }, onDismiss = { sheet = null })
+    }
+}
+
+@Composable
+private fun OutputEstimateRow(result: Result<OutputEstimate>?) {
+    Column(Modifier.fillMaxWidth().testTag("output-estimate"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Output size", style = MaterialTheme.typography.titleSmall)
+        if (result == null) {
+            Text("Finish the invalid settings to estimate the current output.", style = MaterialTheme.typography.bodySmall)
+        } else {
+            result.fold(onSuccess = { estimate ->
+                estimate.requestedTargetBytes?.let { target ->
+                    Text("Requested target: ${formatByteCount(target)}", style = MaterialTheme.typography.bodySmall)
+                }
+                Text(when (val size = estimate.size) {
+                    is EstimatedOutputSize.SourceSizeReference -> "Source-size reference: ${formatByteCount(size.bytes)}"
+                    is EstimatedOutputSize.MediaPayloadApproximation -> "Approximate media payload: ${formatByteCount(size.bytes)} + container and metadata overhead"
+                    is EstimatedOutputSize.Unavailable -> "Estimate unavailable"
+                }, style = MaterialTheme.typography.bodySmall)
+                Text(estimate.explanation.take(1000), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }, onFailure = { failure ->
+                Text("Estimate unavailable: ${failure.userMessage("Check the output settings.")}", style = MaterialTheme.typography.bodySmall)
+            })
+        }
     }
 }
 

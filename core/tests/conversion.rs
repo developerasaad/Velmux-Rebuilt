@@ -551,6 +551,79 @@ fn expectation(record: &JobRecord, audio_codec: &str, channels: u32, sample_rate
 }
 
 #[test]
+fn lightweight_estimates_use_cached_facts_and_distinguish_payload_from_final_bytes() {
+    use velmux_core::{EstimateUnavailableReason, EstimatedOutputSize};
+    let harness = Harness::new("m3-output-estimates");
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness
+        .engine()
+        .default_configuration(source.id.clone(), Operation::AudioConverter)
+        .unwrap();
+    config.format = OutputFormat::Original;
+    let opens = harness.provider.open_calls.load(Ordering::SeqCst);
+    let reference = harness
+        .engine()
+        .estimate_output(source.id.clone(), config.clone())
+        .unwrap();
+    assert_eq!(
+        reference.size,
+        EstimatedOutputSize::SourceSizeReference {
+            bytes: fs::metadata(fixture("stereo.wav")).unwrap().len()
+        }
+    );
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.sample_rate = Some(44_100);
+    config.channels = Some(1);
+    config.audio_precision = Some(AudioPrecision::Pcm24);
+    config.file_name = "estimated_pcm_payload".into();
+    let intent = serde_json::to_value(&config).unwrap();
+    for _ in 0..8 {
+        let estimate = harness
+            .engine()
+            .estimate_output(source.id.clone(), config.clone())
+            .unwrap();
+        assert_eq!(
+            estimate.size,
+            EstimatedOutputSize::MediaPayloadApproximation {
+                bytes: 264_600,
+                uses_duration_derived_pcm: true
+            }
+        );
+        assert!(estimate.explanation.contains("Container headers"));
+        assert_eq!(estimate.requested_target_bytes, None);
+    }
+    assert_eq!(serde_json::to_value(&config).unwrap(), intent);
+    assert_eq!(harness.provider.open_calls.load(Ordering::SeqCst), opens);
+    assert!(harness.engine().jobs().unwrap().is_empty());
+    let mut target = harness.defaults(&source, Operation::AudioConverter);
+    target.audio_codec = AudioCodec::Aac;
+    target.compression = Some(CompressionSettings {
+        target: Some(TargetSize::parse_decimal("0.1", TargetSizeUnit::Megabytes).unwrap()),
+        ..compression_settings(CompressionMode::TargetSize)
+    });
+    let estimate = harness
+        .engine()
+        .estimate_output(source.id.clone(), target)
+        .unwrap();
+    assert_eq!(estimate.requested_target_bytes, Some(100_000));
+    assert_eq!(
+        estimate.size,
+        EstimatedOutputSize::Unavailable {
+            reason: EstimateUnavailableReason::TargetRequiresMeasuredResult
+        }
+    );
+    assert_eq!(harness.provider.open_calls.load(Ordering::SeqCst), opens);
+    assert!(harness.engine().jobs().unwrap().is_empty());
+    let job = harness.complete(&harness.submit(&source, config).id);
+    assert!(job.output.as_ref().unwrap().size > 264_600);
+    let mut case = expectation(&job, "pcm_s24le", 1, 44_100);
+    case["audio_bits"] = json!(24);
+    case["estimated_pcm_payload_bytes"] = json!(264_600);
+    harness.expect(vec![case]);
+}
+
+#[test]
 fn real_video_encoding_copy_and_immutable_idempotent_submission() {
     let harness = Harness::new("video");
     let source = harness.inspect("video.mp4", Operation::VideoConverter);

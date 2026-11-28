@@ -579,6 +579,13 @@ impl Runtime {
     ) -> Result<crate::ConfigurationChoices, EngineError> {
         Ok(configuration::choices(&self.asset(id)?.info, config))
     }
+    pub fn estimate(
+        &self,
+        id: &str,
+        config: &ConversionConfig,
+    ) -> Result<crate::OutputEstimate, EngineError> {
+        configuration::estimate(&self.asset(id)?.info, config)
+    }
     pub fn submit(
         &self,
         id: &str,

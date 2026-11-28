@@ -263,6 +263,12 @@ class MediaSession(private val engine: Engine) {
     @Throws(EngineException::class, IllegalStateException::class)
     fun configurationChoices(id: String, configuration: ConversionConfig) = ready { engine.configurationChoices(id, configuration) }
 
+    /** Sizing uses retained inspection facts; it does not accept or run a job. */
+    @Throws(EngineException::class, IllegalStateException::class)
+    fun estimateOutput(id: String, configuration: ConversionConfig) = ready {
+        engine.estimateOutput(id, configuration)
+    }
+
     @Throws(EngineException::class, IllegalStateException::class)
     fun parseTargetSize(value: String, unit: uniffi.velmux_core.TargetSizeUnit) = ready {
         engine.parseTargetSize(value, unit)
