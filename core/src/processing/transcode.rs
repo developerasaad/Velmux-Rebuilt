@@ -236,7 +236,7 @@ unsafe fn make_transform(
         });
     }
     let mut transform = Transform {
-        constant_video_rate: config.frame_rate == FrameRate::Fps30,
+        constant_video_rate: config.frame_rate != FrameRate::Original,
         decoder: sys::avcodec_alloc_context3(decoder_codec),
         encoder: sys::avcodec_alloc_context3(encoder_codec),
         graph: ptr::null_mut(),
@@ -327,16 +327,22 @@ unsafe fn make_transform(
                 })?,
             },
         );
-        (*enc).time_base = if config.frame_rate == FrameRate::Fps30 {
-            sys::AVRational { num: 1, den: 30 }
-        } else {
-            (*input).time_base
-        };
-        (*enc).framerate = if config.frame_rate == FrameRate::Fps30 {
-            sys::AVRational { num: 30, den: 1 }
-        } else {
-            (*input).avg_frame_rate
-        };
+        let requested_rate = config
+            .frame_rate
+            .rational(config.custom_frame_rate.as_ref())?;
+        (*enc).time_base =
+            requested_rate
+                .as_ref()
+                .map_or((*input).time_base, |rate| sys::AVRational {
+                    num: rate.denominator,
+                    den: rate.numerator,
+                });
+        (*enc).framerate = requested_rate
+            .as_ref()
+            .map_or((*input).avg_frame_rate, |rate| sys::AVRational {
+                num: rate.numerator,
+                den: rate.denominator,
+            });
         (*enc).color_primaries = (*dec).color_primaries;
         (*enc).color_trc = (*dec).color_trc;
         (*enc).colorspace = (*dec).colorspace;
@@ -460,11 +466,12 @@ unsafe fn make_transform(
             sar.num,
             sar.den
         );
-        let fps = if config.frame_rate == FrameRate::Fps30 {
-            ",fps=30"
-        } else {
-            ""
-        };
+        let fps = config
+            .frame_rate
+            .rational(config.custom_frame_rate.as_ref())?
+            .map_or_else(String::new, |rate| {
+                format!(",fps=fps={}/{}", rate.numerator, rate.denominator)
+            });
         let trim = preview.map_or_else(String::new, |range| {
             format!(
                 "trim=start=0:end={:.6},",

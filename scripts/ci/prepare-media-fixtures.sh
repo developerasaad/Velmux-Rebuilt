@@ -20,6 +20,8 @@ run_ffmpeg -f lavfi -i 'testsrc2=size=320x180:rate=24000/1001:duration=2' \
   -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
   -map 0:v -map 1:a -c:v libx264 -preset ultrafast -pix_fmt yuv420p -threads:v 1 \
   -c:a aac -b:a 192k -map_metadata -1 "$fixtures/video.mp4"
+run_ffmpeg -i "$fixtures/video.mp4" -vf transpose=clock -c:v libx264 \
+  -preset ultrafast -threads:v 1 -c:a copy "$fixtures/portrait.mp4"
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
   -c:a pcm_s16le -map_metadata -1 "$fixtures/stereo.wav"
 run_ffmpeg -i "$fixtures/stereo.wav" -c:a flac -compression_level 5 "$fixtures/stereo.flac"

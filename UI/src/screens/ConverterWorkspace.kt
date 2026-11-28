@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
@@ -25,13 +26,23 @@ fun ConverterWorkspace(
 ) {
     val formats = remember(media, source.id, video) { media.catalogForSource(source.id, video) }
     val format = formats.firstOrNull { it.format == config.format }
-    val choices = remember(media, source.id, config.format, config.videoCodec, config.videoSize, config.frameRate, config.quality, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate) {
+    val choices = remember(media, source.id, config.format, config.videoCodec, config.videoSize, config.frameRate, config.quality, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate, config.customWidth, config.customHeight, config.customFrameRate) {
         media.configurationChoices(source.id, config)
     }
     var sheet by remember { mutableStateOf<String?>(null) }
     var advancedAudio by remember { mutableStateOf(false) }
     var qualityText by remember(config.quality) { mutableStateOf(config.quality.toString()) }
     val qualityValid = qualityText.toIntOrNull()?.let { it in 18..28 } ?: false
+    var customWidthText by remember(source.id, config.videoSize, config.customWidth) { mutableStateOf(config.customWidth?.toString().orEmpty()) }
+    var customHeightText by remember(source.id, config.videoSize, config.customHeight) { mutableStateOf(config.customHeight?.toString().orEmpty()) }
+    var customRateNumeratorText by remember(source.id, config.frameRate, config.customFrameRate) { mutableStateOf(config.customFrameRate?.numerator?.toString().orEmpty()) }
+    var customRateDenominatorText by remember(source.id, config.frameRate, config.customFrameRate) { mutableStateOf(config.customFrameRate?.denominator?.toString().orEmpty()) }
+    val customWidthValid = customWidthText.toUIntOrNull()?.let { it > 0u } == true
+    val customHeightValid = customHeightText.toUIntOrNull()?.let { it > 0u } == true
+    val customNumeratorValid = customRateNumeratorText.toIntOrNull()?.let { it > 0 } == true
+    val customDenominatorValid = customRateDenominatorText.toIntOrNull()?.let { it > 0 } == true
+    val customSizeValid = config.videoSize != VideoSize.CUSTOM || customWidthValid && customHeightValid
+    val customRateValid = config.frameRate != FrameRate.CUSTOM || customNumeratorValid && customDenominatorValid
     val lossless = config.format == OutputFormat.WAV || config.format == OutputFormat.FLAC
     val lossyControls = choices.audioBitrates.isNotEmpty()
     val qualityVisible = config.videoCodec == VideoCodec.H264 || config.videoCodec == VideoCodec.AUTOMATIC && config.quality != 23.toUByte()
@@ -47,8 +58,56 @@ fun ConverterWorkspace(
                 Choice("Format", format?.label ?: config.format.name, enabled = !submitting) { sheet = "Format" }
                 if (video) {
                     Choice("Codec", videoCodec(config.videoCodec), enabled = !submitting) { sheet = "Codec" }
-                    Choice("Resolution", when(config.videoSize) { VideoSize.ORIGINAL -> "Original"; VideoSize.HD720 -> "720p bounds"; VideoSize.SD480 -> "480p bounds" }, enabled = !submitting) { sheet = "Resolution" }
-                    Choice("Frame rate", if(config.frameRate == FrameRate.ORIGINAL) "Original timing" else "30 fps", enabled = !submitting) { sheet = "Frame rate" }
+                    Choice("Resolution", videoSize(config.videoSize), enabled = !submitting) { sheet = "Resolution" }
+                    if (config.videoSize == VideoSize.CUSTOM) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedTextField(customWidthText, onValueChange = { value ->
+                                customWidthText = value
+                                value.toUIntOrNull()?.takeIf { it > 0u }?.let { onChange(config.copy(customWidth = it)) }
+                            }, label = { Text("Width bound") }, suffix = { Text("px") },
+                                isError = !customWidthValid, singleLine = true, enabled = !submitting,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f).testTag("custom-width"))
+                            OutlinedTextField(customHeightText, onValueChange = { value ->
+                                customHeightText = value
+                                value.toUIntOrNull()?.takeIf { it > 0u }?.let { onChange(config.copy(customHeight = it)) }
+                            }, label = { Text("Height bound") }, suffix = { Text("px") },
+                                isError = !customHeightValid, singleLine = true, enabled = !submitting,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f).testTag("custom-height"))
+                        }
+                        if (!customSizeValid) Text("Enter positive whole-number width and height bounds.", color = MaterialTheme.colorScheme.error)
+                        Text("Display-oriented bounds preserve aspect ratio. Custom bounds may upscale.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Choice("Frame rate", frameRate(config.frameRate), enabled = !submitting) { sheet = "Frame rate" }
+                    if (config.frameRate == FrameRate.CUSTOM) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedTextField(customRateNumeratorText, onValueChange = { value ->
+                                customRateNumeratorText = value
+                                val numerator = value.toIntOrNull()
+                                val denominator = customRateDenominatorText.toIntOrNull()
+                                if (numerator != null && numerator > 0 && denominator != null && denominator > 0) {
+                                    onChange(config.copy(customFrameRate = Rational(numerator, denominator)))
+                                }
+                            }, label = { Text("Numerator") },
+                                isError = !customNumeratorValid, singleLine = true, enabled = !submitting,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f).testTag("custom-fps-numerator"))
+                            OutlinedTextField(customRateDenominatorText, onValueChange = { value ->
+                                customRateDenominatorText = value
+                                val numerator = customRateNumeratorText.toIntOrNull()
+                                val denominator = value.toIntOrNull()
+                                if (numerator != null && numerator > 0 && denominator != null && denominator > 0) {
+                                    onChange(config.copy(customFrameRate = Rational(numerator, denominator)))
+                                }
+                            }, label = { Text("Denominator") },
+                                isError = !customDenominatorValid, singleLine = true, enabled = !submitting,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f).testTag("custom-fps-denominator"))
+                        }
+                        if (!customRateValid) Text("Enter a positive whole-number numerator and denominator.", color = MaterialTheme.colorScheme.error)
+                        Text("Frame rate is numerator / denominator fps, for example 24000 / 1001.", style = MaterialTheme.typography.bodySmall)
+                    }
                     if(qualityVisible) {
                         Text("Encoding quality · ${config.quality}", style = MaterialTheme.typography.titleSmall)
                         Slider(value = config.quality.toFloat(), onValueChange = { onChange(config.copy(quality = it.toInt().toUByte())) }, valueRange = 18f..28f, steps = 9, enabled = !submitting)
@@ -95,7 +154,7 @@ fun ConverterWorkspace(
                 Spacer(Modifier.height(12.dp))
             }
             Surface(shadowElevation = 3.dp) {
-                Button(onClick = onConvert, enabled = !submitting && config.fileName.isNotBlank() && (!qualityVisible || qualityValid), modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
+                Button(onClick = onConvert, enabled = !submitting && config.fileName.isNotBlank() && (!qualityVisible || qualityValid) && customSizeValid && customRateValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
                     if(submitting) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)) }
                     Text(if(submitting) "Validating request…" else "Convert")
                 }
@@ -117,8 +176,8 @@ fun ConverterWorkspace(
             is FormatOption -> value.label
             is VideoCodec -> videoCodec(value)
             is AudioCodec -> audioCodec(value)
-            is VideoSize -> when(value) { VideoSize.ORIGINAL -> "Original"; VideoSize.HD720 -> "720p bounds"; VideoSize.SD480 -> "480p bounds" }
-            is FrameRate -> if(value == FrameRate.ORIGINAL) "Original timing" else "30 fps"
+            is VideoSize -> videoSize(value)
+            is FrameRate -> frameRate(value)
             is UInt -> when(title) { "Sample rate" -> if(value == 0u) "Original" else "$value Hz"; "Channels" -> when(value) { 0u -> "Original"; 1u -> "Mono"; else -> "Stereo" }; else -> if(value == 0u) "Automatic" else "${value / 1000u} kbps" }
             else -> value.toString()
         } }
@@ -138,8 +197,15 @@ fun ConverterWorkspace(
                 "Format" -> config.copy(format = (value as FormatOption).format)
                 "Codec" -> config.copy(videoCodec = value as VideoCodec)
                 "Audio codec" -> config.copy(audioCodec = value as AudioCodec)
-                "Resolution" -> config.copy(videoSize = value as VideoSize)
-                "Frame rate" -> config.copy(frameRate = value as FrameRate)
+                "Resolution" -> if (value == VideoSize.CUSTOM) config.copy(
+                    videoSize = VideoSize.CUSTOM,
+                    customWidth = config.customWidth ?: choices.defaultCustomWidth,
+                    customHeight = config.customHeight ?: choices.defaultCustomHeight,
+                ) else config.copy(videoSize = value as VideoSize)
+                "Frame rate" -> if (value == FrameRate.CUSTOM) config.copy(
+                    frameRate = FrameRate.CUSTOM,
+                    customFrameRate = config.customFrameRate ?: choices.defaultCustomFrameRate,
+                ) else config.copy(frameRate = value as FrameRate)
                 "Sample rate" -> config.copy(sampleRate = (value as UInt).takeIf { it != 0u })
                 "Channels" -> config.copy(channels = (value as UInt).takeIf { it != 0u })
                 else -> config.copy(audioBitrate = (value as UInt).takeIf { it != 0u })
@@ -189,8 +255,31 @@ private fun WorkspacePreview(media: MediaSession, source: SourceSnapshot, previe
 @Composable
 private fun Choice(title: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
     OutlinedButton(onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("choice-$title"), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
-        Text(title, Modifier.weight(1f)); Text(value)
+        Text(title, Modifier.weight(1f)); Text(value, Modifier.weight(1f), textAlign = TextAlign.End)
     }
+}
+private fun videoSize(value: VideoSize) = when (value) {
+    VideoSize.ORIGINAL -> "Original"
+    VideoSize.P2160 -> "2160p bounds"
+    VideoSize.P1440 -> "1440p bounds"
+    VideoSize.P1080 -> "1080p bounds"
+    VideoSize.HD720 -> "720p bounds"
+    VideoSize.SD480 -> "480p bounds"
+    VideoSize.P360 -> "360p bounds"
+    VideoSize.CUSTOM -> "Custom bounds"
+}
+private fun frameRate(value: FrameRate) = when (value) {
+    FrameRate.ORIGINAL -> "Original timing"
+    FrameRate.FPS23976 -> "23.976 fps"
+    FrameRate.FPS24 -> "24 fps"
+    FrameRate.FPS25 -> "25 fps"
+    FrameRate.FPS2997 -> "29.97 fps"
+    FrameRate.FPS30 -> "30 fps"
+    FrameRate.FPS48 -> "48 fps"
+    FrameRate.FPS50 -> "50 fps"
+    FrameRate.FPS5994 -> "59.94 fps"
+    FrameRate.FPS60 -> "60 fps"
+    FrameRate.CUSTOM -> "Custom rate"
 }
 private fun videoCodec(value: VideoCodec) = when(value) { VideoCodec.AUTOMATIC -> "Automatic"; VideoCodec.H264 -> "H.264"; VideoCodec.COPY -> "Copy compatible streams" }
 private fun audioCodec(value: AudioCodec) = when(value) { AudioCodec.AUTOMATIC -> "Automatic"; AudioCodec.AAC -> "AAC"; AudioCodec.MP3 -> "MP3"; AudioCodec.PCM_S16LE -> "PCM 16-bit"; AudioCodec.FLAC -> "FLAC"; AudioCodec.COPY -> "Copy compatible streams" }

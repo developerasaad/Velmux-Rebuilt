@@ -1,6 +1,14 @@
 use crate::{EngineError, MediaInfo};
 use serde::{Deserialize, Serialize};
 
+mod geometry;
+pub(crate) use geometry::{
+    configured_h264_dimensions, configured_video_dimensions, h264_dimensions,
+    scaled_video_dimensions,
+};
+use geometry::{custom_geometry_defaults, FRAME_RATES, VIDEO_SIZES};
+pub use geometry::{FrameRate, VideoSize};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Operation {
     VideoConverter,
@@ -34,19 +42,6 @@ pub enum AudioCodec {
     Copy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
-pub enum VideoSize {
-    Original,
-    Hd720,
-    Sd480,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
-pub enum FrameRate {
-    Original,
-    Fps30,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
 pub struct ConversionConfig {
     pub operation: Operation,
@@ -60,6 +55,12 @@ pub struct ConversionConfig {
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
     pub file_name: String,
+    #[serde(default)]
+    pub custom_width: Option<u32>,
+    #[serde(default)]
+    pub custom_height: Option<u32>,
+    #[serde(default)]
+    pub custom_frame_rate: Option<crate::Rational>,
 }
 
 impl OutputFormat {
@@ -147,6 +148,23 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
         .is_some_and(|count| ![1, 2].contains(&count))
     {
         return Err(invalid("Choose Original, Mono or Stereo."));
+    }
+    config
+        .frame_rate
+        .rational(config.custom_frame_rate.as_ref())?;
+    if config.video_size == VideoSize::Custom {
+        let (width, height) = config
+            .custom_width
+            .zip(config.custom_height)
+            .ok_or_else(|| invalid("Enter both custom resolution bounds."))?;
+        if !(2..=16384).contains(&width)
+            || !(2..=16384).contains(&height)
+            || u64::from(width) * u64::from(height) > 64 * 1024 * 1024
+        {
+            return Err(invalid(
+                "Custom bounds must be 2–16384 pixels per side and at most 64 megapixels.",
+            ));
+        }
     }
     if config.operation == Operation::AudioConverter {
         if config.video_codec != VideoCodec::Automatic
@@ -249,6 +267,9 @@ pub(crate) fn default_config(
             "{}_converted",
             if stem.is_empty() { "media" } else { &stem }
         ),
+        custom_width: None,
+        custom_height: None,
+        custom_frame_rate: None,
     };
     let has_audio = source
         .streams
@@ -297,6 +318,9 @@ pub struct ConfigurationChoices {
     pub sample_rates: Vec<u32>,
     pub channels: Vec<u32>,
     pub audio_bitrates: Vec<u32>,
+    pub default_custom_width: u32,
+    pub default_custom_height: u32,
+    pub default_custom_frame_rate: crate::Rational,
 }
 
 pub(crate) fn audio_target(format: OutputFormat) -> &'static str {
@@ -334,74 +358,6 @@ pub(crate) fn audio_transform_requested(
                     != Some(if channels == 1 { "mono" } else { "stereo" })
         })
         || config.audio_bitrate.is_some()
-}
-
-pub(crate) fn scaled_video_dimensions(
-    video: &crate::VideoInfo,
-    size: VideoSize,
-) -> Result<(u32, u32), EngineError> {
-    let width = video
-        .width
-        .filter(|value| *value > 0)
-        .ok_or_else(|| invalid("The source width is unknown."))?;
-    let height = video
-        .height
-        .filter(|value| *value > 0)
-        .ok_or_else(|| invalid("The source height is unknown."))?;
-    if size == VideoSize::Original {
-        return Ok((width, height));
-    }
-    let sar = video.sample_aspect_ratio.as_ref().map_or(1.0, |ratio| {
-        f64::from(ratio.numerator) / f64::from(ratio.denominator)
-    });
-    if !sar.is_finite() || sar <= 0.0 {
-        return Err(invalid("The source pixel aspect ratio is invalid."));
-    }
-    let (long, short) = if size == VideoSize::Hd720 {
-        (1280.0, 720.0)
-    } else {
-        (854.0, 480.0)
-    };
-    let dw = f64::from(width) * sar;
-    let dh = f64::from(height);
-    let (bw, bh) = if dw >= dh {
-        (long, short)
-    } else {
-        (short, long)
-    };
-    let factor = (bw / dw).min(bh / dh).min(1.0);
-    Ok(if factor < 1.0 {
-        (
-            ((f64::from(width) * factor) as u32 / 2) * 2,
-            ((f64::from(height) * factor) as u32 / 2) * 2,
-        )
-    } else {
-        (width, height)
-    })
-}
-
-pub(crate) fn h264_dimensions(
-    video: &crate::VideoInfo,
-    size: VideoSize,
-) -> Result<(u32, u32), EngineError> {
-    let dimensions = scaled_video_dimensions(video, size)?;
-    if video.width.is_some_and(|width| width > 16384)
-        || video.height.is_some_and(|height| height > 16384)
-        || video
-            .width
-            .zip(video.height)
-            .is_some_and(|(width, height)| u64::from(width) * u64::from(height) > 64 * 1024 * 1024)
-    {
-        return Err(invalid(
-            "The source geometry exceeds this processing route's limits.",
-        ));
-    }
-    if dimensions.0 < 2 || dimensions.1 < 2 || dimensions.0 % 2 != 0 || dimensions.1 % 2 != 0 {
-        return Err(invalid(
-            "H.264 requires even dimensions. Choose a supported size or compatible stream copying.",
-        ));
-    }
-    Ok(dimensions)
 }
 
 pub(crate) fn audio_encoding_required(
@@ -520,12 +476,22 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
                         }))
             })
     };
+    let video_facts = info
+        .streams
+        .iter()
+        .filter_map(|stream| stream.video.as_ref())
+        .find(|video| !video.attached_picture);
+    let (default_custom_width, default_custom_height, default_custom_frame_rate) =
+        custom_geometry_defaults(video_facts);
     let mut result = ConfigurationChoices {
         video_sizes: Vec::new(),
         frame_rates: vec![FrameRate::Original],
         sample_rates: Vec::new(),
         channels: Vec::new(),
         audio_bitrates: Vec::new(),
+        default_custom_width,
+        default_custom_height,
+        default_custom_frame_rate,
     };
     if let Some(stream) = info.streams.iter().find(|stream| {
         stream.kind == StreamKind::Video
@@ -536,10 +502,17 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
     }) {
         let copy_compatible = !muxer.is_null()
             && unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
-        for size in [VideoSize::Original, VideoSize::Hd720, VideoSize::Sd480] {
+        for size in VIDEO_SIZES {
+            let mut candidate = config.clone();
+            candidate.video_size = size;
+            if size == VideoSize::Custom {
+                candidate.custom_width = Some(config.custom_width.unwrap_or(default_custom_width));
+                candidate.custom_height =
+                    Some(config.custom_height.unwrap_or(default_custom_height));
+            }
             let no_size_change = size == VideoSize::Original
                 || stream.video.as_ref().is_some_and(|video| {
-                    scaled_video_dimensions(video, size)
+                    configured_video_dimensions(video, &candidate)
                         .ok()
                         .zip(scaled_video_dimensions(video, VideoSize::Original).ok())
                         .is_some_and(|(selected, original)| selected == original)
@@ -553,7 +526,7 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
                     && stream
                         .video
                         .as_ref()
-                        .is_some_and(|video| h264_dimensions(video, size).is_ok())
+                        .is_some_and(|video| configured_h264_dimensions(video, &candidate).is_ok())
             {
                 result.video_sizes.push(size);
             }
@@ -562,9 +535,9 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
             && stream
                 .video
                 .as_ref()
-                .is_some_and(|video| h264_dimensions(video, config.video_size).is_ok())
+                .is_some_and(|video| configured_h264_dimensions(video, config).is_ok())
         {
-            result.frame_rates.push(FrameRate::Fps30);
+            result.frame_rates = FRAME_RATES.to_vec();
         }
     } else {
         result.video_sizes.push(VideoSize::Original);

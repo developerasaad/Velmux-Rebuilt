@@ -38,10 +38,22 @@ impl Store {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(storage)?;
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(storage)?;
+        if !matches!(version, 0 | 1) {
+            return Err(EngineError::Recovery {
+                detail: format!("This operational database uses unsupported schema version {version}. Keep its data and open it with a compatible Velmux version."),
+            });
+        }
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,submission_key TEXT NOT NULL UNIQUE,request TEXT NOT NULL,record TEXT NOT NULL,state TEXT NOT NULL,created_ms INTEGER NOT NULL,updated_ms INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            PRAGMA user_version=1;").map_err(storage)?;
+            CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);").map_err(storage)?;
+        if version == 0 {
+            connection
+                .pragma_update(None, "user_version", 1)
+                .map_err(storage)?;
+        }
         Ok(Self {
             connection: Mutex::new(connection),
             _owner: owner,
@@ -157,5 +169,146 @@ impl Store {
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), EngineError> {
         self.connection.lock().map_err(storage)?.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[key,value]).map_err(storage)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct OwnedRoot(PathBuf);
+    impl OwnedRoot {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("velmux-store-schema-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn database(&self) -> PathBuf {
+            self.0.join("operations.sqlite3")
+        }
+    }
+    impl Drop for OwnedRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn new_store_initializes_the_supported_schema_version() {
+        let root = OwnedRoot::new();
+        let store = Store::open(&root.0).unwrap();
+        let connection = store.connection.lock().unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let tables: i64 = connection
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('jobs','settings')", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn existing_zero_and_one_versions_preserve_operational_payloads_and_settings() {
+        for version in [0, 1] {
+            let root = OwnedRoot::new();
+            let connection = Connection::open(root.database()).unwrap();
+            // Keep these persisted payloads opaque: schema initialization must
+            // not rewrite an accepted request or a job's recorded state.
+            let request = r#"{"submission_key":"legacy-submission","accepted":"immutable"}"#;
+            let record = r#"{"state":"Paused","source_name":"original.wav"}"#;
+            connection.execute_batch("CREATE TABLE jobs(id TEXT PRIMARY KEY,submission_key TEXT NOT NULL UNIQUE,request TEXT NOT NULL,record TEXT NOT NULL,state TEXT NOT NULL,created_ms INTEGER NOT NULL,updated_ms INTEGER NOT NULL);
+                CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);").unwrap();
+            connection
+                .execute(
+                    "INSERT INTO jobs VALUES(?1,?2,?3,?4,'paused',10,20)",
+                    params!["legacy-job", "legacy-submission", request, record],
+                )
+                .unwrap();
+            connection
+                .execute("INSERT INTO settings VALUES('appearance','dark')", [])
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            drop(connection);
+
+            let store = Store::open(&root.0).unwrap();
+            assert_eq!(
+                store.setting("appearance").unwrap().as_deref(),
+                Some("dark")
+            );
+            let connection = store.connection.lock().unwrap();
+            let retained: (String, String, String, String, i64, i64) = connection
+                .query_row("SELECT submission_key,request,record,state,created_ms,updated_ms FROM jobs WHERE id='legacy-job'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))
+                .unwrap();
+            assert_eq!(
+                retained,
+                (
+                    "legacy-submission".into(),
+                    request.into(),
+                    record.into(),
+                    "paused".into(),
+                    10,
+                    20
+                )
+            );
+            let actual_version: i64 = connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(actual_version, 1);
+        }
+    }
+
+    #[test]
+    fn future_schema_refusal_preserves_its_marker_content_and_journal_mode() {
+        let root = OwnedRoot::new();
+        let connection = Connection::open(root.database()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE future_payload(key TEXT PRIMARY KEY,content BLOB NOT NULL);
+            INSERT INTO future_payload VALUES('unfinished',x'001122ff');
+            PRAGMA user_version=7;",
+            )
+            .unwrap();
+        let journal_mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        drop(connection);
+
+        assert!(
+            matches!(Store::open(&root.0), Err(EngineError::Recovery { detail }) if detail.contains("schema version 7"))
+        );
+
+        let connection = Connection::open(root.database()).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+        let payload: Vec<u8> = connection
+            .query_row(
+                "SELECT content FROM future_payload WHERE key='unfinished'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload, [0, 0x11, 0x22, 0xff]);
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tables, 1,
+            "Refusal must not initialize known-version tables"
+        );
+        let retained_mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained_mode, journal_mode);
     }
 }

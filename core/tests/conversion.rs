@@ -613,6 +613,152 @@ fn real_video_downscale_respects_encoder_alignment_and_target_bounds() {
 }
 
 #[test]
+fn complete_rational_frame_rate_choices_encode_actual_cadence() {
+    let harness = Harness::new("m3-frame-rates");
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let mut cases = Vec::new();
+    for (selection, rate) in [
+        (FrameRate::Fps23976, 24000.0 / 1001.0),
+        (FrameRate::Fps24, 24.0),
+        (FrameRate::Fps25, 25.0),
+        (FrameRate::Fps2997, 30000.0 / 1001.0),
+        (FrameRate::Fps30, 30.0),
+        (FrameRate::Fps48, 48.0),
+        (FrameRate::Fps50, 50.0),
+        (FrameRate::Fps5994, 60000.0 / 1001.0),
+        (FrameRate::Fps60, 60.0),
+        (FrameRate::Custom, 27.0),
+    ] {
+        let mut config = harness.defaults(&source, Operation::VideoConverter);
+        config.video_codec = VideoCodec::H264;
+        config.frame_rate = selection;
+        if selection == FrameRate::Custom {
+            config.custom_frame_rate = Some(velmux_core::Rational {
+                numerator: 54,
+                denominator: 2,
+            });
+        }
+        config.file_name = format!("rate_{selection:?}");
+        let completed = harness.complete(&harness.submit(&source, config).id);
+        cases.push(json!({"path":completed.output.unwrap().locator,"video_codec":"h264","width":320,"height":180,
+            "frame_rate":rate,"audio_codecs":["aac"],"channels":2,"sample_rate":48000,"duration":2.0,"tones":true}));
+    }
+    harness.expect(cases);
+}
+
+#[test]
+fn portrait_bounds_preserve_aspect_and_only_custom_explicitly_upscales() {
+    let harness = Harness::new("m3-custom-bounds");
+    let source = harness.inspect("portrait.mp4", Operation::VideoConverter);
+    let original_hash = digest(&fixture("portrait.mp4"));
+    let mut cases = Vec::new();
+    for (size, width, height, bounds) in [
+        (VideoSize::P2160, 180, 320, None),
+        (VideoSize::Custom, 360, 640, Some((360, 640))),
+        (VideoSize::Custom, 168, 300, Some((320, 300))),
+    ] {
+        let mut config = harness.defaults(&source, Operation::VideoConverter);
+        config.video_codec = VideoCodec::H264;
+        config.video_size = size;
+        if let Some((w, h)) = bounds {
+            config.custom_width = Some(w);
+            config.custom_height = Some(h);
+        }
+        config.file_name = format!("portrait_{width}_{height}");
+        let completed = harness.complete(&harness.submit(&source, config).id);
+        cases.push(json!({"path":completed.output.unwrap().locator,"video_codec":"h264","width":width,"height":height,
+            "display_aspect_ratio":"9/16","audio_codecs":["aac"],"channels":2,"sample_rate":48000,"duration":2.0,
+            "source":"portrait.mp4","match_source_frame":true,"preserve_video_timestamps":true,"tones":true}));
+    }
+    let mut bad = harness.defaults(&source, Operation::VideoConverter);
+    bad.video_size = VideoSize::Custom;
+    bad.custom_width = Some(u32::MAX);
+    bad.custom_height = Some(720);
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), bad),
+        Err(EngineError::Configuration { .. })
+    ));
+    for (numerator, denominator) in [(30, 0), (0, 1), (241, 1)] {
+        let mut bad = harness.defaults(&source, Operation::VideoConverter);
+        bad.frame_rate = FrameRate::Custom;
+        bad.custom_frame_rate = Some(velmux_core::Rational {
+            numerator,
+            denominator,
+        });
+        assert!(matches!(
+            harness
+                .engine()
+                .validate_configuration(source.id.clone(), bad),
+            Err(EngineError::Configuration { .. })
+        ));
+    }
+    assert_eq!(digest(&fixture("portrait.mp4")), original_hash);
+    harness.expect(cases);
+}
+
+#[test]
+fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriting() {
+    let mut harness = Harness::new("m3-legacy-accepted-request");
+    harness
+        .provider
+        .fail_publications
+        .store(1, Ordering::SeqCst);
+    let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.video_codec = VideoCodec::H264;
+    config.frame_rate = FrameRate::Fps30;
+    config.quality = 21;
+    config.file_name = "legacy_accepted".into();
+    let job = harness.submit(&source, config);
+    let mut record = harness.finished(&job.id);
+    assert_eq!(record.state, JobState::Failed);
+    harness.close();
+    let database = harness.root.join("operational/operations.sqlite3");
+    let connection = Connection::open(&database).unwrap();
+    let request: String = connection
+        .query_row("SELECT request FROM jobs WHERE id=?1", [&job.id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut legacy: Value = serde_json::from_str(&request).unwrap();
+    let accepted = legacy["plan"]["config"].as_object_mut().unwrap();
+    for field in ["custom_width", "custom_height", "custom_frame_rate"] {
+        accepted.remove(field);
+    }
+    let legacy_bytes = serde_json::to_string(&legacy).unwrap();
+    connection
+        .execute(
+            "UPDATE jobs SET request=?1 WHERE id=?2",
+            params![legacy_bytes, job.id],
+        )
+        .unwrap();
+    drop(connection);
+    record.state = JobState::Interrupted;
+    record.verified = false;
+    record.verified_size = None;
+    record.verified_hash = None;
+    harness.persist_record(&record, "interrupted");
+    harness.reopen();
+    harness.engine().restart_job(job.id.clone()).unwrap();
+    let completed = harness.complete(&job.id);
+    let persisted: String = Connection::open(&database)
+        .unwrap()
+        .query_row("SELECT request FROM jobs WHERE id=?1", [&job.id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        persisted, legacy_bytes,
+        "An immutable legacy accepted request was rewritten"
+    );
+    assert_eq!(completed.file_name, "legacy_accepted.mp4");
+    harness.expect(vec![json!({"path":completed.output.unwrap().locator,"video_codec":"h264","width":320,"height":180,
+        "frame_rate":30,"audio_codecs":["aac"],"channels":2,"sample_rate":48000,"duration":2.0,"tones":true})]);
+}
+
+#[test]
 fn real_audio_encoders_resampling_channels_and_copy() {
     let harness = Harness::new("audio");
     let source = harness.inspect("stereo.flac", Operation::AudioConverter);

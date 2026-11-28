@@ -1,8 +1,8 @@
 # Implementation sequence
 
-The full product and acceptance requirements are in REQUIREMENTS.md. Authorization currently ends at Milestone 2.
+The full product and acceptance requirements are in REQUIREMENTS.md. Authorization currently ends at Milestone 3.
 
-Milestones 1 and 2 are complete and accepted; their inspected host, Android and Apple evidence is recorded in PROGRESS.md. Authorization ends at Milestone 2. Milestones 3–7 remain pending and require further authorization.
+Milestones 1 and 2 are complete and accepted; their inspected host, Android and Apple evidence is recorded in PROGRESS.md. Milestone 3 is explicitly authorized and in progress. Milestones 4–7 remain pending and require further authorization.
 
 | Milestone | Dependency | Acceptance boundary |
 | --- | --- | --- |
@@ -77,3 +77,13 @@ Native document selection accepts generic openable data, with operation-specific
 Shared alerts extract the authoritative typed core error detail rather than the generated exception debug description. Accepted-request submission temporarily locks configuration controls while leaving unrelated UI and engine work responsive. Mobile acceptance also independently decodes retained published outputs with system FFmpeg tools; those tools belong only to CI verification, never production processing.
 
 The shared theme reports its resolved light/dark appearance to the native host. Android applies system-bar icon styles and the corresponding window background, including transparent-bar behavior on API35. Runtime checks require rendered content/bar colors as well as icon-mode flags and preserve the setting across Activity recreation. iOS sanitization retains the complete accepted 180-byte filename stem plus its actual extension and reserves bounded space for native collision suffixes.
+
+## Milestone 3 implementation sequence
+
+1. Preserve M2 wire enum names, optional/defaulted record evolution and immutable accepted-plan semantics; guard operational schema versions without deleting records. Extend actual codec/container, geometry, rational-rate and audio representation processing in coherent tested slices.
+2. Add the Rust-owned compression/rate-control and transformed-output expectations, then real video/audio adjustments with bounded reverse and measured audio processing.
+3. Extend stable source/stream ownership into intended track composition, subtitles, metadata and artwork; compatibility uses that composition rather than forbidding an otherwise viable source.
+4. Connect complete converter workspaces, truthful estimates, user-requested sample conversion and Target Not Met decisions to actual processing.
+5. Verify real media progressively with independent inspection/decoding, retain M1/M2 regressions, then execute affected Android/iOS runtime and UI gates. Physical hardware limitations remain explicit.
+
+Original is user intent, not a muxer name. Accepted jobs must persist the resolved representation needed for working paths, MIME, publication and restart. Additive configuration/plan evolution must continue reading existing accepted M2 requests without silently re-planning them under new defaults. New capabilities are exposed only as their processing paths become functional.

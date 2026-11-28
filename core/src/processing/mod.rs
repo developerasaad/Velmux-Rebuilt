@@ -229,6 +229,9 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
         sample_rate: None,
         channels: None,
         file_name: "preview".into(),
+        custom_width: None,
+        custom_height: None,
+        custom_frame_rate: None,
     };
     Ok(Plan {
         config,
@@ -329,7 +332,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 .as_ref()
                 .ok_or_else(|| invalid("Video geometry could not be inspected."))?;
             let size_change = config.video_size != VideoSize::Original
-                && scaled_video_dimensions(video, config.video_size)?
+                && configured_video_dimensions(video, config)?
                     != scaled_video_dimensions(video, VideoSize::Original)?;
             let transform =
                 size_change || config.frame_rate != FrameRate::Original || config.quality != 23;
@@ -358,7 +361,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 {
                     return Err(invalid("The current H.264 encoding route cannot preserve this source's high bit depth or HDR. Use compatible stream copying; HDR conversion will be added later."));
                 }
-                let (out_w, out_h) = h264_dimensions(video, config.video_size)?;
+                let (out_w, out_h) = configured_h264_dimensions(video, config)?;
                 item.encoder = Some("libx264".into());
                 item.expected_codec = "h264".into();
                 item.width = Some(out_w);
@@ -486,6 +489,30 @@ pub(crate) fn verify_output(
                         "The finalized video geometry does not match the accepted configuration."
                             .into(),
                 });
+            }
+        }
+        if expected.width.is_some() && plan.preview_range.is_none() {
+            if let Some(requested) = plan
+                .config
+                .frame_rate
+                .rational(plan.config.custom_frame_rate.as_ref())?
+            {
+                let actual = stream
+                    .video
+                    .as_ref()
+                    .and_then(|video| video.average_frame_rate.as_ref())
+                    .ok_or_else(|| {
+                        invalid("The finalized video has no verifiable requested frame rate.")
+                    })?;
+                let rate = f64::from(actual.numerator) / f64::from(actual.denominator);
+                let required = f64::from(requested.numerator) / f64::from(requested.denominator);
+                if !rate.is_finite() || (rate - required).abs() > 0.01 {
+                    return Err(EngineError::InvalidMedia {
+                        detail:
+                            "The finalized frame rate does not match the accepted configuration."
+                                .into(),
+                    });
+                }
             }
         }
         if let Some(rate) = expected.sample_rate {
