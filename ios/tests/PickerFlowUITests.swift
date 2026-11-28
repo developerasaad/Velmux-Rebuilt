@@ -57,7 +57,7 @@ final class PickerFlowUITests: XCTestCase {
         try setOutputName(stem)
         try exerciseCompression()
         capture("Video workspace — actual selected source and H.264")
-        try tap(label: "Convert", scroll: true)
+        try submitConversion()
         try waitForCompletedOutput(stem + ".mp4")
         capture("Jobs — actual picker video conversion completed")
         try verifySettingsPersistenceAndRestore()
@@ -73,7 +73,7 @@ final class PickerFlowUITests: XCTestCase {
         try setOutputName(stem)
         try exerciseCompression()
         capture("Audio workspace — actual selected source and AAC")
-        try tap(label: "Convert", scroll: true)
+        try submitConversion()
         try waitForCompletedOutput(stem + ".m4a")
         capture("Jobs — actual picker audio conversion completed")
     }
@@ -198,6 +198,28 @@ final class PickerFlowUITests: XCTestCase {
         for _ in 0..<6 { if convert.isHittable { break }; app.swipeUp() }
         try waitFor("A valid compression preset must restore submission") { convert.exists && convert.isEnabled }
         capture("Compression — UI-selected Balanced Quality")
+    }
+
+    private func submitConversion() throws {
+        let convert = app.buttons["convert"]
+        // isHittable can become true while only the top of a Form row is
+        // visible. Keep the entire button above the home gesture region so its
+        // native center tap reaches the action rather than the screen edge.
+        func fullyVisible() -> Bool {
+            guard convert.exists, convert.isHittable else { return false }
+            let viewport = app.frame.insetBy(dx: 0, dy: 44)
+            return viewport.contains(convert.frame)
+        }
+        for _ in 0..<6 {
+            if fullyVisible() { break }
+            app.swipeUp()
+        }
+        try waitFor("The complete native Convert button was not reachable") { fullyVisible() && convert.isEnabled }
+        capture("Convert — fully visible native submission action")
+        convert.tap()
+        try waitFor("The native Convert action did not open Jobs") {
+            self.app.navigationBars["Jobs"].exists
+        }
     }
 
     private func waitForCompletedOutput(_ name: String) throws {

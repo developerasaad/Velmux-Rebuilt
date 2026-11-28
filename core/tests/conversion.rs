@@ -3611,7 +3611,7 @@ fn dynamic_loudness_normalization_uses_real_levels_and_preserves_layout_precisio
             AudioPrecision::Pcm16,
             "pcm_s16le",
             16,
-            8.0,
+            8.0_f64,
             vec![440, 660],
         ),
         (
