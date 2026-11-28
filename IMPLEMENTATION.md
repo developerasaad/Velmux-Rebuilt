@@ -109,3 +109,6 @@ Expanded converter profiles are immutable accepted stream settings, separate fro
 
 
 Native Android adaptation retains Gobley 0.3.7 for its demonstrated non-KMP Android Cargo/UniFFI integration, NDK build variants, JNA and c++_shared packaging. The new app directly pins AndroidX Compose Runtime/UI/Foundation 1.9.4 and Material 3 1.4.0, matching the previous stack's Android dependency mapping. Compatibility remains subject to actual compilation and emulator verification. The old shared module is temporarily retained solely for the existing Apple bridge; its complete removal is gated on direct Swift and functional native iOS evidence.
+
+
+Direct Swift generation uses pinned UniFFI 0.29.4 upstream CLI source and its unchanged lockfile as an ignored build tool, not another application engine crate. Its archive reader can inspect Apple staticlib metadata directly, avoiding a separate macOS FFmpeg build. Generated Swift is compiled into the native target with its FFI modulemap; the Rust static archive is linked once with its actual reported non-bundled system closure. The initial simulator executable is an isolated interoperability proof and does not replace production SwiftUI acceptance. See scripts/interop/README.md for the reusable artifact contract.

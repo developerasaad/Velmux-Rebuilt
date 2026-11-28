@@ -1,0 +1,59 @@
+name: Direct Swift interoperability
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: direct-swift-interop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  swift:
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo xcode-select -s /Applications/Xcode_16.4.app
+      - run: rustup toolchain install 1.99.1 --profile minimal --target aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          cache-on-failure: true
+      - run: bash scripts/ci/setup-native.sh
+      - id: identity
+        run: bash scripts/ci/native-key.sh ios
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-ios-arm64-${{ steps.identity.outputs.key }}
+      - uses: actions/cache@v4
+        with:
+          path: build/tools
+          key: uniffi-tools-${{ runner.os }}-${{ runner.arch }}-rust1.99.1-${{ hashFiles('scripts/interop/versions.json') }}
+      - name: Restore or construct identity-matching Apple dependencies
+        id: native
+        run: bash scripts/ffmpeg/build-ios.sh
+      - name: Verify direct Swift with the actual Apple engine
+        run: bash scripts/ci/verify-swift-interop.sh
+      - uses: actions/cache/save@v4
+        if: always() && steps.native.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: scripts/ffmpeg-builder/out
+          key: native-ios-arm64-${{ steps.identity.outputs.key }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: direct-swift-interop-evidence
+          path: |
+            build/swift-interop
+            !build/swift-interop/iphoneos/swiftInteropSmoke
+            !build/swift-interop/iphonesimulator/swiftInteropSmoke
+            build/ios/**/generated
+            build/ios/**/rust-build.log
+            build/ios/**/native-link-flags.json
+            build/ios/**/TARGET-IDENTITY
+          retention-days: 7

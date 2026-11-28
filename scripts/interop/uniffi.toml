@@ -1,0 +1,7 @@
+[bindings.swift]
+module_name = "VelmuxCore"
+ffi_module_name = "VelmuxCoreFFI"
+ffi_module_filename = "VelmuxCoreFFI"
+generate_module_map = true
+omit_argument_labels = false
+omit_checksums = false

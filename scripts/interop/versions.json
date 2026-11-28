@@ -1,0 +1,8 @@
+{
+  "uniffi": {
+    "version": "0.29.4",
+    "commit": "00cd7e313cf73c78637161831ff17f8f53f7b824",
+    "url": "https://codeload.github.com/mozilla/uniffi-rs/tar.gz/00cd7e313cf73c78637161831ff17f8f53f7b824",
+    "sha256": "6b1d59a39739e4b0cb0ffb7b7717f9f5c59e1e5b48b223c900a68cf2bd825474"
+  }
+}
