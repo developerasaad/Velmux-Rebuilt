@@ -49,6 +49,8 @@ import org.json.JSONObject
 import uniffi.velmux_core.AudioCodec
 import uniffi.velmux_core.EngineException
 import uniffi.velmux_core.OutputFormat
+import uniffi.velmux_core.VideoCodec
+import uniffi.velmux_core.VideoRotation
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -569,6 +571,60 @@ class ConversionIntegrationTest {
     }
 
     @Test
+    fun videoRotationAndFlipBakeTheRequestedCornerPositionsIntoRealFrames() {
+        media.beginNative()
+        val uri = grant("orientation-grid.mp4")
+        val sourceHash = hash(uri)
+        val source = media.inspectNative(uri.toString(), "orientation-grid.mp4", true)
+        var acceptedId: String? = null
+        try {
+            val defaults = media.videoAdjustmentDefaults()
+            assertEquals(VideoRotation.ZERO, defaults.rotation)
+            assertFalse(defaults.horizontalFlip)
+            assertFalse(defaults.verticalFlip)
+            val adjustments = defaults.copy(rotation = VideoRotation.CLOCKWISE90, horizontalFlip = true)
+            val configuration = media.defaultsNative(source.id, true).copy(
+                format = OutputFormat.MP4, videoCodec = VideoCodec.H264,
+                fileName = "native-video-adjustments-${UUID.randomUUID()}", videoAdjustments = adjustments,
+            )
+            val beforeInvalid = media.jobsNative().map { it.id }.toSet()
+            try {
+                media.submitNative(source.id, UUID.randomUUID().toString(), configuration.copy(videoCodec = VideoCodec.COPY))
+                fail("Rust accepted stream copying with an active pixel transformation")
+            } catch (_: EngineException.Configuration) { }
+            assertEquals(beforeInvalid, media.jobsNative().map { it.id }.toSet())
+            verifyGridCorners(uri, 160, 96, listOf(Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW))
+            val accepted = media.submitNative(source.id, UUID.randomUUID().toString(), configuration)
+            acceptedId = accepted.id
+            val frozen = acceptedRequestJson(accepted.id)
+            val stored = JSONObject(frozen).getJSONObject("plan").getJSONObject("config").getJSONObject("video_adjustments")
+            assertEquals("Clockwise90", stored.getString("rotation"))
+            assertTrue(stored.getBoolean("horizontal_flip"))
+            assertFalse(stored.getBoolean("vertical_flip"))
+            val completed = awaitJob(accepted.id)
+            assertEquals("completed", completed.state)
+            assertEquals("Processing changed immutable video adjustment intent", frozen, acceptedRequestJson(accepted.id))
+            val output = Uri.parse(requireNotNull(completed.outputLocator))
+            val track = tracks(output).single()
+            assertEquals("video/avc", track.getString(MediaFormat.KEY_MIME))
+            assertEquals("Rotation must change coded geometry, not only a display matrix", 96, track.getInteger(MediaFormat.KEY_WIDTH))
+            assertEquals(160, track.getInteger(MediaFormat.KEY_HEIGHT))
+            assertTrue("Rotation/flip changed the one-second source timeline", track.containsKey(MediaFormat.KEY_DURATION) &&
+                track.getLong(MediaFormat.KEY_DURATION) in 950_000..1_050_000)
+            // Clockwise90 followed by a displayed horizontal flip maps the
+            // original quadrants to red/blue/lime/yellow in raster order.
+            verifyGridCorners(output, 96, 160, listOf(Color.RED, Color.BLUE, Color.GREEN, Color.YELLOW))
+            retainText("android-video-adjusted-facts.txt", "Native decoded corner identities and physical 96×160 raster verified.\n$stored\n$track")
+            retainOutput("android-video-adjusted.mp4", output)
+            assertEquals("Video adjustments altered their user original", sourceHash, hash(uri))
+        } finally {
+            media.releaseNative(source.id)
+            acceptedId?.let { cleanupJob(it) }
+            revoke("orientation-grid.mp4")
+        }
+    }
+
+    @Test
     fun coreInspectionReferencesOwnDurableAccessUntilLastRelease() {
         media.beginNative()
         val uri = grantTransient("video-large.mp4")
@@ -893,6 +949,34 @@ class ConversionIntegrationTest {
             } finally { first.recycle(); second.recycle() }
         } finally { retriever.release() }
         verifyTones(decodeAudio(uri))
+    }
+
+    private fun verifyGridCorners(uri: Uri, width: Int, height: Int, expected: List<Int>) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(context, uri)
+            val frame = requireNotNull(retriever.getFrameAtTime(500_000, MediaMetadataRetriever.OPTION_CLOSEST))
+            try {
+                assertEquals(width, frame.width)
+                assertEquals(height, frame.height)
+                assertTrue("The corner fixture unexpectedly retained display rotation",
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION) in listOf(null, "0"))
+                for ((index, color) in expected.withIndex()) {
+                    val x = if (index % 2 == 0) width / 4 else width * 3 / 4
+                    val y = if (index < 2) height / 4 else height * 3 / 4
+                    var red = 0
+                    var green = 0
+                    var blue = 0
+                    for (dy in -2..2) for (dx in -2..2) {
+                        val pixel = frame.getPixel(x + dx, y + dy)
+                        red += Color.red(pixel); green += Color.green(pixel); blue += Color.blue(pixel)
+                    }
+                    assertTrue("Decoded corner $index has the wrong red component", abs(red / 25 - Color.red(color)) <= 60)
+                    assertTrue("Decoded corner $index has the wrong green component", abs(green / 25 - Color.green(color)) <= 60)
+                    assertTrue("Decoded corner $index has the wrong blue component", abs(blue / 25 - Color.blue(color)) <= 60)
+                }
+            } finally { frame.recycle() }
+        } finally { retriever.release() }
     }
 
     private fun verifyFlacRepresentation(uri: Uri) {

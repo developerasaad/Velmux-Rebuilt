@@ -55,6 +55,7 @@ pub struct VideoInfo {
     /// Container guesses and average rates alone do not establish VFR.
     pub variable_frame_rate: Option<bool>,
     pub rotation_degrees_counter_clockwise: Option<f64>,
+    #[serde(default)]
     pub display_matrix: Vec<i32>,
     pub pixel_format: Option<String>,
     pub bit_depth: Option<u32>,

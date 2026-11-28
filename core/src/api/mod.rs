@@ -224,6 +224,9 @@ impl Engine {
     pub fn audio_adjustment_defaults(&self) -> crate::AudioAdjustments {
         crate::AudioAdjustments::default()
     }
+    pub fn video_adjustment_defaults(&self) -> crate::VideoAdjustments {
+        crate::VideoAdjustments::default()
+    }
     pub fn submit_conversion(
         &self,
         id: String,

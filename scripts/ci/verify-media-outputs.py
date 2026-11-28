@@ -251,6 +251,103 @@ def check_normalization(path, case):
         assert amplitude > 0.005, f'{path}: normalization lost/reordered channel {channel} tone {frequency} Hz'
 
 
+def decoded_video_pixels(path, pixel):
+    return run(['ffmpeg', '-v', 'error', '-nostdin', '-threads', '1', '-noautorotate', '-i', str(path),
+                '-map', '0:v:0', '-pix_fmt', pixel, '-f', 'rawvideo', '-'])
+
+
+def spatial_plane(data, width, height, sample_bytes, quarter, horizontal=False, vertical=False):
+    out_w, out_h = (height, width) if quarter % 2 else (width, height)
+    output = bytearray(len(data))
+    for y in range(height):
+        for x in range(width):
+            if quarter == 0: xx, yy = x, y
+            elif quarter == 1: xx, yy = height - 1 - y, x
+            elif quarter == 2: xx, yy = width - 1 - x, height - 1 - y
+            else: xx, yy = y, width - 1 - x
+            if horizontal: xx = out_w - 1 - xx
+            if vertical: yy = out_h - 1 - yy
+            begin = (y * width + x) * sample_bytes
+            target = (yy * out_w + xx) * sample_bytes
+            output[target:target + sample_bytes] = data[begin:begin + sample_bytes]
+    return bytes(output), out_w, out_h
+
+
+def display_matrix(stream):
+    entry = next((side for side in stream.get('side_data_list', []) if side['side_data_type'] == 'Display Matrix'), None)
+    if entry is None: return None
+    return [int(value) for line in entry['displaymatrix'].strip().splitlines()
+            for value in line.split(':', 1)[1].split()]
+
+
+def check_spatial_video(path, case, info):
+    source_path = FIXTURES / case['source']
+    source_info = probe(source_path, packets=True)
+    source = next(stream for stream in source_info['streams'] if stream['codec_type'] == 'video' and not stream.get('disposition', {}).get('attached_pic'))
+    result = next(stream for stream in info['streams'] if stream['codec_type'] == 'video' and not stream.get('disposition', {}).get('attached_pic'))
+    if case.get('spatial_preserve_source_orientation'):
+        assert display_matrix(result) == display_matrix(source), f'{path}: legacy orientation was unexpectedly baked or discarded'
+        return
+    if case['spatial_baked']:
+        assert display_matrix(result) in (None, [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30]), f'{path}: baked orientation remains in display metadata'
+        assert float(result.get('tags', {}).get('rotate', 0)) == 0, f'{path}: stale rotation tag'
+    sar = Fraction(result.get('sample_aspect_ratio', '1:1').replace(':', '/'))
+    assert sar == Fraction(case['spatial_sar']), f'{path}: physical spatial output has incorrect pixel aspect ratio'
+    pixel = case.get('spatial_pixel_format', 'yuv420p')
+    actual = decoded_video_pixels(path, pixel)
+    if case.get('spatial_same_depth_promotion'):
+        expected = run(['ffmpeg', '-v', 'error', '-nostdin', '-threads', '1', '-noautorotate', '-i', str(source_path),
+                        '-map', '0:v:0', '-vf', 'format=pix_fmts=yuv444p10le,transpose=clock,scale=90:160:flags=bicubic,format=pix_fmts=yuv422p10le',
+                        '-pix_fmt', pixel, '-f', 'rawvideo', '-'])
+    else:
+        original = decoded_video_pixels(source_path, pixel)
+        width, height = source['width'], source['height']
+        sample_bytes = 2 if '10le' in pixel else 1
+        planes = [(width, height), ((width + 1) // 2, (height + 1) // 2), ((width + 1) // 2, (height + 1) // 2)]
+        frame_bytes = sum(w * h * sample_bytes for w, h in planes)
+        assert len(original) % frame_bytes == 0, f'{source_path}: partial decoded source frame'
+        expected = bytearray()
+        for frame in range(len(original) // frame_bytes):
+            position = frame * frame_bytes
+            for w, h in planes:
+                length = w * h * sample_bytes
+                plane = original[position:position + length]
+                plane, w, h = spatial_plane(plane, w, h, sample_bytes, case['spatial_source_clockwise'], case['spatial_source_horizontal'])
+                plane, w, h = spatial_plane(plane, w, h, sample_bytes, case['spatial_clockwise'], case['spatial_horizontal'], case['spatial_vertical'])
+                expected.extend(plane)
+                position += length
+    assert len(actual) == len(expected) > 0, f'{path}: spatial processing changed frame count or media extent'
+    if case['spatial_exact_planes']:
+        assert actual == expected, f'{path}: decoded planes do not match independent pixel-coordinate permutation'
+    else:
+        a, b = array.array('H'), array.array('H')
+        a.frombytes(actual); b.frombytes(expected)
+        if sys.byteorder != 'little': a.byteswap(); b.byteswap()
+        assert any(value % 4 for value in a), f'{path}: spatial route reduced genuine ten-bit precision'
+        error = math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)) / len(a))
+        assert error < (1.5 if case.get('spatial_same_depth_promotion') else 32), f'{path}: spatial ten-bit content differs from independent reference: {error}'
+    if case.get('spatial_preserve_auxiliary'):
+        before_video = media_packets(source_info, 'video')
+        after_video = media_packets(info, 'video')
+        timeline_shift = min(float(packet['pts_time']) for packet in after_video) - min(float(packet['pts_time']) for packet in before_video)
+        for kind in ['audio', 'subtitle']:
+            before = [stream for stream in source_info['streams'] if stream['codec_type'] == kind]
+            after = [stream for stream in info['streams'] if stream['codec_type'] == kind]
+            assert len(before) == len(after), f'{path}: spatial operation lost auxiliary tracks'
+            for src, dst in zip(before, after):
+                assert src['codec_name'] == dst['codec_name'], f'{path}: auxiliary codec changed'
+                for key in ['language', 'title']:
+                    assert src.get('tags', {}).get(key) == dst.get('tags', {}).get(key), f'{path}: auxiliary {key} changed'
+                for key in ['default', 'forced', 'hearing_impaired', 'visual_impaired']:
+                    assert src.get('disposition', {}).get(key) == dst.get('disposition', {}).get(key), f'{path}: auxiliary {key} disposition changed'
+                old = [packet for packet in source_info['packets'] if packet['stream_index'] == src['index']]
+                new = [packet for packet in info['packets'] if packet['stream_index'] == dst['index']]
+                assert old and [packet['data_hash'] for packet in old] == [packet['data_hash'] for packet in new], f'{path}: auxiliary packet payloads changed'
+                for first, second in zip(old, new):
+                    assert_close(float(second['pts_time']) - timeline_shift, float(first['pts_time']), 0.002, f'{path}: auxiliary packet timing and video synchronization')
+        assert [(chapter['start_time'], chapter['end_time'], chapter.get('tags')) for chapter in info['chapters']] == [(chapter['start_time'], chapter['end_time'], chapter.get('tags')) for chapter in source_info['chapters']], f'{path}: chapters changed during spatial processing'
+
+
 def described_aiff_pcm(path, case):
     """Check actual CoreAudio labels and decode PCM without guessing speakers.
 
@@ -435,6 +532,8 @@ def check_case(case):
         actual = described_aiff['s32'] if described_aiff is not None else decoded_audio(path)
         expected = decoded_audio(FIXTURES / case['exact_audio_source'])
         assert actual and actual == expected, f'{path}: lossless encoding changed sample values, speaker order or duration'
+    if 'spatial_baked' in case or case.get('spatial_preserve_source_orientation'):
+        check_spatial_video(path, case, info)
     if 'normalization_source' in case:
         check_normalization(path, case)
     if 'speed_source' in case:

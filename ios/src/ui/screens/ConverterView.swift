@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum ConverterChoice: String, Identifiable {
-    case format, videoCodec, resolution, frameRate, audioCodec, sampleRate, channels, precision
+    case format, videoCodec, resolution, frameRate, audioCodec, sampleRate, channels, precision, rotation
     var id: String { rawValue }
 }
 
@@ -23,6 +23,7 @@ private enum ConverterSheet: Identifiable {
 struct ConverterView: View {
     let seed: WorkspaceSeed
     private let adjustmentDefaults: AudioAdjustments
+    private let videoAdjustmentDefaults: VideoAdjustments
     @ObservedObject var session: AppSession
     @ObservedObject var actions: IosMediaActions
     @Binding var isPresented: Bool
@@ -74,6 +75,7 @@ struct ConverterView: View {
         _compressionDraft = State(initialValue: CompressionDraft(seed.configuration.compression))
         let defaults = session.audioAdjustmentDefaults()
         adjustmentDefaults = defaults
+        videoAdjustmentDefaults = session.videoAdjustmentDefaults()
         let adjustments = seed.configuration.audioAdjustments ?? defaults
         _gainText = State(initialValue: String(Double(adjustments.gainCentidb) / 100))
         _fadeInText = State(initialValue: String(Double(adjustments.fadeInUs) / 1_000_000))
@@ -125,6 +127,22 @@ struct ConverterView: View {
                 }.disabled(submitting)
             }
             compressionControls.disabled(submitting)
+            if video, let limits = choices?.videoAdjustmentLimits {
+                Section {
+                    DisclosureGroup("Output adjustments", isExpanded: $adjustmentsExpanded) {
+                        selection("Rotation", value: rotationLabel(currentVideoAdjustments.rotation), field: .rotation, id: "video-rotation")
+                            .disabled(limits.rotations.isEmpty)
+                        Toggle("Flip horizontally", isOn: videoAdjustmentBinding(\.horizontalFlip))
+                            .disabled(!limits.canFlipHorizontal && !currentVideoAdjustments.horizontalFlip)
+                            .accessibilityIdentifier("video-flip-horizontal")
+                        Toggle("Flip vertically", isOn: videoAdjustmentBinding(\.verticalFlip))
+                            .disabled(!limits.canFlipVertical && !currentVideoAdjustments.verticalFlip)
+                            .accessibilityIdentifier("video-flip-vertical")
+                        Text("Rotation is clockwise from the source's displayed orientation. Flips apply afterward. The preview shows the source.")
+                            .font(.footnote).foregroundColor(.secondary)
+                    }
+                }.disabled(submitting)
+            }
             if !video, let limits = choices?.audioAdjustmentLimits {
                 Section {
                     DisclosureGroup("Audio adjustments", isExpanded: $adjustmentsExpanded) {
@@ -250,6 +268,7 @@ struct ConverterView: View {
     private var sourceSection: some View {
         Section {
             if previewVisible && (!fallbackRequired || fallback != nil) {
+                Text("Source preview").font(.caption).foregroundColor(.secondary)
                 MediaPreview(locator: fallback?.locator ?? seed.source.locator, actions: actions,
                              onUnsupported: { fallbackRequired = true }, handle: seed.previewHandle)
                     .id(fallback?.locator ?? seed.source.locator)
@@ -295,8 +314,6 @@ struct ConverterView: View {
                 case .mediaPayloadApproximation(let bytes, _):
                     LabeledContentRow(title: "Approximate media payload", value: nativeBytes(bytes))
                         .accessibilityIdentifier("output-estimate")
-                    Text("Variable container and metadata overhead adds bytes.")
-                        .font(.footnote).foregroundColor(.secondary)
                 case .unavailable:
                     Text("Estimate unavailable").foregroundColor(.secondary)
                         .accessibilityIdentifier("output-estimate")
@@ -392,6 +409,27 @@ struct ConverterView: View {
         change { $0.audioAdjustments = parsedAdjustments }
     }
 
+    private var currentVideoAdjustments: VideoAdjustments {
+        configuration.videoAdjustments ?? videoAdjustmentDefaults
+    }
+
+    private func videoAdjustmentBinding(_ path: WritableKeyPath<VideoAdjustments, Bool>) -> Binding<Bool> {
+        Binding(get: { currentVideoAdjustments[keyPath: path] }, set: { value in
+            var adjustments = currentVideoAdjustments
+            adjustments[keyPath: path] = value
+            change { $0.videoAdjustments = adjustments }
+        })
+    }
+
+    private func rotationLabel(_ value: VideoRotation) -> String {
+        switch value {
+        case .zero: return "0°"
+        case .clockwise90: return "90°"
+        case .clockwise180: return "180°"
+        case .clockwise270: return "270°"
+        }
+    }
+
     @ViewBuilder private func choiceSheet(_ field: ConverterChoice) -> some View {
         switch field {
         case .format:
@@ -423,6 +461,12 @@ struct ConverterView: View {
             NativeChoiceSheet(title: "Channels", values: choices?.channelLayouts ?? [], selected: configuration.channelLayout ?? .original, label: layoutLabel) { value in change { $0.channelLayout = value; $0.channels = nil }; choice = nil }
         case .precision:
             NativeChoiceSheet(title: "Sample precision", values: choices?.audioPrecisions ?? [], selected: configuration.audioPrecision ?? .original, label: precisionLabel) { value in change { $0.audioPrecision = value }; choice = nil }
+        case .rotation:
+            NativeChoiceSheet(title: "Clockwise rotation", values: choices?.videoAdjustmentLimits?.rotations ?? [], selected: currentVideoAdjustments.rotation, label: rotationLabel) { value in
+                var adjustments = currentVideoAdjustments
+                adjustments.rotation = value
+                change { $0.videoAdjustments = adjustments }; choice = nil
+            }
         }
     }
 

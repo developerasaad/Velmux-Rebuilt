@@ -125,6 +125,7 @@ struct Transform {
     measure_only: bool,
     measured_samples: u64,
     normalization_meter: *mut sys::AVFilterContext,
+    source_display_matrix: Option<Vec<i32>>,
 }
 struct AudioSpeedRuntime {
     next_sample: i64,
@@ -329,9 +330,13 @@ unsafe fn copy_side_data(
     from: *const sys::AVCodecParameters,
     to: *mut sys::AVCodecParameters,
     strip_hdr: bool,
+    strip_orientation: bool,
 ) -> Result<(), EngineError> {
     for index in 0..(*from).nb_coded_side_data {
         let item = &*(*from).coded_side_data.add(index as usize);
+        if strip_orientation && item.type_ == sys::AV_PKT_DATA_DISPLAYMATRIX {
+            continue;
+        }
         if strip_hdr
             && [
                 sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA,
@@ -480,6 +485,7 @@ struct TransformContext<'a> {
     preview: Option<&'a super::PreviewRange>,
     deadline: Option<Instant>,
     hdr_frame: Option<&'a Frame>,
+    display_matrix: Option<&'a [i32]>,
     measure_only: bool,
 }
 
@@ -497,6 +503,7 @@ unsafe fn make_transform(
         preview,
         deadline,
         hdr_frame,
+        display_matrix,
         measure_only,
     } = *context;
     let decoder_codec = sys::avcodec_find_decoder((*(*input).codecpar).codec_id);
@@ -532,6 +539,7 @@ unsafe fn make_transform(
         measure_only,
         measured_samples: 0,
         normalization_meter: ptr::null_mut(),
+        source_display_matrix: None,
     };
     if let Some(range) = preview {
         let end = origin_in_time_base(Some(range.duration_us), (*input).time_base)?;
@@ -581,6 +589,37 @@ unsafe fn make_transform(
         && is_video
         && [sys::AVCOL_TRC_SMPTE2084, sys::AVCOL_TRC_ARIB_STD_B67].contains(&(*dec).color_trc);
     if is_video {
+        if plan.video_transform.is_some() {
+            let side = sys::av_packet_side_data_get(
+                (*(*input).codecpar).coded_side_data,
+                (*(*input).codecpar).nb_coded_side_data,
+                sys::AV_PKT_DATA_DISPLAYMATRIX,
+            );
+            let (data, size) = if !side.is_null() {
+                ((*side).data, (*side).size)
+            } else {
+                let mut size = 0;
+                let data =
+                    sys::av_stream_get_side_data(input, sys::AV_PKT_DATA_DISPLAYMATRIX, &mut size);
+                (data, size)
+            };
+            let matrix = if data.is_null() {
+                Vec::new()
+            } else {
+                if size != 9 * std::mem::size_of::<i32>() {
+                    return Err(EngineError::InvalidMedia {
+                        detail: "The source display orientation is malformed.".into(),
+                    });
+                }
+                (0..9)
+                    .map(|index| ptr::read_unaligned(data.cast::<i32>().add(index)))
+                    .collect()
+            };
+            if display_matrix.is_none_or(|expected| expected != matrix.as_slice()) {
+                return Err(EngineError::SourceAccess {detail:"The source display orientation differs from the immutable accepted source facts. Inspect it again before processing.".into()});
+            }
+            transform.source_display_matrix = Some(matrix);
+        }
         (*enc).flags |= sys::AV_CODEC_FLAG_FRAME_DURATION as i32;
         (*enc).width = plan.width.unwrap() as i32;
         (*enc).height = plan.height.unwrap() as i32;
@@ -607,22 +646,33 @@ unsafe fn make_transform(
             } else {
                 sys::AVRational { num: 1, den: 1 }
             };
-        (*enc).sample_aspect_ratio = source_sar;
-        (*enc).sample_aspect_ratio = sys::av_mul_q(
-            (*enc).sample_aspect_ratio,
-            sys::AVRational {
-                num: (*dec).width.checked_mul((*enc).height).ok_or_else(|| {
-                    EngineError::InvalidMedia {
-                        detail: "Video aspect-ratio arithmetic exceeded its bounds.".into(),
-                    }
-                })?,
-                den: (*dec).height.checked_mul((*enc).width).ok_or_else(|| {
-                    EngineError::InvalidMedia {
-                        detail: "Video aspect-ratio arithmetic exceeded its bounds.".into(),
-                    }
-                })?,
-            },
-        );
+        if let Some(spatial) = &plan.video_transform {
+            let sar = &spatial.output_sample_aspect_ratio;
+            if sar.numerator <= 0 || sar.denominator <= 0 {
+                return Err(failure(-libc::EINVAL, "Encode"));
+            }
+            (*enc).sample_aspect_ratio = sys::AVRational {
+                num: sar.numerator,
+                den: sar.denominator,
+            };
+        } else {
+            (*enc).sample_aspect_ratio = source_sar;
+            (*enc).sample_aspect_ratio = sys::av_mul_q(
+                (*enc).sample_aspect_ratio,
+                sys::AVRational {
+                    num: (*dec).width.checked_mul((*enc).height).ok_or_else(|| {
+                        EngineError::InvalidMedia {
+                            detail: "Video aspect-ratio arithmetic exceeded its bounds.".into(),
+                        }
+                    })?,
+                    den: (*dec).height.checked_mul((*enc).width).ok_or_else(|| {
+                        EngineError::InvalidMedia {
+                            detail: "Video aspect-ratio arithmetic exceeded its bounds.".into(),
+                        }
+                    })?,
+                },
+            );
+        }
         let requested_rate = plan.frame_rate.clone().or(config
             .frame_rate
             .rational(config.custom_frame_rate.as_ref())?);
@@ -836,7 +886,12 @@ unsafe fn make_transform(
         sys::avcodec_parameters_from_context((*out).codecpar, enc),
         "Encode",
     )?;
-    copy_side_data((*input).codecpar, (*out).codecpar, transform.tone_map)?;
+    copy_side_data(
+        (*input).codecpar,
+        (*out).codecpar,
+        transform.tone_map,
+        plan.video_transform.is_some(),
+    )?;
     (*(*out).codecpar).codec_tag = 0;
     (*out).time_base = (*enc).time_base;
     if is_video {
@@ -888,6 +943,12 @@ unsafe fn make_transform(
         } else {
             ""
         };
+        let spatial = plan
+            .video_transform
+            .as_ref()
+            .map(|spatial| spatial.filters())
+            .transpose()?
+            .unwrap_or_default();
         let pixel_name = sys::av_get_pix_fmt_name((*enc).pix_fmt);
         if pixel_name.is_null() {
             return Err(failure(-libc::EINVAL, "Filter"));
@@ -912,7 +973,7 @@ unsafe fn make_transform(
             "buffersink",
             args,
             format!(
-                "{trim}{tone}scale={}:{}:flags=bicubic{color},format=pix_fmts={}{fps}",
+                "{trim}{spatial}{tone}scale={}:{}:flags=bicubic{color},format=pix_fmts={}{fps}",
                 (*enc).width,
                 (*enc).height,
                 CStr::from_ptr(pixel_name).to_string_lossy()
@@ -1233,6 +1294,9 @@ impl Transform {
             } else {
                 0
             };
+            if self.source_display_matrix.is_some() {
+                sys::av_frame_remove_side_data(frame.0, sys::AV_FRAME_DATA_DISPLAYMATRIX);
+            }
             if self.tone_map {
                 for kind in [
                     sys::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA,
@@ -1375,6 +1439,24 @@ impl Transform {
                 });
             }
             (*frame.0).pts = shift_timestamp((*frame.0).pts, self.timestamp_origin)?;
+            if let Some(expected) = &self.source_display_matrix {
+                let side = sys::av_frame_get_side_data(frame.0, sys::AV_FRAME_DATA_DISPLAYMATRIX);
+                if !side.is_null() {
+                    if (*side).data.is_null() || (*side).size != 9 * std::mem::size_of::<i32>() {
+                        return Err(EngineError::InvalidMedia {
+                            detail: "A decoded frame has malformed display orientation.".into(),
+                        });
+                    }
+                    let actual = (0..9)
+                        .map(|index| ptr::read_unaligned((*side).data.cast::<i32>().add(index)))
+                        .collect::<Vec<_>>();
+                    let identity = [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30];
+                    if actual != *expected && !(expected.is_empty() && actual == identity) {
+                        return Err(EngineError::UnsupportedMedia {detail:"The decoded video changes display orientation beyond the accepted source facts. This spatial operation cannot safely ignore that change.".into()});
+                    }
+                }
+                sys::av_frame_remove_side_data(frame.0, sys::AV_FRAME_DATA_DISPLAYMATRIX);
+            }
             self.fill_audio_gap(frame, out, filtered, packet, token, progress)?;
             if let Some(duration_us) = self.preview_duration {
                 let end = origin_in_time_base(Some(duration_us), self.input_time_base)?;
@@ -1518,6 +1600,7 @@ pub(super) fn measure_audio_duration(
                     preview: None,
                     deadline: None,
                     hdr_frame: None,
+                    display_matrix: None,
                     measure_only: true,
                 },
             )?));
@@ -1739,6 +1822,16 @@ pub(crate) fn convert(
             sys::av_dict_copy(&mut (*out).metadata, (*inf).metadata, 0),
             "Mux",
         )?;
+        if plan
+            .streams
+            .iter()
+            .any(|stream| stream.video_transform.is_some())
+        {
+            check(
+                sys::av_dict_set(&mut (*out).metadata, c"rotate".as_ptr(), ptr::null(), 0),
+                "Mux",
+            )?;
+        }
         // Chapters are copied only to an explicitly compatible representation.
         if (*inf).nb_chapters > 0 && plan.preview_range.is_none() {
             if representation.format != crate::OutputFormat::Matroska {
@@ -1787,6 +1880,12 @@ pub(crate) fn convert(
                 sys::av_dict_copy(&mut (*dest).metadata, (*src).metadata, 0),
                 "Mux",
             )?;
+            if item.video_transform.is_some() {
+                check(
+                    sys::av_dict_set(&mut (*dest).metadata, c"rotate".as_ptr(), ptr::null(), 0),
+                    "Mux",
+                )?;
+            }
             if let Some(encoder) = &item.encoder {
                 let video = source.streams[item.index as usize].video.as_ref();
                 let needs_hdr_frame = plan.preview_range.is_none()
@@ -1823,6 +1922,7 @@ pub(crate) fn convert(
                         preview: plan.preview_range.as_ref(),
                         deadline,
                         hdr_frame: hdr_frame.as_ref(),
+                        display_matrix: video.map(|video| video.display_matrix.as_slice()),
                         measure_only: false,
                     },
                 )?));

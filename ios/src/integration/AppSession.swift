@@ -188,6 +188,10 @@ final class AppSession: ObservableObject {
         engine.audioAdjustmentDefaults()
     }
 
+    func videoAdjustmentDefaults() -> VideoAdjustments {
+        engine.videoAdjustmentDefaults()
+    }
+
     func videoCompressionControl(kind: CompressionControlKind, value: UInt64) throws -> VideoRateControl {
         try engine.videoCompressionControl(kind: kind, value: value)
     }

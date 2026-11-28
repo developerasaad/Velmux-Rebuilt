@@ -21,7 +21,7 @@ use velmux_core::{
     CompressionMode, CompressionSettings, ConversionConfig, Engine, EngineError, FrameRate,
     InspectedSource, JobObserver, JobRecord, JobState, MediaProvider, NativeProvider, OpenedSource,
     Operation, OutputFormat, OutputReservation, PublishedOutput, StreamKind, TargetSize,
-    TargetSizeUnit, VideoCodec, VideoRateControl, VideoSize,
+    TargetSizeUnit, VideoAdjustments, VideoCodec, VideoRateControl, VideoRotation, VideoSize,
 };
 
 fn repository() -> PathBuf {
@@ -807,7 +807,7 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         })
         .unwrap();
     let mut legacy: Value = serde_json::from_str(&request).unwrap();
-    assert_eq!(legacy["version"], 4);
+    assert_eq!(legacy["version"], 5);
     assert_eq!(legacy["plan"]["output"]["format"], "Mp4");
     legacy.as_object_mut().unwrap().remove("version");
     legacy["plan"].as_object_mut().unwrap().remove("output");
@@ -3216,6 +3216,320 @@ fn every_advertised_explicit_codec_and_container_pair_produces_verified_media() 
     harness.expect(cases);
 }
 
+fn spatial_case(
+    job: &JobRecord,
+    source: &str,
+    width: u32,
+    height: u32,
+    user: (u32, bool, bool),
+    orientation: (u32, bool),
+) -> Value {
+    let (rotation, horizontal, vertical) = user;
+    let (source_rotation, source_horizontal) = orientation;
+    json!({"path":job.output.as_ref().unwrap().locator,"video_codec":"ffv1","width":width,"height":height,"audio_codecs":[],"duration":1.0,
+        "source":source,"spatial_source_clockwise":source_rotation,"spatial_source_horizontal":source_horizontal,
+        "spatial_clockwise":rotation,"spatial_horizontal":horizontal,"spatial_vertical":vertical,"spatial_exact_planes":true,"pixel_format":"yuv420p","spatial_baked":true,"spatial_sar":"1/1"})
+}
+
+#[test]
+fn all_video_quarter_turn_and_flip_combinations_transform_real_coded_planes() {
+    let harness = Harness::new("m3-spatial-grid");
+    let source = harness.inspect("orientation-grid.mp4", Operation::VideoConverter);
+    let original = digest(&fixture("orientation-grid.mp4"));
+    assert_eq!(
+        harness.engine().video_adjustment_defaults(),
+        VideoAdjustments::default()
+    );
+    let mut cases = Vec::new();
+    for (quarters, rotation) in [
+        (0, VideoRotation::Zero),
+        (1, VideoRotation::Clockwise90),
+        (2, VideoRotation::Clockwise180),
+        (3, VideoRotation::Clockwise270),
+    ] {
+        for horizontal_flip in [false, true] {
+            for vertical_flip in [false, true] {
+                let mut config = harness.defaults(&source, Operation::VideoConverter);
+                config.format = OutputFormat::Matroska;
+                config.video_codec = VideoCodec::Ffv1;
+                config.video_adjustments = Some(VideoAdjustments {
+                    rotation,
+                    horizontal_flip,
+                    vertical_flip,
+                });
+                let choices = harness
+                    .engine()
+                    .configuration_choices(source.id.clone(), config.clone())
+                    .unwrap()
+                    .video_adjustment_limits
+                    .unwrap();
+                assert!(choices.rotations.contains(&rotation));
+                assert!(choices.can_flip_horizontal && choices.can_flip_vertical);
+                let job = harness.complete(&harness.submit(&source, config).id);
+                let (w, h) = if quarters % 2 == 0 {
+                    (160, 96)
+                } else {
+                    (96, 160)
+                };
+                let mut case = spatial_case(
+                    &job,
+                    "orientation-grid.mp4",
+                    w,
+                    h,
+                    (quarters, horizontal_flip, vertical_flip),
+                    (0, false),
+                );
+                if quarters == 0 && !horizontal_flip && !vertical_flip {
+                    case["spatial_baked"] = json!(false);
+                }
+                cases.push(case);
+            }
+        }
+    }
+    let mut copy = harness.defaults(&source, Operation::VideoConverter);
+    copy.video_codec = VideoCodec::Automatic;
+    copy.video_adjustments = Some(VideoAdjustments::default());
+    let copied = harness.complete(&harness.submit(&source, copy).id);
+    let saved: Value = serde_json::from_str(&accepted_request_text(&harness, &copied.id)).unwrap();
+    assert!(saved["plan"]["streams"][0]["encoder"].is_null());
+    assert!(saved["plan"]["streams"][0]["video_transform"].is_null());
+    cases.push(json!({"path":copied.output.unwrap().locator,"source":"orientation-grid.mp4","video_codec":"h264","width":160,"height":96,"audio_codecs":[],"duration":1.0,"preserve_video_packets":true}));
+    assert_eq!(digest(&fixture("orientation-grid.mp4")), original);
+    harness.engine().release_inspection(source.id).unwrap();
+    harness.expect(cases);
+}
+
+#[test]
+fn source_display_matrices_sar_hdr_and_asymmetric_chroma_are_baked_once() {
+    let harness = Harness::new("m3-spatial-source-facts");
+    let mut cases = Vec::new();
+    for (name, source_q, source_h, rotation, user_q, hflip, w, h) in [
+        (
+            "orientation-camera90.mp4",
+            1,
+            false,
+            VideoRotation::Clockwise90,
+            1,
+            false,
+            160,
+            96,
+        ),
+        (
+            "orientation-camera90.mp4",
+            1,
+            false,
+            VideoRotation::Zero,
+            0,
+            true,
+            96,
+            160,
+        ),
+        (
+            "orientation-mirror.mp4",
+            0,
+            true,
+            VideoRotation::Clockwise90,
+            1,
+            true,
+            96,
+            160,
+        ),
+        (
+            "rotated-sar.mp4",
+            3,
+            false,
+            VideoRotation::Clockwise90,
+            1,
+            false,
+            320,
+            180,
+        ),
+    ] {
+        let source = harness.inspect(name, Operation::VideoConverter);
+        let before = digest(&fixture(name));
+        let mut config = harness.defaults(&source, Operation::VideoConverter);
+        config.format = OutputFormat::Matroska;
+        config.video_codec = VideoCodec::Ffv1;
+        config.video_adjustments = Some(VideoAdjustments {
+            rotation,
+            horizontal_flip: hflip,
+            vertical_flip: false,
+        });
+        let job = harness.complete(&harness.submit(&source, config).id);
+        let mut case = spatial_case(
+            &job,
+            name,
+            w,
+            h,
+            (user_q, hflip, false),
+            (source_q, source_h),
+        );
+        if name == "rotated-sar.mp4" {
+            case["duration"] = json!(2.0);
+            case["spatial_sar"] = json!("4/3");
+        }
+        cases.push(case);
+        assert_eq!(digest(&fixture(name)), before);
+        harness.engine().release_inspection(source.id).unwrap();
+    }
+    for (name, codec, expected, pixel) in [
+        ("spatial422.mkv", VideoCodec::Ffv1, "ffv1", "yuv422p10le"),
+        ("camera10-hdr.mp4", VideoCodec::Hevc, "hevc", "yuv420p10le"),
+    ] {
+        let source = harness.inspect(name, Operation::VideoConverter);
+        let mut config = harness.defaults(&source, Operation::VideoConverter);
+        config.format = if codec == VideoCodec::Hevc {
+            OutputFormat::MpegTs
+        } else {
+            OutputFormat::Matroska
+        };
+        config.video_codec = codec;
+        config.video_adjustments = Some(VideoAdjustments {
+            rotation: VideoRotation::Clockwise90,
+            ..Default::default()
+        });
+        let job = harness.complete(&harness.submit(&source, config).id);
+        let mut case = spatial_case(&job, name, 90, 160, (1, false, false), (0, false));
+        case["video_codec"] = json!(expected);
+        case["pixel_format"] = json!(pixel);
+        case["spatial_pixel_format"] = json!(pixel);
+        case["spatial_exact_planes"] = json!(false);
+        if name == "spatial422.mkv" {
+            case["spatial_same_depth_promotion"] = json!(true);
+            let saved: Value =
+                serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+            assert_eq!(
+                saved["plan"]["streams"][0]["video_transform"]["intermediate_pixel_format"],
+                "yuv444p10le"
+            );
+            assert_eq!(
+                saved["plan"]["streams"][0]["encoding"]["pixel_format"],
+                pixel
+            );
+        } else {
+            case["hdr10_elementary_sei"] = json!(true);
+            case["color_transfer"] = json!("smpte2084");
+            case["color_primaries"] = json!("bt2020");
+            case["color_space"] = json!("bt2020nc");
+        }
+        cases.push(case);
+        harness.engine().release_inspection(source.id).unwrap();
+    }
+    harness.expect(cases);
+}
+
+#[test]
+fn spatial_video_keeps_audio_text_subtitles_chapters_and_rejects_invalid_direct_requests() {
+    let harness = Harness::new("m3-spatial-composition");
+    let source = harness.inspect("chaptered.mkv", Operation::VideoConverter);
+    let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.format = OutputFormat::Matroska;
+    config.video_codec = VideoCodec::Ffv1;
+    config.video_adjustments = Some(VideoAdjustments {
+        horizontal_flip: true,
+        ..Default::default()
+    });
+    let job = harness.complete(&harness.submit(&source, config.clone()).id);
+    let mut case = spatial_case(
+        &job,
+        "chaptered.mkv",
+        320,
+        180,
+        (0, true, false),
+        (0, false),
+    );
+    case["audio_codecs"] = json!(["aac", "aac"]);
+    case["channels"] = json!(2);
+    case["sample_rate"] = json!(48000);
+    case["duration"] = json!(2.0);
+    case["spatial_preserve_auxiliary"] = json!(true);
+    config.video_codec = VideoCodec::Copy;
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(source.id.clone(), config),
+        Err(EngineError::Configuration { .. })
+    ));
+    let arbitrary = harness.inspect("orientation-arbitrary.mp4", Operation::VideoConverter);
+    let mut config = harness.defaults(&arbitrary, Operation::VideoConverter);
+    assert!(harness
+        .engine()
+        .validate_configuration(arbitrary.id.clone(), config.clone())
+        .is_ok());
+    config.video_adjustments = Some(VideoAdjustments {
+        rotation: VideoRotation::Clockwise90,
+        ..Default::default()
+    });
+    assert!(harness
+        .engine()
+        .configuration_choices(arbitrary.id.clone(), config.clone())
+        .unwrap()
+        .video_adjustment_limits
+        .is_none());
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(arbitrary.id.clone(), config),
+        Err(EngineError::Configuration { .. })
+    ));
+    let audio = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&audio, Operation::AudioConverter);
+    config.video_adjustments = Some(VideoAdjustments {
+        vertical_flip: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        harness
+            .engine()
+            .validate_configuration(audio.id.clone(), config),
+        Err(EngineError::Configuration { .. })
+    ));
+    harness.expect(vec![case]);
+}
+
+#[test]
+fn v4_oriented_video_request_restarts_without_adopting_new_baking_policy() {
+    let mut harness = Harness::new("m3-v4-video-request");
+    harness
+        .provider
+        .fail_publications
+        .store(1, Ordering::SeqCst);
+    let source = harness.inspect("rotated-sar.mp4", Operation::VideoConverter);
+    let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.video_codec = VideoCodec::H264;
+    let job = harness.submit(&source, config);
+    let mut record = harness.finished(&job.id);
+    assert_eq!(record.state, JobState::Failed);
+    harness.close();
+    let mut saved: Value = serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+    saved["version"] = json!(4);
+    saved["plan"]["config"]
+        .as_object_mut()
+        .unwrap()
+        .remove("video_adjustments");
+    for stream in saved["plan"]["streams"].as_array_mut().unwrap() {
+        stream.as_object_mut().unwrap().remove("video_transform");
+    }
+    let exact = serde_json::to_string(&saved).unwrap();
+    Connection::open(harness.root.join("operational/operations.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE jobs SET request=?1 WHERE id=?2",
+            params![exact, job.id],
+        )
+        .unwrap();
+    record.state = JobState::Interrupted;
+    record.verified = false;
+    record.verified_size = None;
+    record.verified_hash = None;
+    harness.persist_record(&record, "interrupted");
+    harness.reopen();
+    harness.engine().restart_job(job.id.clone()).unwrap();
+    let done = harness.complete(&job.id);
+    assert_eq!(accepted_request_text(&harness, &job.id), exact);
+    harness.expect(vec![json!({"path":done.output.unwrap().locator,"source":"rotated-sar.mp4","video_codec":"h264","width":320,"height":180,"audio_codecs":[],"duration":2.0,"spatial_preserve_source_orientation":true})]);
+}
+
 fn compression_settings(mode: CompressionMode) -> CompressionSettings {
     CompressionSettings {
         reduce_file_size: true,
@@ -3353,7 +3667,7 @@ fn audio_speed_pitch_fractional_sampling_and_measured_fades_process_actual_sampl
             let job = harness.complete(&harness.submit(&source, config).id);
             let accepted: Value =
                 serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
-            assert_eq!(accepted["version"], 4);
+            assert_eq!(accepted["version"], 5);
             assert_eq!(
                 accepted["plan"]["streams"][0]["audio_filters"]["speed"]["speed_milli"],
                 speed_milli
@@ -3695,7 +4009,7 @@ fn dynamic_loudness_normalization_uses_real_levels_and_preserves_layout_precisio
             .normalize_loudness = false;
         let job = harness.complete(&submitted.id);
         let saved: Value = serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
-        assert_eq!(saved["version"], 4);
+        assert_eq!(saved["version"], 5);
         assert_eq!(
             saved["plan"]["config"]["audio_adjustments"]["normalize_loudness"],
             true

@@ -42,12 +42,20 @@ fun ConverterWorkspace(
 ) {
     val formats = remember(media, source.id, video) { media.catalogForSource(source.id, video) }
     val format = formats.firstOrNull { it.format == config.format }
-    val choices = remember(media, source.id, config.format, config.videoCodec, config.videoSize, config.frameRate, config.quality, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate, config.customWidth, config.customHeight, config.customFrameRate, config.channelLayout, config.audioPrecision, config.compression, config.audioAdjustments) {
+    val choices = remember(media, source.id, config.format, config.videoCodec, config.videoSize, config.frameRate, config.quality, config.audioCodec, config.sampleRate, config.channels, config.audioBitrate, config.customWidth, config.customHeight, config.customFrameRate, config.channelLayout, config.audioPrecision, config.compression, config.audioAdjustments, config.videoAdjustments) {
         media.configurationChoices(source.id, config)
     }
     var sheet by remember { mutableStateOf<String?>(null) }
     var advancedAudio by remember { mutableStateOf(false) }
     var adjustmentsExpanded by remember { mutableStateOf(false) }
+    var videoAdjustmentsExpanded by remember { mutableStateOf(false) }
+    val videoDefaults = remember(media, source.id) { media.videoAdjustmentDefaults() }
+    val videoAdjustments = config.videoAdjustments ?: videoDefaults
+    val videoLimits = choices.videoAdjustmentLimits
+    val videoAdjustmentsValid = !video || videoAdjustments == videoDefaults || videoLimits?.let {
+        videoAdjustments.rotation in it.rotations && (!videoAdjustments.horizontalFlip || it.canFlipHorizontal) &&
+            (!videoAdjustments.verticalFlip || it.canFlipVertical)
+    } == true
     val adjustmentDefaults = remember(media, source.id) { media.audioAdjustmentDefaults() }
     val adjustments = config.audioAdjustments ?: adjustmentDefaults
     var gainText by remember(source.id, adjustments.gainCentidb) { mutableStateOf(BigDecimal(adjustments.gainCentidb).movePointLeft(2).toPlainString()) }
@@ -97,7 +105,7 @@ fun ConverterWorkspace(
     val customDenominatorValid = customRateDenominatorText.toIntOrNull()?.let { it > 0 } == true
     val customSizeValid = config.videoSize != VideoSize.CUSTOM || customWidthValid && customHeightValid
     val customRateValid = config.frameRate != FrameRate.CUSTOM || customNumeratorValid && customDenominatorValid
-    val estimateInputsValid = customSizeValid && customRateValid && adjustmentsValid && compressionEdit.error == null
+    val estimateInputsValid = customSizeValid && customRateValid && adjustmentsValid && videoAdjustmentsValid && compressionEdit.error == null
     // Compare all media intent while excluding filename-only edits. The core
     // receives the actual configuration and owns estimation applicability.
     val estimateKey = visibleConfig.copy(fileName = "")
@@ -120,6 +128,7 @@ fun ConverterWorkspace(
                 Text(source.name, style = MaterialTheme.typography.titleMedium)
                 Text(source.summary, style = MaterialTheme.typography.bodySmall)
                 Text(listOfNotNull(source.durationUs?.let { duration(it) }, source.byteSize?.let { bytes(it) }).joinToString(" · "))
+                Text("Source preview", style = MaterialTheme.typography.labelMedium)
                 WorkspacePreview(media, source, previewHeight)
                 Choice("Format", format?.label ?: config.format.name, enabled = !submitting) { sheet = "Format" }
                 if (video) {
@@ -187,6 +196,31 @@ fun ConverterWorkspace(
                         Text("The retained sample precision is unavailable for this route. Choose an applicable precision or codec.", color = MaterialTheme.colorScheme.error)
                         if (choices.audioPrecisions.isEmpty() || AudioPrecision.ORIGINAL in choices.audioPrecisions) {
                             TextButton(enabled = !submitting, onClick = { onChange(config.copy(audioPrecision = null)) }) { Text("Use original sample precision") }
+                        }
+                    }
+                }
+                if (video && (videoLimits != null || videoAdjustments != videoDefaults)) {
+                    TextButton(enabled = !submitting, onClick = { videoAdjustmentsExpanded = !videoAdjustmentsExpanded }) {
+                        Text(if (videoAdjustmentsExpanded) "Hide output adjustments" else "Output adjustments")
+                    }
+                    if (videoAdjustmentsExpanded) {
+                        if (videoLimits != null) {
+                            Choice("Rotation", videoRotation(videoAdjustments.rotation), enabled = !submitting && videoLimits.rotations.isNotEmpty()) { sheet = "Rotation" }
+                            if (videoLimits.canFlipHorizontal || videoAdjustments.horizontalFlip) {
+                                VideoAdjustmentSwitch("Flip horizontally", videoAdjustments.horizontalFlip, !submitting) {
+                                    onChange(config.copy(videoAdjustments = videoAdjustments.copy(horizontalFlip = it)))
+                                }
+                            }
+                            if (videoLimits.canFlipVertical || videoAdjustments.verticalFlip) {
+                                VideoAdjustmentSwitch("Flip vertically", videoAdjustments.verticalFlip, !submitting) {
+                                    onChange(config.copy(videoAdjustments = videoAdjustments.copy(verticalFlip = it)))
+                                }
+                            }
+                            Text("Clockwise rotation follows the source orientation. Flips use the displayed horizontal and vertical axes.", style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (!videoAdjustmentsValid) {
+                            Text("The retained output adjustments are unavailable for these settings. Choose applicable adjustments or another codec.", color = MaterialTheme.colorScheme.error)
+                            TextButton(enabled = !submitting, onClick = { onChange(config.copy(videoAdjustments = videoDefaults)) }) { Text("Reset output adjustments") }
                         }
                     }
                 }
@@ -273,7 +307,7 @@ fun ConverterWorkspace(
                 Button(onClick = {
                     val current = compressionEditor.evaluate(media, compressionEditor.settings, choices.compressionChoices)
                     if (current.error == null) onConvert(visibleConfig.copy(compression = current.settings))
-                }, enabled = !submitting && config.fileName.isNotBlank() && compressionEdit.error == null && customSizeValid && customRateValid && adjustmentsValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
+                }, enabled = !submitting && config.fileName.isNotBlank() && compressionEdit.error == null && customSizeValid && customRateValid && adjustmentsValid && videoAdjustmentsValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
                     if(submitting) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)) }
                     Text(if(submitting) "Validating request…" else "Convert")
                 }
@@ -290,6 +324,7 @@ fun ConverterWorkspace(
             "Sample rate" -> choices.sampleRates
             "Channel layout" -> choices.channelLayouts
             "Sample precision" -> choices.audioPrecisions
+            "Rotation" -> videoLimits?.rotations ?: emptyList<VideoRotation>()
             else -> emptyList<Any>()
         }
         val labels = values.map { value -> when(value) {
@@ -300,6 +335,7 @@ fun ConverterWorkspace(
             is FrameRate -> frameRate(value)
             is AudioLayout -> audioLayout(value)
             is AudioPrecision -> audioPrecision(value)
+            is VideoRotation -> videoRotation(value)
             is UInt -> when(title) { "Sample rate" -> if(value == 0u) "Original" else "$value Hz"; else -> if(value == 0u) "Automatic" else "${value / 1000u} kbps" }
             else -> value.toString()
         } }
@@ -312,6 +348,7 @@ fun ConverterWorkspace(
             "Sample rate" -> value == (config.sampleRate ?: 0u)
             "Channel layout" -> value == selectedLayout
             "Sample precision" -> value == selectedPrecision
+            "Rotation" -> value == videoAdjustments.rotation
             else -> false
         } }
         OptionSheet(title, labels, selected, onSelect = { index ->
@@ -333,6 +370,7 @@ fun ConverterWorkspace(
                 "Sample rate" -> config.copy(sampleRate = (value as UInt).takeIf { it != 0u })
                 "Channel layout" -> config.copy(channelLayout = (value as AudioLayout).takeUnless { it == AudioLayout.ORIGINAL }, channels = null)
                 "Sample precision" -> config.copy(audioPrecision = (value as AudioPrecision).takeUnless { it == AudioPrecision.ORIGINAL })
+                "Rotation" -> config.copy(videoAdjustments = videoAdjustments.copy(rotation = value as VideoRotation))
                 else -> config
             }); sheet = null
         }, onDismiss = { sheet = null })
@@ -352,7 +390,7 @@ private fun OutputEstimateRow(result: Result<OutputEstimate>?) {
                 }
                 Text(when (val size = estimate.size) {
                     is EstimatedOutputSize.SourceSizeReference -> "Source-size reference: ${formatByteCount(size.bytes)}"
-                    is EstimatedOutputSize.MediaPayloadApproximation -> "Approximate media payload: ${formatByteCount(size.bytes)} + container and metadata overhead"
+                    is EstimatedOutputSize.MediaPayloadApproximation -> "Approximate media payload: ${formatByteCount(size.bytes)}"
                     is EstimatedOutputSize.Unavailable -> "Estimate unavailable"
                 }, style = MaterialTheme.typography.bodySmall)
                 Text(estimate.explanation.take(1000), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -406,6 +444,21 @@ private fun Choice(title: String, value: String, enabled: Boolean = true, onClic
     OutlinedButton(onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("choice-$title"), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
         Text(title, Modifier.weight(1f)); Text(value, Modifier.weight(1f), textAlign = TextAlign.End)
     }
+}
+@Composable
+private fun VideoAdjustmentSwitch(title: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+        .semantics { contentDescription = title }, verticalAlignment = Alignment.CenterVertically) {
+        Text(title, Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+    }
+}
+private fun videoRotation(value: VideoRotation) = when (value) {
+    VideoRotation.ZERO -> "0°"
+    VideoRotation.CLOCKWISE90 -> "90° clockwise"
+    VideoRotation.CLOCKWISE180 -> "180° clockwise"
+    VideoRotation.CLOCKWISE270 -> "270° clockwise"
 }
 private fun videoSize(value: VideoSize) = when (value) {
     VideoSize.ORIGINAL -> "Original"

@@ -13,6 +13,7 @@ pub(crate) struct VideoOutput {
     pub height: u32,
     pub frame_rate: Option<Rational>,
     pub settings: EncodingSettings,
+    pub transform: Option<super::VideoTransformPlan>,
 }
 
 pub(crate) fn video_codec(name: &str) -> Result<VideoCodec, EngineError> {
@@ -131,7 +132,13 @@ pub(crate) fn resolve_video_output(
     let size_change = config.video_size != VideoSize::Original
         && configured_video_dimensions(video, config)?
             != scaled_video_dimensions(video, VideoSize::Original)?;
-    let transform = size_change || config.frame_rate != FrameRate::Original || config.quality != 23;
+    let transform = size_change
+        || config.frame_rate != FrameRate::Original
+        || config.quality != 23
+        || config
+            .video_adjustments
+            .as_ref()
+            .is_some_and(|settings| settings.active());
     let compression_encode = force_video(stream, format, config)?;
     if config.video_codec == VideoCodec::Copy && transform {
         return Err(invalid(
@@ -166,6 +173,7 @@ pub(crate) fn resolve_video_output(
             .ok_or_else(|| invalid("The encoder pixel representation is missing."))?,
     )?;
     Ok(Some(VideoOutput {
+        transform: super::spatial::transform_plan(video, config, dimensions.0, dimensions.1)?,
         width: dimensions.0,
         height: dimensions.1,
         frame_rate: config

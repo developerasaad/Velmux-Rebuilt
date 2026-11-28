@@ -112,7 +112,7 @@ struct AcceptedRequest {
     plan: Plan,
 }
 
-const CURRENT_ACCEPTED_REQUEST_VERSION: u32 = 4;
+const CURRENT_ACCEPTED_REQUEST_VERSION: u32 = 5;
 
 fn legacy_accepted_request_version() -> u32 {
     1

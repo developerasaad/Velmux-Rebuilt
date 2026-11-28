@@ -159,8 +159,9 @@ pub(crate) fn configured_video_dimensions(
     video: &VideoInfo,
     config: &ConversionConfig,
 ) -> Result<(u32, u32), EngineError> {
+    let oriented = super::spatial::oriented_video(video, config)?;
     video_dimensions(
-        video,
+        &oriented,
         config.video_size,
         config.custom_width,
         config.custom_height,

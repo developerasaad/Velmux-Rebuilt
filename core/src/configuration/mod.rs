@@ -23,6 +23,9 @@ pub use compression_choices::{
 pub(crate) use estimate::estimate;
 pub use estimate::{EstimateUnavailableReason, EstimatedOutputSize, OutputEstimate};
 mod geometry;
+mod spatial;
+pub(crate) use spatial::VideoTransformPlan;
+pub use spatial::{VideoAdjustmentLimits, VideoAdjustments, VideoRotation};
 mod video;
 pub(crate) use audio::{
     audio_copy_allowed, audio_encoding_required, audio_transform_requested,
@@ -75,6 +78,8 @@ pub struct ConversionConfig {
     pub compression: Option<CompressionSettings>,
     #[serde(default)]
     pub audio_adjustments: Option<AudioAdjustments>,
+    #[serde(default)]
+    pub video_adjustments: Option<VideoAdjustments>,
 }
 
 pub(crate) fn invalid(detail: impl Into<String>) -> EngineError {
@@ -87,6 +92,20 @@ pub(crate) fn invalid(detail: impl Into<String>) -> EngineError {
 /// or constructing a processing pipeline. Final submission additionally checks
 /// the actual source streams and bundled codec support.
 pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineError> {
+    if config
+        .video_adjustments
+        .as_ref()
+        .is_some_and(|settings| settings.active())
+    {
+        if config.operation != Operation::VideoConverter {
+            return Err(invalid(
+                "Spatial video adjustments apply to Video Converter.",
+            ));
+        }
+        if config.video_codec == VideoCodec::Copy {
+            return Err(invalid("Spatial video adjustments require encoding. Choose Automatic or an applicable encoder."));
+        }
+    }
     if let Some(settings) = &config.audio_adjustments {
         settings.validate()?;
         if config.operation != Operation::AudioConverter && settings.active() {
@@ -305,6 +324,7 @@ pub(crate) fn default_config(
         channel_layout: None,
         compression: Some(CompressionSettings::default()),
         audio_adjustments: None,
+        video_adjustments: None,
     };
     let has_audio = source
         .streams
@@ -354,6 +374,7 @@ pub struct FormatOption {
 pub struct ConfigurationChoices {
     pub compression_choices: CompressionChoices,
     pub audio_adjustment_limits: Option<AudioAdjustmentLimits>,
+    pub video_adjustment_limits: Option<VideoAdjustmentLimits>,
     pub video_sizes: Vec<VideoSize>,
     pub frame_rates: Vec<FrameRate>,
     pub sample_rates: Vec<u32>,
@@ -866,8 +887,9 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
         .iter()
         .find(|stream| primary_video(stream))
         .and_then(|stream| stream.video.as_ref());
+    let oriented_facts = video_facts.and_then(|video| spatial::oriented_video(video, config).ok());
     let (default_custom_width, default_custom_height, default_custom_frame_rate) =
-        custom_geometry_defaults(video_facts);
+        custom_geometry_defaults(oriented_facts.as_ref());
     let mut result = ConfigurationChoices {
         compression_choices: CompressionChoices {
             video: compression_choices::video(info, config),
@@ -884,6 +906,19 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
                 .filter(|stream| stream.kind == StreamKind::Audio)
                 .all(|stream| stream.decoder_available))
         .then(|| adjustments::limits(info, config.audio_adjustments.as_ref())),
+        video_adjustment_limits: (config.operation == Operation::VideoConverter
+            && !info.streams.iter().any(|stream| {
+                stream.subtitle.as_ref().is_some_and(|subtitle| {
+                    subtitle.representation != crate::SubtitleRepresentation::Text
+                })
+            })
+            && info
+                .streams
+                .iter()
+                .filter(|stream| primary_video(stream))
+                .all(|stream| stream.decoder_available))
+        .then(|| video_facts.and_then(spatial::limits))
+        .flatten(),
         video_sizes: Vec::new(),
         frame_rates: vec![FrameRate::Original],
         sample_rates: Vec::new(),

@@ -35,6 +35,8 @@ pub(crate) struct StreamPlan {
     pub frame_rate: Option<crate::Rational>,
     #[serde(default)]
     pub audio_filters: Option<adjustments::AudioFilterPlan>,
+    #[serde(default)]
+    pub video_transform: Option<VideoTransformPlan>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,6 +197,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             encoding: None,
             frame_rate: None,
             audio_filters: None,
+            video_transform: None,
         });
     }
     if let Some(stream) = audio {
@@ -231,6 +234,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
             encoding: None,
             frame_rate: None,
             audio_filters: None,
+            video_transform: None,
         });
     }
     if streams.is_empty() {
@@ -277,6 +281,7 @@ pub(crate) fn preview_plan(info: &MediaInfo, start_us: i64) -> Result<Plan, Engi
         channel_layout: None,
         compression: None,
         audio_adjustments: None,
+        video_adjustments: None,
     };
     Ok(Plan {
         output: Some(OutputRepresentation::from_format(config.format)),
@@ -333,6 +338,18 @@ pub(crate) fn validate_operation(
 pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, EngineError> {
     validate_fields(config)?;
     validate_operation(info, config.operation)?;
+    if config
+        .video_adjustments
+        .as_ref()
+        .is_some_and(|settings| settings.active())
+        && info.streams.iter().any(|stream| {
+            stream.subtitle.as_ref().is_some_and(|subtitle| {
+                subtitle.representation != crate::SubtitleRepresentation::Text
+            })
+        })
+    {
+        return Err(invalid("Bitmap or unknown subtitle placement cannot yet be preserved through spatial video adjustments. Keep these adjustments off or choose a source without those tracks; no subtitle is silently discarded."));
+    }
     let accepted = config;
     let effective = effective_config(info, config)?;
     let config = &effective;
@@ -399,6 +416,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             encoding: None,
             frame_rate: None,
             audio_filters: None,
+            video_transform: None,
         };
         if stream.kind == StreamKind::Video
             && !stream
@@ -413,6 +431,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 item.height = Some(output.height);
                 item.bit_depth = output.settings.bit_depth;
                 item.frame_rate = output.frame_rate;
+                item.video_transform = output.transform;
                 item.encoding = Some(output.settings);
             }
         } else if stream.kind == StreamKind::Audio {
@@ -561,6 +580,50 @@ fn verify_output_with_evidence(
                         "The finalized video geometry does not match the accepted configuration."
                             .into(),
                 });
+            }
+        }
+        if let Some(spatial) = &expected.video_transform {
+            let video = stream
+                .video
+                .as_ref()
+                .ok_or_else(|| invalid("The transformed output video is missing."))?;
+            let identity = [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30];
+            if !video.display_matrix.is_empty() && video.display_matrix != identity
+                || video
+                    .rotation_degrees_counter_clockwise
+                    .is_some_and(|angle| !angle.is_finite() || angle.abs() > 0.00001)
+                || info
+                    .metadata
+                    .iter()
+                    .chain(stream.metadata.iter())
+                    .any(|entry| {
+                        entry.key.eq_ignore_ascii_case("rotate")
+                            && entry
+                                .value
+                                .parse::<f64>()
+                                .ok()
+                                .is_none_or(|angle| !angle.is_finite() || angle.abs() > 0.00001)
+                    })
+            {
+                return Err(EngineError::InvalidMedia {
+                    detail: "The finalized video would apply display orientation a second time."
+                        .into(),
+                });
+            }
+            let actual = video
+                .sample_aspect_ratio
+                .clone()
+                .unwrap_or(crate::Rational {
+                    numerator: 1,
+                    denominator: 1,
+                });
+            let required = &spatial.output_sample_aspect_ratio;
+            if actual.numerator <= 0
+                || actual.denominator <= 0
+                || i128::from(actual.numerator) * i128::from(required.denominator)
+                    != i128::from(required.numerator) * i128::from(actual.denominator)
+            {
+                return Err(EngineError::InvalidMedia {detail:"The finalized sample aspect ratio differs from the accepted spatial geometry.".into()});
             }
         }
         if expected.width.is_some() && plan.preview_range.is_none() {
@@ -817,6 +880,23 @@ mod preview_tests {
                 }),
             }],
         }
+    }
+
+    #[test]
+    fn bitmap_placement_cannot_be_silently_reused_after_spatial_transformation() {
+        let source:MediaInfo=serde_json::from_value(serde_json::json!({"source_identity":"bitmap-canvas","container":"matroska","duration_us":1000000,"metadata":[],"chapters":[],"staged":false,"streams":[
+            {"id":"v","index":0,"container_id":0,"kind":"Video","codec_id":sys::AV_CODEC_ID_H264,"codec":"h264","decoder_available":true,"metadata":[],"disposition":0,"video":{"width":160,"height":96,"pixel_format":"yuv420p","bit_depth":8,"attached_picture":false}},
+            {"id":"s","index":1,"container_id":1,"kind":"Subtitle","codec_id":sys::AV_CODEC_ID_HDMV_PGS_SUBTITLE,"codec":"hdmv_pgs_subtitle","decoder_available":true,"metadata":[],"disposition":0,"subtitle":{"representation":"Bitmap"}}
+        ]})).unwrap();
+        let mut config = default_config(Operation::VideoConverter, &source, "bitmap.mkv");
+        config.video_adjustments = Some(VideoAdjustments {
+            horizontal_flip: true,
+            ..Default::default()
+        });
+        assert!(
+            matches!(plan(&source,&config),Err(EngineError::Configuration{detail}) if detail.contains("Bitmap"))
+        );
+        assert!(choices(&source, &config).video_adjustment_limits.is_none());
     }
 
     #[test]

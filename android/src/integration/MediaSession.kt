@@ -286,6 +286,7 @@ class MediaSession(private val engine: Engine) {
 
     /** Shared adjustment defaults are pure Rust policy, independent of source I/O. */
     fun audioAdjustmentDefaults() = engine.audioAdjustmentDefaults()
+    fun videoAdjustmentDefaults() = engine.videoAdjustmentDefaults()
 
     @Throws(EngineException::class, IllegalStateException::class)
     suspend fun validate(id: String, configuration: ConversionConfig) = withContext(Dispatchers.Default) {

@@ -216,7 +216,8 @@ final class ConversionIntegrationTests: XCTestCase {
 
     /// An independent read-only SQLite connection verifies the durable row,
     /// rather than asking the Rust cache to confirm its own representation.
-    private func assertStoredJob(_ job: JobRecord, key: String, normalized: Bool? = nil, gainCentidb: Int32? = nil) throws {
+    private func assertStoredJob(_ job: JobRecord, key: String, normalized: Bool? = nil, gainCentidb: Int32? = nil,
+                                 videoRotation: String? = nil, horizontalFlip: Bool? = nil, verticalFlip: Bool? = nil) throws {
         let path = URL(fileURLWithPath: IosServices().storageRoot()).appendingPathComponent("operations.sqlite3").path
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
@@ -246,6 +247,16 @@ final class ConversionIntegrationTests: XCTestCase {
             XCTAssertEqual(adjustments["normalize_loudness"] as? Bool, normalized)
             if let gainCentidb { XCTAssertEqual((adjustments["gain_centidb"] as? NSNumber)?.int32Value, gainCentidb) }
         }
+        if let videoRotation {
+            let encodedRequest = String(cString: try XCTUnwrap(sqlite3_column_text(query, 3)))
+            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encodedRequest.utf8)) as? [String: Any])
+            let plan = try XCTUnwrap(request["plan"] as? [String: Any])
+            let configuration = try XCTUnwrap(plan["config"] as? [String: Any])
+            let adjustments = try XCTUnwrap(configuration["video_adjustments"] as? [String: Any])
+            XCTAssertEqual(adjustments["rotation"] as? String, videoRotation)
+            XCTAssertEqual(adjustments["horizontal_flip"] as? Bool, horizontalFlip)
+            XCTAssertEqual(adjustments["vertical_flip"] as? Bool, verticalFlip)
+        }
         if job.state == .completed {
             XCTAssertEqual(record["verified"] as? Bool, true)
             let output = try XCTUnwrap(record["output"] as? [String: Any])
@@ -259,6 +270,7 @@ final class ConversionIntegrationTests: XCTestCase {
         let height: Int
         let duration: Double
         let subtype: FourCharCode
+        let firstFrameCorners: [[Double]]
     }
 
     private func decodeVideo(_ url: URL) throws -> VideoProof {
@@ -277,9 +289,28 @@ final class ConversionIntegrationTests: XCTestCase {
         reader.add(output)
         XCTAssertTrue(reader.startReading(), reader.error?.localizedDescription ?? "AVAssetReader could not start")
         var frames = 0
+        var firstFrameCorners: [[Double]] = []
         var previous = -Double.infinity
         while let sample = output.copyNextSampleBuffer() {
-            XCTAssertNotNil(CMSampleBufferGetImageBuffer(sample))
+            let image = try XCTUnwrap(CMSampleBufferGetImageBuffer(sample))
+            if frames == 0 {
+                XCTAssertEqual(CVPixelBufferLockBaseAddress(image, .readOnly), kCVReturnSuccess)
+                defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
+                let bytes = try XCTUnwrap(CVPixelBufferGetBaseAddress(image)).assumingMemoryBound(to: UInt8.self)
+                let stride = CVPixelBufferGetBytesPerRow(image)
+                let width = CVPixelBufferGetWidth(image), height = CVPixelBufferGetHeight(image)
+                // Average interior pixels of each quadrant to avoid chroma
+                // boundary interpolation and lossy codec edge artifacts.
+                for (x, y) in [(width / 4, height / 4), (3 * width / 4, height / 4),
+                               (width / 4, 3 * height / 4), (3 * width / 4, 3 * height / 4)] {
+                    var rgb = [Double](repeating: 0, count: 3)
+                    for dy in -2...2 { for dx in -2...2 {
+                        let pixel = bytes.advanced(by: (y + dy) * stride + (x + dx) * 4)
+                        rgb[0] += Double(pixel[2]); rgb[1] += Double(pixel[1]); rgb[2] += Double(pixel[0])
+                    } }
+                    firstFrameCorners.append(rgb.map { $0 / 25 })
+                }
+            }
             let timestamp = CMSampleBufferGetPresentationTimeStamp(sample).seconds
             XCTAssertTrue(timestamp.isFinite)
             XCTAssertGreaterThanOrEqual(timestamp, previous)
@@ -287,7 +318,7 @@ final class ConversionIntegrationTests: XCTestCase {
             frames += 1
         }
         XCTAssertEqual(reader.status, .completed, reader.error?.localizedDescription ?? "Video decoding did not finish")
-        return VideoProof(frames: frames, width: Int(dimensions.width), height: Int(dimensions.height), duration: asset.duration.seconds, subtype: subtype)
+        return VideoProof(frames: frames, width: Int(dimensions.width), height: Int(dimensions.height), duration: asset.duration.seconds, subtype: subtype, firstFrameCorners: firstFrameCorners)
     }
 
     private struct AudioProof {
@@ -429,6 +460,88 @@ final class ConversionIntegrationTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: videoURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
         XCTAssertTrue(session.ready)
+    }
+
+    @MainActor
+    func testVideoRotationAndFlipsReachRealNativeDecodedPixels() async throws {
+        let session = try await applicationSession()
+        let original = try fixture("orientation-grid.mp4")
+        let originalHash = try digest(original)
+        originalHashes[original] = originalHash
+        let source = try await session.inspect(IosMediaServices.selectedSource(url: original), operation: .videoConverter)
+        ownedInspections.insert(source.id)
+        let defaults = session.videoAdjustmentDefaults()
+        XCTAssertEqual(defaults.rotation, .zero)
+        XCTAssertFalse(defaults.horizontalFlip); XCTAssertFalse(defaults.verticalFlip)
+        let red = [255.0, 0, 0], green = [0.0, 255, 0]
+        let blue = [0.0, 0, 255], yellow = [255.0, 255, 0]
+        func assertCorners(_ actual: [[Double]], _ expected: [[Double]]) {
+            XCTAssertEqual(actual.count, 4)
+            guard actual.count == 4 else { return }
+            for index in 0..<4 {
+                for channel in 0..<3 {
+                    XCTAssertEqual(actual[index][channel], expected[index][channel], accuracy: 35,
+                                   "Decoded quadrant \(index), RGB channel \(channel) did not follow the accepted transformation")
+                }
+            }
+        }
+        let baseline = try await onWorker { try self.decodeVideo(original) }
+        XCTAssertEqual(baseline.width, 160); XCTAssertEqual(baseline.height, 96)
+        XCTAssertEqual(baseline.frames, 12)
+        assertCorners(baseline.firstFrameCorners, [red, green, blue, yellow])
+        var evidence: [String] = []
+        let cases: [(VideoRotation, Bool, Bool, Int, Int, [[Double]], String)] = [
+            (.clockwise90, true, false, 96, 160, [red, blue, green, yellow], "Clockwise90"),
+            (.zero, false, true, 160, 96, [blue, yellow, red, green], "Zero"),
+        ]
+        for (rotation, horizontal, vertical, width, height, corners, encodedRotation) in cases {
+            var configuration = try await session.defaults(sourceId: source.id, operation: .videoConverter)
+            configuration.format = .mp4; configuration.videoCodec = .h264
+            configuration.fileName = "ios-orientation-" + UUID().uuidString.lowercased()
+            var adjustments = defaults
+            adjustments.rotation = rotation
+            adjustments.horizontalFlip = horizontal; adjustments.verticalFlip = vertical
+            configuration.videoAdjustments = adjustments
+            let limits = try XCTUnwrap(session.choices(sourceId: source.id, configuration: configuration).videoAdjustmentLimits)
+            XCTAssertEqual(Set(limits.rotations), Set([.zero, .clockwise90, .clockwise180, .clockwise270]))
+            XCTAssertTrue(limits.canFlipHorizontal); XCTAssertTrue(limits.canFlipVertical)
+            var invalidCopy = configuration; invalidCopy.videoCodec = .copy
+            do { try await session.validate(sourceId: source.id, configuration: invalidCopy); XCTFail("Rust accepted explicit video copy while pixels must change") }
+            catch EngineError.Configuration {}
+            let key = configuration.fileName
+            let accepted = try await session.submit(sourceId: source.id, key: key, configuration: configuration)
+            ownedJobs[accepted.id] = key + ".mp4"
+            configuration.videoAdjustments = defaults
+            let completed = try await waitForTerminal(session, id: accepted.id)
+            let output = try completedURL(completed)
+            ownedOutputs.insert(output)
+            let proof = try await onWorker {
+                try self.assertStoredJob(completed, key: key, videoRotation: encodedRotation,
+                                         horizontalFlip: horizontal, verticalFlip: vertical)
+                let track = try XCTUnwrap(AVURLAsset(url: output).tracks(withMediaType: .video).first)
+                XCTAssertEqual(track.preferredTransform, .identity, "Rotation must be baked into actual pixels without a second display rotation")
+                return try self.decodeVideo(output)
+            }
+            XCTAssertEqual(proof.width, width); XCTAssertEqual(proof.height, height)
+            XCTAssertEqual(proof.frames, baseline.frames)
+            XCTAssertEqual(proof.subtype, kCMVideoCodecType_H264)
+            XCTAssertEqual(proof.duration, baseline.duration, accuracy: 1.0 / 12)
+            assertCorners(proof.firstFrameCorners, corners)
+            evidence.append("\(rotation), horizontal=\(horizontal), vertical=\(vertical): \(proof.width)×\(proof.height), \(proof.frames) decoded frames, RGB corners=\(proof.firstFrameCorners)")
+        }
+        let audioURL = try fixture("stereo.wav")
+        originalHashes[audioURL] = try digest(audioURL)
+        let audio = try await session.inspect(IosMediaServices.selectedSource(url: audioURL), operation: .audioConverter)
+        ownedInspections.insert(audio.id)
+        var invalidAudio = try await session.defaults(sourceId: audio.id, operation: .audioConverter)
+        var activeVideo = defaults; activeVideo.rotation = .clockwise90
+        invalidAudio.videoAdjustments = activeVideo
+        do { try await session.validate(sourceId: audio.id, configuration: invalidAudio); XCTFail("Rust ignored active video adjustments on Audio Converter") }
+        catch EngineError.Configuration {}
+        XCTAssertEqual(try digest(original), originalHash)
+        let proof = XCTAttachment(string: evidence.joined(separator: "\n"))
+        proof.name = "Independent native video orientation pixel verification"
+        proof.lifetime = .keepAlways; add(proof)
     }
 
     @MainActor

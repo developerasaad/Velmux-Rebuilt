@@ -24,6 +24,44 @@ run_ffmpeg -f lavfi -i 'testsrc2=size=320x180:rate=24000/1001:duration=2' \
 run_ffmpeg -f lavfi -i 'color=red:size=160x96:rate=12:duration=1,drawbox=x=80:y=0:w=80:h=48:color=lime:t=fill,drawbox=x=0:y=48:w=80:h=48:color=blue:t=fill,drawbox=x=80:y=48:w=80:h=48:color=yellow:t=fill' \
   -c:v libx264 -preset ultrafast -crf 12 -pix_fmt yuv420p -threads:v 1 \
   -map_metadata -1 "$fixtures/orientation-grid.mp4"
+# Preserve the manufactured coded pictures and vary only bounded MP4 display
+# matrices, including ordinary camera-style translation to rebased bounds.
+python3 - "$fixtures" <<'SPATIAL_METADATA_FIXTURES'
+import pathlib, struct, sys
+root = pathlib.Path(sys.argv[1])
+original = (root / 'orientation-grid.mp4').read_bytes()
+def boxes(data, start, end):
+    while start < end:
+        assert start + 8 <= end
+        size, kind = struct.unpack_from('>I4s', data, start)
+        header = 8
+        if size == 1:
+            size = struct.unpack_from('>Q', data, start + 8)[0]
+            header = 16
+        if size == 0: size = end - start
+        assert header <= size <= end - start
+        yield kind, start + header, start + size
+        start += size
+positions = []
+for kind, moov, moov_end in boxes(original, 0, len(original)):
+    if kind != b'moov': continue
+    for kind, trak, trak_end in boxes(original, moov, moov_end):
+        if kind != b'trak': continue
+        for kind, payload, end in boxes(original, trak, trak_end):
+            if kind == b'tkhd':
+                position = payload + (52 if original[payload] == 1 else 40)
+                assert position + 36 <= end
+                positions.append(position)
+assert len(positions) == 1
+for name, matrix in {
+    'orientation-camera90.mp4': [0,65536,0,-65536,0,0,96*65536,0,1<<30],
+    'orientation-mirror.mp4': [-65536,0,0,0,65536,0,160*65536,0,1<<30],
+    'orientation-arbitrary.mp4': [46341,46341,0,-46341,46341,0,0,0,1<<30],
+}.items():
+    data = bytearray(original)
+    struct.pack_into('>9i', data, positions[0], *matrix)
+    (root / name).write_bytes(data)
+SPATIAL_METADATA_FIXTURES
 run_ffmpeg -i "$fixtures/video.mp4" -vf transpose=clock -c:v libx264 \
   -preset ultrafast -threads:v 1 -c:a copy "$fixtures/portrait.mp4"
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
@@ -96,6 +134,10 @@ TEN_BIT_SAMPLES
 run_ffmpeg -f rawvideo -pixel_format yuv420p10le -video_size 160x90 -framerate 12 \
   -i "$fixtures/precision10.yuv" -c:v ffv1 -level 3 -threads:v 1 \
   -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv "$fixtures/precision10.mkv"
+# Genuine low-bit ten-bit data with asymmetric chroma exercises explicit
+# same-depth 4:4:4 promotion around physical quarter turns.
+run_ffmpeg -i "$fixtures/precision10.mkv" -pix_fmt yuv422p10le -c:v ffv1 -level 3 -threads:v 1 \
+  "$fixtures/spatial422.mkv"
 run_ffmpeg -i "$fixtures/precision10.mkv" -c:v libx265 -preset ultrafast -crf 18 \
   -x265-params 'pools=1:frame-threads=1:log-level=error' -pix_fmt yuv420p10le \
   -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv "$fixtures/camera10.mp4"
