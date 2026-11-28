@@ -251,6 +251,13 @@ impl Engine {
     ) -> Result<crate::PreviewResult, EngineError> {
         self.media_runtime()?.preview(&id, start_us, cancellation)
     }
+    /// Retire only this source's disposable preview. Its primary inspection and
+    /// accepted-job access remain owned independently; live workers clean up
+    /// only after acknowledging cancellation.
+    pub fn release_preview(&self, id: String) -> Result<(), EngineError> {
+        self.media_runtime()?.release_preview(&id);
+        Ok(())
+    }
     pub fn cache_bytes(&self) -> Result<u64, EngineError> {
         self.media_runtime()?.cache_bytes()
     }

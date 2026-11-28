@@ -133,7 +133,7 @@ impl Runtime {
             duration_us: actual_duration,
         })
     }
-    pub(super) fn release_preview(&self, id: &str) {
+    pub(crate) fn release_preview(&self, id: &str) {
         if let Ok(mut previews) = self.previews.lock() {
             previews.retain(|_, entry| {
                 if entry.source_id != id {

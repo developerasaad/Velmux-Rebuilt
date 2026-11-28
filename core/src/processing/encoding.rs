@@ -1044,7 +1044,7 @@ mod tests {
         ] {
             assert!(matches!(
                 video_settings(codec, &source, 23),
-                Err(EngineError::UnsupportedMedia { .. })
+                Err(EngineError::Configuration { .. })
             ));
         }
     }

@@ -32,7 +32,7 @@ Latest actual CI: `4e65bf2` host 46122147271 passed 45 internal and 34/36 Engine
 
 Remaining migration: prove direct Kotlin/Swift records/errors/callbacks/observation/cancellation/lifetime and native link closure; adapt existing Compose into root Android; implement equivalent SwiftUI with retained OS providers; adopt neutral native layouts/alerts/themes; update every build/test/path/cache/doc reference; remove obsolete shared/KMP infrastructure only after evidence; renew host/Android/iOS runtime, independent media and rendered light/dark/accessibility gates. Then complete remaining M3 tracks/subtitles/transformations/HDR conversion/compression/targets/estimates/samples/metadata/artwork/native routes. Neither migration nor Milestone 3 is complete. Physical-device and hardware limitations remain unchanged.
 
-The existing persistent Goal is paused and its tool supports status changes only, not objective editing/resuming. The user's continuation authorizes current work and expands the governing objective to native migration plus complete Milestone 3 acceptance; no conflicting goal is created. Repository records retain that full scope.
+The existing persistent Goal is active again following the user's resume. Its Milestone 3 objective is governed by the amended complete specification, including native migration and full converter acceptance. The tool cannot edit objective text; no conflicting goal is created. Repository records retain the expanded scope.
 
 ## Verified Milestone 1 foundation
 
@@ -266,3 +266,6 @@ Direct Swift proof — implemented/unverified: checksum-pinned upstream UniFFI 0
 
 
 [Native construction 46123403065](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/46123403065), source `e877299`, passed all four jobs: host, Android arm64/x86_64 and Apple arm64 device/simulator. Actual logs confirm the guarded AIFF repair applied before construction and capability validation/artifact retention completed. This establishes rebuilt/linkable dependencies, not final media or mobile behavior. The first core integration run [46124442839](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/46124442839), `ddc75a9`, compiled production Rust but a new test used P720 instead of the preserved Hd720 enum name; corrected without changing the test intent. Runtime/independent checks did not execute in that run. Android migration and direct Swift runs are now executing against `70f239d`; no outcome is assumed.
+
+
+`f321e20` host [46124802840](https://github.com/developerasaad/Velmux-Rebuilt/actions/runs/46124802840) passed fifty-five internal tests and found one stale typed-error expectation: incompatible HDR-to-SDR-only codec choices now correctly return Configuration (preserving the established direct validation contract), while an unavailable encoder remains UnsupportedMedia. The focused policy assertion is corrected; no accepted media requirement or failure assertion is removed. Engine/media/Clippy checks still require execution. Preview-only release is now exposed through the existing Rust ownership/cancellation implementation for the native session; it does not release the primary inspection.
