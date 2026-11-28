@@ -9,6 +9,7 @@ struct JobsView: View {
     @State private var destructive: JobRecord?
     @State private var restart = false
     @State private var adjustment: JobRecord?
+    @State private var scope = "jobs-" + UUID().uuidString
 
     var body: some View {
         List {
@@ -47,9 +48,9 @@ struct JobsView: View {
                         Button("Discard", role: .destructive) { restart = false; destructive = job }
                     }
                     if let output = job.output, job.state == .completed {
-                        Button("Open") { actions.openOutput(locator: output.locator) { if let detail = $0 { session.present(error: NativePresentationError(detail), scope: "jobs", title: "Unable to open output") } } }
+                        Button("Open") { actions.openOutput(locator: output.locator) { if let detail = $0 { session.present(error: NativePresentationError(detail), scope: scope, title: "Unable to open output") } } }
                             .accessibilityIdentifier("job-open-" + job.fileName)
-                        Button("Share") { actions.shareOutput(locator: output.locator) { if let detail = $0 { session.present(error: NativePresentationError(detail), scope: "jobs", title: "Unable to share output") } } }
+                        Button("Share") { actions.shareOutput(locator: output.locator) { if let detail = $0 { session.present(error: NativePresentationError(detail), scope: scope, title: "Unable to share output") } } }
                             .accessibilityIdentifier("job-share-" + job.fileName)
                     }
                     if [.completed, .canceled].contains(job.state) { Button("Dismiss") { run(job.id) { try await session.dismissJob(id: job.id) } } }
@@ -60,7 +61,7 @@ struct JobsView: View {
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Jobs").navigationBarTitleDisplayMode(.inline)
-        .onAppear { session.setPresentationScope("jobs") }
+        .onAppear { session.setPresentationScope(scope) }
         .confirmationDialog(restart ? "Restart from the beginning?" : "Discard this job?", isPresented: Binding(get: { destructive != nil }, set: { if !$0 { destructive = nil } }), titleVisibility: .visible) {
             if let job = destructive {
                 Button(restart ? "Restart" : "Discard", role: .destructive) {
@@ -79,7 +80,7 @@ struct JobsView: View {
 
     private func run(_ id: String, action: @escaping () async throws -> Void) {
         guard !busy.contains(id) else { return }; busy.insert(id)
-        Task { defer { busy.remove(id) }; do { try await action() } catch { session.present(error: error, scope: "jobs", title: "Unable to update job") } }
+        Task { defer { busy.remove(id) }; do { try await action() } catch { session.present(error: error, scope: scope, title: "Unable to update job") } }
     }
     private func retry(_ job: JobRecord, target: TargetSize?) {
         let identity = job.id + ":" + (target.map { "\($0.amountMilli):\($0.unit)" } ?? "retry")

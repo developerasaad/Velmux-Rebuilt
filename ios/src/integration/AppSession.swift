@@ -18,11 +18,13 @@ enum SessionPhase: Equatable {
 private enum SessionFailure: LocalizedError {
     case notReady
     case requestsBusy
+    case appearanceBusy
 
     var errorDescription: String? {
         switch self {
         case .notReady: return "The application is not ready. Retry initialization before continuing."
         case .requestsBusy: return "Several requests are still finishing. Wait a moment and try again."
+        case .appearanceBusy: return "Wait for the current appearance change to finish."
         }
     }
 }
@@ -63,6 +65,7 @@ final class AppSession: ObservableObject {
     @Published private(set) var ready = false
     @Published private(set) var jobs: [JobRecord] = []
     @Published private(set) var appearance = "system"
+    @Published private(set) var changingAppearance = false
     @Published private(set) var outputLocation = ""
     @Published private(set) var cacheBytes: UInt64 = 0
     @Published private(set) var runtimeError: String?
@@ -292,6 +295,9 @@ final class AppSession: ObservableObject {
 
     func setAppearance(_ value: String) async throws {
         try requireReady()
+        guard !changingAppearance else { throw SessionFailure.appearanceBusy }
+        changingAppearance = true
+        defer { changingAppearance = false }
         let persisted = try await perform { core, _ in
             try core.setAppearance(value: value)
             return try core.appearance()
