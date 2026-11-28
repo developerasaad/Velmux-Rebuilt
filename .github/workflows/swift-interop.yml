@@ -39,6 +39,10 @@ jobs:
         run: bash scripts/ffmpeg/build-ios.sh
       - name: Verify direct Swift with the actual Apple engine
         run: bash scripts/ci/verify-swift-interop.sh
+      - name: Build the native SwiftUI device application
+        run: bash scripts/ci/apple-native-app.sh iphoneos Release
+      - name: Build the native SwiftUI simulator application
+        run: bash scripts/ci/apple-native-app.sh iphonesimulator Debug
       - uses: actions/cache/save@v4
         if: always() && steps.native.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
         with:
@@ -56,4 +60,5 @@ jobs:
             build/ios/**/rust-build.log
             build/ios/**/native-link-flags.json
             build/ios/**/TARGET-IDENTITY
+            build/xcode/native/**/*.log
           retention-days: 7

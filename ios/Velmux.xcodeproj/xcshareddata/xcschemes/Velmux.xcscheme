@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="1640" version="1.3">
+    <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+        <BuildActionEntries>
+            <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+                <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E00000000000000000000001" BuildableName="Velmux.app" BlueprintName="Velmux" ReferencedContainer="container:Velmux.xcodeproj"/>
+            </BuildActionEntry>
+        </BuildActionEntries>
+    </BuildAction>
+    <!-- Existing regression targets remain in platforms/ios until their direct
+         Swift replacements have executed; this scheme makes no test claim. -->
+    <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+        <Testables/>
+    </TestAction>
+    <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugServiceExtension="internal" allowLocationSimulation="YES">
+        <BuildableProductRunnable runnableDebuggingMode="0">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E00000000000000000000001" BuildableName="Velmux.app" BlueprintName="Velmux" ReferencedContainer="container:Velmux.xcodeproj"/>
+        </BuildableProductRunnable>
+    </LaunchAction>
+    <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
+        <BuildableProductRunnable runnableDebuggingMode="0">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E00000000000000000000001" BuildableName="Velmux.app" BlueprintName="Velmux" ReferencedContainer="container:Velmux.xcodeproj"/>
+        </BuildableProductRunnable>
+    </ProfileAction>
+    <AnalyzeAction buildConfiguration="Debug"/>
+    <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>
+</Scheme>
