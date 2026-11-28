@@ -12,7 +12,7 @@ case "${1:-}" in
     resolve_android_ndk
     bash scripts/ffmpeg/build-android.sh arm64-v8a x86_64
     ./gradlew -PbindingsTarget=android :android:assembleRelease
-    python3 scripts/ci/verify-apk.py platforms/android/build/outputs/apk/release/android-release-unsigned.apk
+    python3 scripts/ci/verify-apk.py android/build/outputs/apk/release/android-release-unsigned.apk
     ;;
   ios-device|ios-simulator)
     bash scripts/ffmpeg/build-ios.sh

@@ -1,4 +1,5 @@
 plugins {
+    // Temporary declarations for the existing iOS bridge until direct Swift verification.
     kotlin("multiplatform") version "2.2.20" apply false
     kotlin("android") version "2.2.20" apply false
     kotlin("plugin.compose") version "2.2.20" apply false

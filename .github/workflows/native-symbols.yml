@@ -32,7 +32,7 @@ jobs:
           path: scripts/ffmpeg-builder/out
           key: native-android-x86_64-${{ steps.identity.outputs.key }}
       - name: Reconstruct the matching native debug library
-        run: ./gradlew -PbindingsTarget=android :UI:cargoBuildAndroidX64Debug
+        run: ./gradlew -PbindingsTarget=android :android:cargoBuildAndroidX64Debug
       - name: Resolve native addresses and dependencies
         env:
           ADDRESSES: ${{ inputs.addresses }}

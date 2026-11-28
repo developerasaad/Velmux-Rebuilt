@@ -21,8 +21,8 @@ class MainActivity : ComponentActivity() {
                 // preference different from the operating system's appearance.
                 // API35 forces transparent system bars; the native window
                 // background must match when it is visible beyond Compose.
-                window.setBackgroundDrawable(ColorDrawable(if (dark) 0xFF17120E.toInt() else 0xFFFFF8F3.toInt()))
-                val style = if (dark) SystemBarStyle.dark(0xFF17120E.toInt())
+                window.setBackgroundDrawable(ColorDrawable(if (dark) 0xFF000000.toInt() else 0xFFF5F5F7.toInt()))
+                val style = if (dark) SystemBarStyle.dark(0xFF000000.toInt())
                     else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
                 enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
             })

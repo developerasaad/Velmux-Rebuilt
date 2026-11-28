@@ -120,8 +120,8 @@ jobs:
         with:
           name: android-foundation-evidence
           path: |
-            platforms/android/build/reports
-            platforms/android/build/outputs/androidTest-results
+            android/build/reports
+            android/build/outputs/androidTest-results
             build/android-logcat.txt
             build/android-symbols.txt
             build/android-tombstones

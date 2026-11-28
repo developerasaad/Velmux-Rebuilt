@@ -40,7 +40,7 @@ if len(sys.argv) > 1:
             subprocess.run([str(readelf), '-d', str(output)], check=True)
     raise SystemExit(0)
 
-apk_path = Path('platforms/android/build/outputs/apk/debug/android-debug.apk')
+apk_path = Path('android/build/outputs/apk/debug/android-debug.apk')
 log = Path('build/android-logcat.txt').read_text(errors='replace')
 pcs = {int(value, 16) for value in re.findall(r'#\d+ pc ([0-9a-f]+).*com\.velmux\.mobile.*base\.apk', log)}
 # Android 10 sometimes reports a PC relative to the executable map, not the

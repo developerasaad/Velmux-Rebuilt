@@ -5,6 +5,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.res.AssetFileDescriptor
 import android.net.Uri
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
@@ -12,6 +15,8 @@ import com.velmux.ui.app.MediaServices
 import com.velmux.ui.app.NativePublished
 import com.velmux.ui.app.NativeReservation
 import com.velmux.ui.app.NativeSource
+import com.velmux.ui.app.NativeVideoCandidate
+import com.velmux.ui.app.NativeVideoRequest
 import com.velmux.ui.app.PlatformFailure
 import java.io.File
 import java.io.FileInputStream
@@ -28,6 +33,85 @@ class AndroidMediaServices(context: Context) : MediaServices {
 
     override fun cacheRoot(): String = context.cacheDir.absolutePath
     override fun outputLocation(): String = "${Environment.DIRECTORY_DOWNLOADS}/Velmux/"
+
+    /** OS declarations for one concrete request; no codec session or frame is created here. */
+    override fun nativeVideoCandidates(request: NativeVideoRequest): List<NativeVideoCandidate> {
+        val mime = when (request.codec) {
+            "h264" -> MediaFormat.MIMETYPE_VIDEO_AVC
+            "hevc" -> MediaFormat.MIMETYPE_VIDEO_HEVC
+            else -> return emptyList()
+        }
+        // Bound capability work to the initial 8-bit SDR route. The pinned
+        // FFmpeg MediaCodec byte-buffer wrapper cannot receive P010/Main10.
+        if (request.hdr || request.bitDepth != 8 || request.width !in 2..4096 ||
+            request.height !in 2..4096 || request.width.toLong() * request.height > 4096L * 2160 ||
+            request.width % 2 != 0 || request.height % 2 != 0 ||
+            request.bitRate !in 1L..Int.MAX_VALUE.toLong() || request.frameRateNumerator <= 0 ||
+            request.frameRateDenominator <= 0 ||
+            request.frameRateNumerator % request.frameRateDenominator != 0) return emptyList()
+        val rate = request.frameRateNumerator / request.frameRateDenominator
+        // Match FFmpeg's AVC/HEVC byte-buffer padding. Its bitstream filter
+        // retains the accepted visible size; final output still needs validation.
+        val nativeWidth = (request.width + 15) and -16
+        val nativeHeight = (request.height + 15) and -16
+        if (rate !in 1..120) return emptyList()
+        val colorFormat = when (request.pixelFormat) {
+            "nv12" -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+            "yuv420p" -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
+            else -> return emptyList()
+        }
+        val standard = when (request.colorSpace) {
+            null -> null
+            "bt709" -> MediaFormat.COLOR_STANDARD_BT709
+            "smpte170m" -> MediaFormat.COLOR_STANDARD_BT601_NTSC
+            "bt470bg" -> MediaFormat.COLOR_STANDARD_BT601_PAL
+            else -> return emptyList()
+        }
+        // MediaCodec's color-standard combines primaries and matrix. Decline
+        // combinations that cannot express the inspected fields independently.
+        if (request.colorPrimaries != null && request.colorPrimaries != request.colorSpace ||
+            request.colorTransfer != null && request.colorTransfer !in setOf("bt709", "smpte170m")) return emptyList()
+        val range = when (request.colorRange) {
+            null -> null
+            "tv" -> MediaFormat.COLOR_RANGE_LIMITED
+            "pc" -> MediaFormat.COLOR_RANGE_FULL
+            else -> return emptyList()
+        }
+        return platformOperation("Native video encoder capabilities could not be inspected.") {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.asSequence().take(256)
+                .filter { it.isEncoder && !it.isAlias }
+                .mapNotNull { codec ->
+                    // One malformed vendor declaration must not hide other
+                    // candidates or break the existing software route.
+                    runCatching {
+                        if (!codec.supportedTypes.any { it.equals(mime, ignoreCase = true) }) return@runCatching null
+                        val capabilities = codec.getCapabilitiesForType(mime)
+                        val video = capabilities.videoCapabilities ?: return@runCatching null
+                        if (!video.areSizeAndRateSupported(nativeWidth, nativeHeight, rate.toDouble()) ||
+                            !video.bitrateRange.contains(request.bitRate.toInt()) ||
+                            colorFormat !in capabilities.colorFormats ||
+                            !capabilities.encoderCapabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)) return@runCatching null
+                        val format = MediaFormat.createVideoFormat(mime, nativeWidth, nativeHeight).apply {
+                            setInteger(MediaFormat.KEY_FRAME_RATE, rate)
+                            setInteger(MediaFormat.KEY_BIT_RATE, request.bitRate.toInt())
+                            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                            setInteger(MediaFormat.KEY_COLOR_FORMAT, colorFormat)
+                            if (mime == MediaFormat.MIMETYPE_VIDEO_HEVC) setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
+                            standard?.let { setInteger(MediaFormat.KEY_COLOR_STANDARD, it) }
+                            range?.let { setInteger(MediaFormat.KEY_COLOR_RANGE, it) }
+                            if (request.colorTransfer != null) setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                        }
+                        if (!capabilities.isFormatSupported(format)) return@runCatching null
+                        val hardware = when {
+                            codec.isSoftwareOnly -> false
+                            codec.isHardwareAccelerated -> true
+                            else -> null
+                        }
+                        NativeVideoCandidate(codec.name, hardware, sessionPrepared = false)
+                    }.getOrNull()
+                }.distinctBy { it.identifier }.take(16).toList()
+        }
+    }
 
     override fun retainSourceAccess(locator: String) = AndroidDocumentGrants.retain(context, locator)
     override fun releaseSourceAccess(locator: String) = AndroidDocumentGrants.release(context, locator)

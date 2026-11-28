@@ -2,6 +2,8 @@ package com.velmux.mobile
 
 import android.media.AudioFormat
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -33,6 +35,7 @@ import androidx.test.uiautomator.UiSelector
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import com.velmux.ui.app.JobSnapshot
+import com.velmux.ui.app.NativeVideoRequest
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.Rule
@@ -71,6 +74,81 @@ class ConversionIntegrationTest {
             runCatching { capture("failure-${description.methodName.take(60)}.png") }
             runCatching { retainText("failure-${description.methodName.take(60)}.txt", error.stackTraceToString()) }
         }
+    }
+
+    @Test
+    fun nativeVideoCapabilitiesReportActualOsDeclarationsWithoutHardwareClaims() {
+        val services = AndroidMediaServices(context)
+        val request = NativeVideoRequest(
+            codec = "h264", width = 320, height = 180,
+            frameRateNumerator = 24, frameRateDenominator = 1,
+            bitRate = 2_000_000, pixelFormat = "nv12", bitDepth = 8, hdr = false,
+            colorSpace = "bt709", colorRange = "tv", colorPrimaries = "bt709", colorTransfer = "bt709",
+        )
+        val unsupported = listOf(
+            request.copy(width = 0), request.copy(height = Int.MAX_VALUE),
+            request.copy(frameRateNumerator = 0), request.copy(frameRateDenominator = 0),
+            request.copy(frameRateNumerator = 24_000, frameRateDenominator = 1_001),
+            request.copy(bitRate = -1), request.copy(hdr = true),
+            request.copy(bitDepth = 10, pixelFormat = "p010le"),
+            request.copy(codec = "av1"), request.copy(colorTransfer = "smpte2084"),
+        )
+        for (invalid in unsupported) {
+            assertTrue("The initial native route must reject this representation: $invalid",
+                services.nativeVideoCandidates(invalid).isEmpty())
+        }
+        // Query Android independently using the actual padded buffer geometry
+        // required by the pinned byte-buffer encoder, not a generated manifest.
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 320, 192).apply {
+            setInteger(MediaFormat.KEY_FRAME_RATE, 24)
+            setInteger(MediaFormat.KEY_BIT_RATE, 2_000_000)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
+            setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+            setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+            setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+        }
+        val inventory = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+        val applicable = inventory.filter { codec ->
+            codec.isEncoder && !codec.isAlias && codec.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true) }
+        }.mapNotNull { codec ->
+            runCatching {
+                val capability = codec.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                val video = capability.videoCapabilities
+                if (video != null && video.areSizeAndRateSupported(320, 192, 24.0) &&
+                    video.bitrateRange.contains(2_000_000) &&
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar in capability.colorFormats &&
+                    capability.encoderCapabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) &&
+                    capability.isFormatSupported(format)) codec else null
+            }.getOrNull()
+        }
+        val candidates = services.nativeVideoCandidates(request)
+        assertTrue("Native enumeration must stay bounded", candidates.size <= 16)
+        assertEquals("Native candidates must not duplicate OS identities", candidates.size, candidates.map { it.identifier }.toSet().size)
+        val evidence = mutableListOf(
+            "Android API${Build.VERSION.SDK_INT}; baseline H264, visible320x180/padded320x192,24fps,2Mbps,NV12,SDR BT709 limited.",
+            "OS declarations only: no codec session or media frame was executed, and no physical-device acceleration is established.",
+            "Applicable regular OS codecs: ${applicable.map { it.name }}",
+        )
+        for (candidate in candidates) {
+            val actual = applicable.singleOrNull { it.name == candidate.identifier }
+            assertNotNull("Candidate ${candidate.identifier} does not advertise the requested format in the actual OS registry", actual)
+            val codec = requireNotNull(actual)
+            val expectedHardware = when {
+                codec.isSoftwareOnly -> false
+                codec.isHardwareAccelerated -> true
+                else -> null
+            }
+            assertEquals("Classification must report Android's declaration only", expectedHardware, candidate.osReportsHardware)
+            assertFalse("Registry enumeration must not claim session preparation", candidate.sessionPrepared)
+            evidence += "${candidate.identifier}: osReportsHardware=${candidate.osReportsHardware}, sessionPrepared=${candidate.sessionPrepared}."
+        }
+        if (candidates.isEmpty()) {
+            assertTrue("The provider omitted an OS-declared compatible baseline encoder: ${applicable.map { it.name }}", applicable.isEmpty())
+            evidence += "No candidate: the runtime OS exposes no compatible regular fixed-NV12/VBR encoder for this exact request. Software FFmpeg processing remains independent."
+        }
+        retainText("android-native-capabilities.txt", evidence.joinToString("\n"))
+        Log.i("VelmuxNativeCapabilities", evidence.joinToString("\n"))
     }
 
     @Test
@@ -128,6 +206,17 @@ class ConversionIntegrationTest {
                 awaitRenderedDarkAppearance()
                 assertDarkSystemBars(scenario)
                 capture("ui-settings-dark-restored.png")
+                clickText("Light", exact = true)
+                waitUntil("Light appearance was not committed") { media.appearanceNative() == "light" }
+                awaitRenderedLightAppearance()
+                assertLightSystemBars(scenario)
+                capture("ui-settings-light.png")
+                scenario.recreate()
+                awaitText("Video Converter", exact = true)
+                clickText("Settings", exact = true)
+                awaitRenderedLightAppearance()
+                assertLightSystemBars(scenario)
+                capture("ui-settings-light-restored.png")
             }
             val accepted = media.jobsNative().filter { it.id !in before }
             assertEquals("One Convert action must produce one accepted job", 1, accepted.size)
@@ -805,6 +894,29 @@ class ConversionIntegrationTest {
         }
     }
 
+    private fun assertLightSystemBars(scenario: ActivityScenario<MainActivity>) {
+        scenario.onActivity { activity ->
+            val bars = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
+            assertTrue("Light Settings must retain readable status-bar icons", bars.isAppearanceLightStatusBars)
+            assertTrue("Light Settings must retain readable navigation-bar icons", bars.isAppearanceLightNavigationBars)
+        }
+    }
+
+    private fun awaitRenderedLightAppearance() {
+        waitUntil("The selected light appearance did not reach the actual Settings UI") {
+            device.findObject(By.text("Light"))?.parent?.isChecked == true
+        }
+        waitUntil("The Settings surface did not render its neutral light palette") {
+            val screenshot = instrumentation.uiAutomation.takeScreenshot() ?: return@waitUntil false
+            try {
+                fun lightBackground(pixel: Int) = abs(Color.red(pixel) - 0xf5) <= 2 &&
+                    abs(Color.green(pixel) - 0xf5) <= 2 && abs(Color.blue(pixel) - 0xf7) <= 2
+                lightBackground(screenshot.getPixel(screenshot.width - 8, screenshot.height / 2)) &&
+                    lightBackground(screenshot.getPixel(screenshot.width / 2, 8))
+            } finally { screenshot.recycle() }
+        }
+    }
+
     private fun awaitRenderedDarkAppearance() {
         waitUntil("The selected dark appearance did not reach the actual Settings UI") {
             device.findObject(By.text("Dark"))?.parent?.isChecked == true
@@ -812,10 +924,10 @@ class ConversionIntegrationTest {
         waitUntil("The Settings surface did not render its dark palette") {
             val screenshot = instrumentation.uiAutomation.takeScreenshot() ?: return@waitUntil false
             try {
-                // The right content margin is the shared theme's background,
+                // The right content margin is the native theme's background,
                 // away from labels, controls and system status/navigation bars.
-                fun darkBackground(pixel: Int) = abs(Color.red(pixel) - 0x17) <= 2 &&
-                    abs(Color.green(pixel) - 0x12) <= 2 && abs(Color.blue(pixel) - 0x0e) <= 2
+                fun darkBackground(pixel: Int) = Color.red(pixel) <= 2 &&
+                    Color.green(pixel) <= 2 && Color.blue(pixel) <= 2
                 val content = screenshot.getPixel(screenshot.width - 8, screenshot.height / 2)
                 // The emulator's top-center status-bar gap contains no icons.
                 // Icon-mode flags alone cannot prove a contrasting background.
