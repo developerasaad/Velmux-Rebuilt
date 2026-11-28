@@ -164,14 +164,13 @@ pub(crate) fn validate_fields(config: &ConversionConfig) -> Result<(), EngineErr
             ));
         }
     }
-    if config.operation == Operation::AudioConverter {
-        if config.video_codec != VideoCodec::Automatic
+    if config.operation == Operation::AudioConverter
+        && (config.video_codec != VideoCodec::Automatic
             || config.video_size != VideoSize::Original
             || config.frame_rate != FrameRate::Original
-            || config.quality != 23
-        {
-            return Err(invalid("Video settings do not apply to audio conversion."));
-        }
+            || config.quality != 23)
+    {
+        return Err(invalid("Video settings do not apply to audio conversion."));
     }
     let definition = config.format.definition();
     if config.format != OutputFormat::Original {

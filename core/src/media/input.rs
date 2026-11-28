@@ -353,6 +353,16 @@ impl Input {
         self.format
     }
 
+    /// Tighten cooperative reads for an owned inspection input. Inspection
+    /// discards this input afterward; this never extends an existing deadline.
+    pub(crate) fn cap_read_deadline(&mut self, deadline: Instant) {
+        self.reader.deadline = Some(
+            self.reader
+                .deadline
+                .map_or(deadline, |old| old.min(deadline)),
+        );
+    }
+
     pub(crate) fn header_duration_us(&self) -> Option<i64> {
         self.header_duration_us
     }
@@ -957,14 +967,14 @@ mod tests {
             provider: None,
             lease_id: String::new(),
         };
-        let input = Input::open_owned(
+        let mut input = Input::open_owned(
             lease,
             offset,
             Some(payload.len() as u64),
             CancellationToken::new(),
         )
         .unwrap();
-        let facts = super::super::inspect::inspect_input(&input).unwrap();
+        let facts = super::super::inspect::inspect_input(&mut input).unwrap();
         assert_eq!(facts.container, "wav");
         assert_eq!(facts.byte_size, Some(payload.len() as u64));
         assert_eq!(facts.duration_us, Some(1_000_000));
@@ -975,6 +985,20 @@ mod tests {
         assert_eq!(audio.sample_rate, Some(8000));
         assert_eq!(audio.channels, Some(1));
         assert_eq!(audio.bit_depth, Some(16));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        input.cap_read_deadline(deadline);
+        input.cap_read_deadline(deadline + Duration::from_secs(10));
+        assert_eq!(input.reader.deadline, Some(deadline));
+        input.cap_read_deadline(Instant::now() - Duration::from_secs(1));
+        assert!(matches!(
+            input.check_cancelled(),
+            Err(EngineError::SourceAccess { .. })
+        ));
+        input.reader.cancellation.cancel();
+        assert!(matches!(
+            input.check_cancelled(),
+            Err(EngineError::Cancelled)
+        ));
     }
 
     #[test]

@@ -19,6 +19,7 @@ struct JobsView: View {
                         Text(job.fileName).font(.headline)
                         Text(job.sourceName).font(.subheadline).foregroundColor(.secondary)
                         Text(stateLabel(job.state)).font(.subheadline)
+                            .accessibilityIdentifier("job-status-" + job.fileName)
                         if active(job.state) {
                             if job.state == .processing, let duration = job.durationUs, duration > 0 {
                                 ProgressView(value: min(1, max(0, Double(job.processedUs) / Double(duration))))
@@ -47,7 +48,9 @@ struct JobsView: View {
                     }
                     if let output = job.output, job.state == .completed {
                         Button("Open") { actions.openOutput(locator: output.locator) { if let detail = $0 { session.present(error: NativePresentationError(detail), scope: "jobs", title: "Unable to open output") } } }
+                            .accessibilityIdentifier("job-open-" + job.fileName)
                         Button("Share") { actions.shareOutput(locator: output.locator) { if let detail = $0 { session.present(error: NativePresentationError(detail), scope: "jobs", title: "Unable to share output") } } }
+                            .accessibilityIdentifier("job-share-" + job.fileName)
                     }
                     if [.completed, .canceled].contains(job.state) { Button("Dismiss") { run(job.id) { try await session.dismissJob(id: job.id) } } }
                 }.disabled(busy.contains(job.id))

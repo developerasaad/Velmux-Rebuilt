@@ -31,12 +31,15 @@ final class PickerFlowUITests: XCTestCase {
     func testActualFilesPickerCancellationAndVideoConversion() throws {
         capture("Home before actual document selection")
         try tap(label: "Video Converter")
-        let cancel = app.buttons["Cancel"].firstMatch
+        let cancel = systemPickerCancel
         try waitFor("The system document picker did not present Cancel") { cancel.isHittable }
         capture("System video picker before cancellation")
         cancel.tap()
         try waitFor("Cancel did not return to Home") {
-            self.element(label: "Video Converter").isHittable && !self.element(label: "Convert").exists
+            self.app.buttons["tool-video-converter"].isHittable
+                && self.app.buttons["tool-video-converter"].isEnabled
+                && !self.systemPickerCancel.exists
+                && !self.app.buttons["convert"].exists
         }
         XCTAssertFalse(element(label: "Source unavailable").exists, "System picker cancellation must not become a source error")
         XCTAssertFalse(element(label: "Source preparation failed").exists)
@@ -75,7 +78,7 @@ final class PickerFlowUITests: XCTestCase {
 
     private func selectSeededDocument(_ fileName: String) throws {
         try waitFor("The system document picker was not presented") {
-            self.app.buttons["Cancel"].firstMatch.isHittable
+            self.systemPickerCancel.isHittable
         }
         // A picker may reopen its previous directory. Navigate through its
         // visible Browse/Locations controls, never a synthetic URL/delegate call.
@@ -159,13 +162,22 @@ final class PickerFlowUITests: XCTestCase {
     }
 
     private func waitForCompletedOutput(_ name: String) throws {
-        let section = app.descendants(matching: .any).matching(identifier: "job-" + name).firstMatch
+        // SwiftUI List exposes the Section's status and actions in separate
+        // native cells. Use each actual control's identity instead of treating
+        // the first inherited Section identifier as an encompassing container.
+        let status = app.staticTexts["job-status-" + name]
         try waitFor("The accepted native job did not publish \(name)", timeout: 90) {
-            section.exists && section.descendants(matching: .staticText).matching(NSPredicate(format: "label == %@", "Completed")).firstMatch.exists
+            status.exists && status.label == "Completed"
         }
-        XCTAssertTrue(section.descendants(matching: .button).matching(NSPredicate(format: "label == %@", "Open")).firstMatch.exists)
-        XCTAssertTrue(section.descendants(matching: .button).matching(NSPredicate(format: "label == %@", "Share")).firstMatch.exists)
-        XCTAssertFalse(section.descendants(matching: .staticText).matching(NSPredicate(format: "label == %@", "Failed")).firstMatch.exists)
+        XCTAssertTrue(app.buttons["job-open-" + name].exists, "The completed job must offer Open")
+        XCTAssertTrue(app.buttons["job-share-" + name].exists, "The completed job must offer Share")
+        XCTAssertNotEqual(status.label, "Failed")
+    }
+
+    private var systemPickerCancel: XCUIElement {
+        // Home also exposes Cancel while preparing a selection. The real Files
+        // picker owns the navigation-bar action; never tap an obscured Home row.
+        app.navigationBars.buttons.matching(NSPredicate(format: "label == %@", "Cancel")).firstMatch
     }
 
     private func verifySettingsPersistenceAndRestore() throws {

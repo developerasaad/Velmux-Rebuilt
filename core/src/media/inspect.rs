@@ -48,24 +48,24 @@ pub(crate) fn inspect(
     provider: Arc<dyn MediaProvider>,
     cancellation: Arc<CancellationToken>,
 ) -> Result<MediaInfo, EngineError> {
-    let input = Input::open(source, provider, cancellation)?;
-    inspect_input(&input)
+    let mut input = Input::open(source, provider, cancellation)?;
+    inspect_input(&mut input)
 }
 
 pub(crate) fn inspect_file(
     path: &Path,
     cancellation: Arc<CancellationToken>,
 ) -> Result<MediaInfo, EngineError> {
-    let input = Input::open_file(path, cancellation)?;
-    inspect_input(&input)
+    let mut input = Input::open_file(path, cancellation)?;
+    inspect_input(&mut input)
 }
 
-pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
+pub(crate) fn inspect_input(input: &mut Input) -> Result<MediaInfo, EngineError> {
     input.check_cancelled()?;
     let identity = input.source_identity()?;
     // Input exclusively owns the live format and all pointers read below.
     // Values are copied into Rust records before the input can be dropped.
-    unsafe {
+    let mut info = unsafe {
         let format = &*input.format();
         if format.iformat.is_null() || format.streams.is_null() {
             return Err(invalid("The source did not provide a media description"));
@@ -124,7 +124,7 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
                     .filter_map(|stream| stream.start_time_us)
                     .min()
             });
-        Ok(MediaInfo {
+        MediaInfo {
             source_identity: identity,
             byte_size: input.byte_size(),
             duration_us: content_duration(
@@ -141,8 +141,10 @@ pub(crate) fn inspect_input(input: &Input) -> Result<MediaInfo, EngineError> {
             metadata: container_metadata,
             chapters,
             staged: input.was_staged(),
-        })
-    }
+        }
+    };
+    super::decoded::complete_hdr_facts(input, &mut info)?;
+    Ok(info)
 }
 
 fn content_duration(
@@ -242,7 +244,10 @@ unsafe fn stream_info(
     })
 }
 
-unsafe fn video_info(stream: &sys::AVStream, parameters: &sys::AVCodecParameters) -> VideoInfo {
+pub(super) unsafe fn video_info(
+    stream: &sys::AVStream,
+    parameters: &sys::AVCodecParameters,
+) -> VideoInfo {
     let sample_aspect =
         rational(stream.sample_aspect_ratio).or_else(|| rational(parameters.sample_aspect_ratio));
     let display_aspect_ratio = sample_aspect
@@ -272,51 +277,9 @@ unsafe fn video_info(stream: &sys::AVStream, parameters: &sys::AVCodecParameters
             .max();
     }
     let (master_data, master_size) = side_data(stream, sys::AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
-    let mastering_display = if !master_data.is_null()
-        && master_size >= mem::size_of::<sys::AVMasteringDisplayMetadata>()
-    {
-        let value = ptr::read_unaligned(master_data.cast::<sys::AVMasteringDisplayMetadata>());
-        Some(MasteringDisplayInfo {
-            primaries: if value.has_primaries != 0 {
-                value
-                    .display_primaries
-                    .iter()
-                    .flatten()
-                    .filter_map(|r| rational_value(*r))
-                    .collect()
-            } else {
-                Vec::new()
-            },
-            white_point: if value.has_primaries != 0 {
-                value
-                    .white_point
-                    .iter()
-                    .filter_map(|r| rational_value(*r))
-                    .collect()
-            } else {
-                Vec::new()
-            },
-            min_luminance: (value.has_luminance != 0)
-                .then(|| rational_value(value.min_luminance))
-                .flatten(),
-            max_luminance: (value.has_luminance != 0)
-                .then(|| rational_value(value.max_luminance))
-                .flatten(),
-        })
-    } else {
-        None
-    };
+    let mastering_display = mastering_metadata(master_data, master_size);
     let (light_data, light_size) = side_data(stream, sys::AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
-    let content_light =
-        if !light_data.is_null() && light_size >= mem::size_of::<sys::AVContentLightMetadata>() {
-            let value = ptr::read_unaligned(light_data.cast::<sys::AVContentLightMetadata>());
-            Some(ContentLightInfo {
-                max_content_light_level: value.MaxCLL,
-                max_frame_average_light_level: value.MaxFALL,
-            })
-        } else {
-            None
-        };
+    let content_light = light_metadata(light_data, light_size);
     VideoInfo {
         width: positive_i32(parameters.width),
         height: positive_i32(parameters.height),
@@ -359,6 +322,54 @@ unsafe fn video_info(stream: &sys::AVStream, parameters: &sys::AVCodecParameters
         mastering_display,
         content_light,
     }
+}
+
+pub(super) unsafe fn mastering_metadata(
+    data: *const u8,
+    size: usize,
+) -> Option<MasteringDisplayInfo> {
+    if data.is_null() || size < mem::size_of::<sys::AVMasteringDisplayMetadata>() {
+        return None;
+    }
+    let value = ptr::read_unaligned(data.cast::<sys::AVMasteringDisplayMetadata>());
+    Some(MasteringDisplayInfo {
+        primaries: if value.has_primaries != 0 {
+            value
+                .display_primaries
+                .iter()
+                .flatten()
+                .filter_map(|r| rational_value(*r))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        white_point: if value.has_primaries != 0 {
+            value
+                .white_point
+                .iter()
+                .filter_map(|r| rational_value(*r))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        min_luminance: (value.has_luminance != 0)
+            .then(|| rational_value(value.min_luminance))
+            .flatten(),
+        max_luminance: (value.has_luminance != 0)
+            .then(|| rational_value(value.max_luminance))
+            .flatten(),
+    })
+}
+
+pub(super) unsafe fn light_metadata(data: *const u8, size: usize) -> Option<ContentLightInfo> {
+    if data.is_null() || size < mem::size_of::<sys::AVContentLightMetadata>() {
+        return None;
+    }
+    let value = ptr::read_unaligned(data.cast::<sys::AVContentLightMetadata>());
+    Some(ContentLightInfo {
+        max_content_light_level: value.MaxCLL,
+        max_frame_average_light_level: value.MaxFALL,
+    })
 }
 
 unsafe fn audio_info(parameters: &sys::AVCodecParameters) -> AudioInfo {

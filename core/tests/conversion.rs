@@ -2776,6 +2776,55 @@ fn actual_main10_hevc_and_vp9_preserve_precision_and_color() {
 fn hdr10_static_metadata_survives_real_hevc_encoding_into_transport_stream() {
     let harness = Harness::new("m3-hdr10-sei");
     let source = harness.inspect("camera10-hdr.mp4", Operation::VideoConverter);
+    let video = source
+        .info
+        .streams
+        .iter()
+        .find_map(|stream| stream.video.as_ref())
+        .unwrap();
+    let mastering = video
+        .mastering_display
+        .as_ref()
+        .expect("Source inspection must decode elementary HDR10 mastering SEI");
+    assert_eq!(mastering.primaries.len(), 6);
+    assert_eq!(mastering.white_point.len(), 2);
+    for (actual, expected) in mastering
+        .primaries
+        .iter()
+        .zip([34000, 16000, 13250, 34500, 7500, 3000])
+    {
+        assert_eq!(
+            i64::from(actual.numerator) * 50_000,
+            i64::from(actual.denominator) * expected
+        );
+    }
+    for (actual, expected) in mastering.white_point.iter().zip([15635, 16450]) {
+        assert_eq!(
+            i64::from(actual.numerator) * 50_000,
+            i64::from(actual.denominator) * expected
+        );
+    }
+    let maximum = mastering.max_luminance.as_ref().unwrap();
+    let minimum = mastering.min_luminance.as_ref().unwrap();
+    assert_eq!(
+        i64::from(maximum.numerator),
+        i64::from(maximum.denominator) * 1000
+    );
+    assert_eq!(
+        i64::from(minimum.numerator) * 200,
+        i64::from(minimum.denominator)
+    );
+    let light = video
+        .content_light
+        .as_ref()
+        .expect("Source inspection must decode elementary HDR10 content-light SEI");
+    assert_eq!(
+        (
+            light.max_content_light_level,
+            light.max_frame_average_light_level
+        ),
+        (1000, 400)
+    );
     let mut config = harness.defaults(&source, Operation::VideoConverter);
     config.format = OutputFormat::MpegTs;
     config.video_codec = VideoCodec::Hevc;
