@@ -2685,7 +2685,7 @@ fn complete_audio_codec_and_container_matrix_encodes_real_samples() {
         (OutputFormat::Ogg, AudioCodec::Vorbis, "vorbis", "ogg"),
         (OutputFormat::Opus, AudioCodec::Opus, "opus", "ogg"),
         (OutputFormat::Aac, AudioCodec::Aac, "aac", "aac"),
-        (OutputFormat::Aiff, AudioCodec::Pcm, "pcm_s16be", "aiff"),
+        (OutputFormat::Aiff, AudioCodec::Pcm, "pcm_s16le", "aiff"),
         (OutputFormat::M4a, AudioCodec::Ac3, "ac3", "mov"),
         (OutputFormat::M4a, AudioCodec::Eac3, "eac3", "mov"),
         (OutputFormat::Wavpack, AudioCodec::Wavpack, "wavpack", "wv"),
@@ -2696,6 +2696,9 @@ fn complete_audio_codec_and_container_matrix_encodes_real_samples() {
         config.audio_codec = codec;
         config.file_name = format!("matrix_{format:?}_{codec:?}");
         let record = harness.complete(&harness.submit(&source, config).id);
+        if format == OutputFormat::Aiff && codec == AudioCodec::Pcm {
+            assert_compatible_stereo_pcm_is_copied(&harness, &record);
+        }
         let mut expected = expectation(&record, expected, 2, 48000);
         expected["container"] = json!(container);
         if matches!(
@@ -2946,11 +2949,10 @@ fn every_advertised_explicit_codec_and_container_pair_produces_verified_media() 
             VideoCodec::Automatic | VideoCodec::Copy => panic!("An explicit encoder is required"),
         }
     }
-    fn audio_name(codec: AudioCodec, format: OutputFormat) -> &'static str {
+    fn audio_name(codec: AudioCodec) -> &'static str {
         match codec {
             AudioCodec::Aac | AudioCodec::HeAac => "aac",
             AudioCodec::Mp3 => "mp3",
-            AudioCodec::Pcm if format == OutputFormat::Aiff => "pcm_s16be",
             AudioCodec::Pcm | AudioCodec::PcmS16le => "pcm_s16le",
             AudioCodec::Flac => "flac",
             AudioCodec::Alac => "alac",
@@ -3045,8 +3047,10 @@ fn every_advertised_explicit_codec_and_container_pair_produces_verified_media() 
                 config.sample_rate = Some(rate);
             }
             let result = harness.complete(&harness.submit(&audio, config).id);
-            let mut expected =
-                expectation(&result, audio_name(codec, option.format), channels, rate);
+            if option.format == OutputFormat::Aiff && codec == AudioCodec::Pcm {
+                assert_compatible_stereo_pcm_is_copied(&harness, &result);
+            }
+            let mut expected = expectation(&result, audio_name(codec), channels, rate);
             expected["container"] = json!(container(option.format));
             if matches!(
                 codec,
@@ -3103,6 +3107,21 @@ fn accepted_request_text(harness: &Harness, id: &str) -> String {
             row.get(0)
         })
         .unwrap()
+}
+
+fn assert_compatible_stereo_pcm_is_copied(harness: &Harness, record: &JobRecord) {
+    // Generic PCM preserves a compatible source representation. AIFF-C's
+    // little-endian sowt payload need not be re-encoded as big-endian AIFF.
+    let request: Value = serde_json::from_str(&accepted_request_text(harness, &record.id)).unwrap();
+    assert_eq!(
+        request["source"]["info"]["streams"][0]["codec"],
+        "pcm_s16le"
+    );
+    let streams = request["plan"]["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0]["expected_codec"], "pcm_s16le");
+    assert!(streams[0]["encoder"].is_null());
+    assert!(streams[0]["encoding"].is_null());
 }
 
 fn after_worker_ack(mut action: impl FnMut() -> Result<(), EngineError>) {

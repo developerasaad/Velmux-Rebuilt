@@ -26,9 +26,6 @@
             </TestableReference>
         </Testables>
     </TestAction>
-    <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
-        <Testables />
-    </TestAction>
     <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugServiceExtension="internal" allowLocationSimulation="YES">
         <BuildableProductRunnable runnableDebuggingMode="0">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E00000000000000000000001" BuildableName="Velmux.app" BlueprintName="Velmux" ReferencedContainer="container:Velmux.xcodeproj" />

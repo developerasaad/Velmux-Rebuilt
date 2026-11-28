@@ -4,6 +4,7 @@
 .kotlin/
 **/build/
 **/target/
+**/__pycache__/
 local.properties
 scripts/ffmpeg-builder/downloads/
 scripts/ffmpeg-builder/src/

@@ -147,10 +147,15 @@ final class PickerFlowUITests: XCTestCase {
         field.typeText(stem)
         try waitFor("The native filename did not update") { (field.value as? String) == stem }
         let keyboard = app.keyboards
-        for title in ["Done", "Return"] {
-            let button = keyboard.buttons[title].firstMatch
-            if button.exists && button.isHittable { button.tap(); break }
+        let toolbarDone = app.toolbars.buttons["Done"].firstMatch
+        if toolbarDone.exists && toolbarDone.isHittable { toolbarDone.tap() }
+        else {
+            for title in ["Done", "Return"] {
+                let button = keyboard.buttons[title].firstMatch
+                if button.exists && button.isHittable { button.tap(); break }
+            }
         }
+        try waitFor("Done did not dismiss the native filename keyboard") { !keyboard.firstMatch.exists }
     }
 
     private func waitForCompletedOutput(_ name: String) throws {

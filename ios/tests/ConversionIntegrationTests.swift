@@ -13,8 +13,10 @@ import XCTest
 /// Uses the application's existing engine and real native providers. Bundle
 /// fixtures exercise owned-file bookmarks; external Files grants need UI tests.
 final class ConversionIntegrationTests: XCTestCase {
-    private var ownedJobs: [String] = []
-    private var ownedOutputs: [URL] = []
+    private var ownedInspections = Set<String>()
+    private var ownedJobs: [String: String] = [:]
+    private var ownedOutputs = Set<URL>()
+    private var originalHashes: [URL: String] = [:]
 
     @MainActor
     private func applicationSession() async throws -> AppSession {
@@ -202,6 +204,10 @@ final class ConversionIntegrationTests: XCTestCase {
         let expectedRoot = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Velmux", isDirectory: true).standardizedFileURL.path + "/"
         XCTAssertTrue(url.standardizedFileURL.path.hasPrefix(expectedRoot))
+        guard url.isFileURL, url.standardizedFileURL.path.hasPrefix(expectedRoot),
+              ownedJobs[job.id] == job.fileName, url.lastPathComponent == job.fileName else {
+            throw NSError(domain: "Velmux.ConversionTests", code: 3, userInfo: [NSLocalizedDescriptionKey: "The published result is outside this test's explicit output ownership"])
+        }
         let bytes = try Data(contentsOf: url)
         XCTAssertGreaterThan(bytes.count, 0)
         XCTAssertEqual(UInt64(bytes.count), job.output?.size)
@@ -349,10 +355,13 @@ final class ConversionIntegrationTests: XCTestCase {
         let session = try await applicationSession()
         let video = try fixture("video.mp4"), audio = try fixture("stereo.wav")
         let videoHash = try digest(video), audioHash = try digest(audio)
+        originalHashes[video] = videoHash; originalHashes[audio] = audioHash
         let videoKey = "ios-video-" + UUID().uuidString.lowercased()
         let audioKey = "ios-audio-" + UUID().uuidString.lowercased()
         let inspectedVideo = try await session.inspect(IosMediaServices.selectedSource(url: video), operation: .videoConverter)
+        ownedInspections.insert(inspectedVideo.id)
         let inspectedAudio = try await session.inspect(IosMediaServices.selectedSource(url: audio), operation: .audioConverter)
+        ownedInspections.insert(inspectedAudio.id)
         XCTAssertFalse(inspectedVideo.info.staged)
         XCTAssertEqual(inspectedVideo.info.streams.filter { $0.kind == .video }.count, 1)
         XCTAssertEqual(inspectedAudio.info.streams.first(where: { $0.kind == .audio })?.audio?.channels, 2)
@@ -365,18 +374,24 @@ final class ConversionIntegrationTests: XCTestCase {
         try await session.validate(sourceId: inspectedVideo.id, configuration: videoConfig)
         try await session.validate(sourceId: inspectedAudio.id, configuration: audioConfig)
         let first = try await session.submit(sourceId: inspectedVideo.id, key: videoKey, configuration: videoConfig)
+        ownedJobs[first.id] = videoKey + ".mp4"
         let repeated = try await session.submit(sourceId: inspectedVideo.id, key: videoKey, configuration: videoConfig)
+        ownedJobs[repeated.id] = videoKey + ".mp4"
         XCTAssertEqual(first.id, repeated.id)
         let second = try await session.submit(sourceId: inspectedAudio.id, key: audioKey, configuration: audioConfig)
-        ownedJobs += [first.id, second.id]
+        ownedJobs[second.id] = audioKey + ".m4a"
         // Accepted jobs retain their own source grants after workspace disposal.
         try await session.releaseInspection(id: inspectedVideo.id)
+        ownedInspections.remove(inspectedVideo.id)
         try await session.releaseInspection(id: inspectedAudio.id)
+        ownedInspections.remove(inspectedAudio.id)
         videoConfig.fileName = "unaccepted-edit"; audioConfig.audioCodec = .flac
         let videoJob = try await waitForTerminal(session, id: first.id)
         let audioJob = try await waitForTerminal(session, id: second.id)
-        let videoURL = try completedURL(videoJob), audioURL = try completedURL(audioJob)
-        ownedOutputs += [videoURL, audioURL]
+        let videoURL = try completedURL(videoJob)
+        ownedOutputs.insert(videoURL)
+        let audioURL = try completedURL(audioJob)
+        ownedOutputs.insert(audioURL)
         try await onWorker {
             let picture = try self.decodeVideo(videoURL)
             XCTAssertEqual(picture.subtype, kCMVideoCodecType_H264)
@@ -395,7 +410,10 @@ final class ConversionIntegrationTests: XCTestCase {
             proof.name = "Independent native conversion verification"; proof.lifetime = .keepAlways; self.add(proof)
         }
         XCTAssertEqual(try digest(video), videoHash); XCTAssertEqual(try digest(audio), audioHash)
-        try await session.dismissJob(id: videoJob.id); try await session.dismissJob(id: audioJob.id)
+        try await session.dismissJob(id: videoJob.id)
+        ownedJobs.removeValue(forKey: videoJob.id)
+        try await session.dismissJob(id: audioJob.id)
+        ownedJobs.removeValue(forKey: audioJob.id)
         XCTAssertTrue(FileManager.default.fileExists(atPath: videoURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path))
         XCTAssertTrue(session.ready)
@@ -406,15 +424,23 @@ final class ConversionIntegrationTests: XCTestCase {
         let session = try await applicationSession()
         let sourceURL = try fixture("long-preview.mp4"), invalidURL = try fixture("invalid.bin")
         let sourceHash = try digest(sourceURL)
+        originalHashes[sourceURL] = sourceHash
+        originalHashes[invalidURL] = try digest(invalidURL)
         do {
-            _ = try await session.inspect(IosSelectedSource(locator: invalidURL.absoluteString, displayName: "invalid.bin"), operation: .videoConverter)
+            let unexpected = try await session.inspect(IosSelectedSource(locator: invalidURL.absoluteString, displayName: "invalid.bin"), operation: .videoConverter)
+            ownedInspections.insert(unexpected.id)
             XCTFail("Invalid actual contents must be rejected by Rust")
         } catch EngineError.InvalidMedia {} catch EngineError.UnsupportedMedia {}
         let canceled = Task { try await session.inspect(IosSelectedSource(locator: sourceURL.absoluteString, displayName: sourceURL.lastPathComponent), operation: .videoConverter) }
         canceled.cancel()
-        do { _ = try await canceled.value; XCTFail("Canceled inspection unexpectedly succeeded") }
+        do {
+            let unexpected = try await canceled.value
+            ownedInspections.insert(unexpected.id)
+            XCTFail("Canceled inspection unexpectedly succeeded")
+        }
         catch EngineError.Cancelled {} catch is CancellationError {}
         let inspected = try await session.inspect(IosMediaServices.selectedSource(url: sourceURL), operation: .videoConverter)
+        ownedInspections.insert(inspected.id)
         var configuration = try await session.defaults(sourceId: inspected.id, operation: .videoConverter)
         configuration.format = .mp4; configuration.videoCodec = .h264
         configuration.frameRate = .fps60
@@ -423,7 +449,7 @@ final class ConversionIntegrationTests: XCTestCase {
         do { try await session.validate(sourceId: inspected.id, configuration: invalid); XCTFail("Rust accepted invalid geometry") }
         catch EngineError.Configuration {}
         let accepted = try await session.submit(sourceId: inspected.id, key: configuration.fileName, configuration: configuration)
-        ownedJobs.append(accepted.id)
+        ownedJobs[accepted.id] = configuration.fileName + ".mp4"
         let progressDeadline = ProcessInfo.processInfo.systemUptime + 30
         var observedProgress = false
         while ProcessInfo.processInfo.systemUptime < progressDeadline {
@@ -434,16 +460,6 @@ final class ConversionIntegrationTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(observedProgress, "The deterministic cancellation fixture must reach real processing progress")
-        let deadline = ProcessInfo.processInfo.systemUptime + 30
-        var observedProgress = false
-        while ProcessInfo.processInfo.systemUptime < deadline {
-            if let job = session.jobs.first(where: { $0.id == accepted.id }) {
-                if job.processedUs > 0 { observedProgress = true; break }
-                if [.completed, .failed, .canceled].contains(job.state) { break }
-            }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        XCTAssertTrue(observedProgress, "Cancellation fixture must reach actual processing progress")
         let began = ProcessInfo.processInfo.systemUptime
         _ = try session.choices(sourceId: inspected.id, configuration: configuration)
         try await session.refreshCache()
@@ -454,16 +470,20 @@ final class ConversionIntegrationTests: XCTestCase {
         XCTAssertEqual(terminal.state, .canceled, terminal.error ?? "Cancellation was not acknowledged")
         XCTAssertNil(terminal.output)
         try await session.releaseInspection(id: inspected.id)
+        ownedInspections.remove(inspected.id)
         try await session.clearCache()
         XCTAssertEqual(try digest(sourceURL), sourceHash)
         try await session.dismissJob(id: terminal.id)
+        ownedJobs.removeValue(forKey: terminal.id)
     }
 
     @MainActor
     func testDecodedFallbackPreviewIsSeekableAndDoesNotCreateAJob() async throws {
         let session = try await applicationSession()
         let originalURL = try fixture("video.mp4"), original = try digest(fixture("video.mp4"))
+        originalHashes[originalURL] = original
         let source = try await session.inspect(IosMediaServices.selectedSource(url: originalURL), operation: .videoConverter)
+        ownedInspections.insert(source.id)
         let before = session.jobs.map(\.id).sorted()
         let clip = try await session.preparePreview(sourceId: source.id, startUs: 500_000)
         XCTAssertEqual(clip.startUs, 500_000)
@@ -476,6 +496,7 @@ final class ConversionIntegrationTests: XCTestCase {
         XCTAssertEqual(session.jobs.map(\.id).sorted(), before)
         let actions = IosMediaActions(presentationHost: { nil })
         let controller = actions.createPreview(locator: clip.locator) { XCTFail("The real encoded preview must play natively") }
+        defer { actions.releasePreview(controller: controller) }
         controller.loadViewIfNeeded()
         let playback = try XCTUnwrap(controller.children.first as? AVPlayerViewController)
         let deadline = ProcessInfo.processInfo.systemUptime + 15
@@ -496,6 +517,7 @@ final class ConversionIntegrationTests: XCTestCase {
         // Preview retirement must not retire the primary inspection.
         _ = try await session.defaults(sourceId: source.id, operation: .videoConverter)
         try await session.releaseInspection(id: source.id)
+        ownedInspections.remove(source.id)
         XCTAssertEqual(try digest(originalURL), original)
     }
 
@@ -521,8 +543,81 @@ final class ConversionIntegrationTests: XCTestCase {
         XCTAssertEqual(calls, 1)
     }
 
-    override func tearDownWithError() throws {
-        for url in ownedOutputs { try? FileManager.default.removeItem(at: url) }
-        ownedOutputs.removeAll(); ownedJobs.removeAll()
+    override func tearDown() async throws {
+        // An unstructured task does not inherit test-task cancellation. Cleanup
+        // still awaits real Rust acknowledgements after a canceled test body.
+        await Task { @MainActor in await self.cleanupOwnedResources() }.value
+        try await super.tearDown()
+    }
+
+    @MainActor
+    private func cleanupOwnedResources() async {
+        let session = AppSession.shared
+        var workersSettled = true
+        for (id, expectedName) in ownedJobs {
+            do { try await session.cancelJob(id: id) }
+            catch { XCTFail("Test cleanup could not request cancellation for \(id): \(error)") }
+            let deadline = ProcessInfo.processInfo.systemUptime + 45
+            var acknowledged = false
+            var lastError: Error?
+            while ProcessInfo.processInfo.systemUptime < deadline {
+                if let job = session.jobs.first(where: { $0.id == id }),
+                   [.completed, .failed, .canceled, .interrupted, .targetNotMet].contains(job.state) {
+                    if let output = job.output {
+                        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                            .appendingPathComponent("Velmux", isDirectory: true).standardizedFileURL
+                        if job.fileName == expectedName, let url = URL(string: output.locator),
+                           url.isFileURL, url.standardizedFileURL.deletingLastPathComponent() == directory,
+                           url.lastPathComponent == output.displayName, output.displayName == expectedName {
+                            ownedOutputs.insert(url)
+                        } else {
+                            XCTFail("Test cleanup refused an output outside this test's accepted job ownership: \(id)")
+                        }
+                    }
+                    do {
+                        if job.state == .targetNotMet { try await session.discardTarget(id: id) }
+                        // Rust rejects dismissal while its worker still owns
+                        // resources, even if a terminal row is already visible.
+                        try await session.dismissJob(id: id)
+                        acknowledged = true
+                        break
+                    } catch { lastError = error }
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            if !acknowledged {
+                workersSettled = false
+                XCTFail("Test cleanup did not receive worker termination/dismissal acknowledgement for \(id): \(String(describing: lastError))")
+            }
+        }
+        // Preserve references and artifacts if Rust cannot confirm termination.
+        // Never release a live worker's sources or remove its output resources.
+        guard workersSettled else { return }
+        ownedJobs.removeAll()
+        for id in ownedInspections {
+            do { try await session.releaseInspection(id: id) }
+            catch { XCTFail("Test cleanup could not release inspection \(id): \(error)") }
+        }
+        ownedInspections.removeAll()
+        var originalsProtected = true
+        for (url, expected) in originalHashes {
+            do {
+                let actual = try digest(url)
+                XCTAssertEqual(actual, expected, "The selected original changed during the test")
+                if actual != expected { originalsProtected = false }
+            } catch {
+                originalsProtected = false
+                XCTFail("Test cleanup could not verify original protection: \(error)")
+            }
+        }
+        // Assert publication survived core dismissal before removing only the
+        // explicitly tracked files this test's accepted jobs created.
+        guard originalsProtected else { return }
+        for url in ownedOutputs {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "Core cleanup must preserve the published test result")
+            do { try FileManager.default.removeItem(at: url) }
+            catch { XCTFail("Test cleanup could not remove its owned published fixture \(url.lastPathComponent): \(error)") }
+        }
+        ownedOutputs.removeAll(); originalHashes.removeAll()
     }
 }

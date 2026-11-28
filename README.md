@@ -20,6 +20,8 @@ bash scripts/build.sh ios-simulator
 bash scripts/test.sh ios-simulator
 ```
 
+During the iOS migration, those three legacy iOS entry points retain the established bridge. The separate native Swift gate uses `scripts/ci/verify-swift-interop.sh`, `scripts/ci/apple-native-app.sh iphoneos Release` and `scripts/ci/verify-native-ios.sh`. These also run on provisioned macOS CI; their actual evidence must pass before the legacy bridge is removed.
+
 The Native dependencies workflow constructs identity-keyed artifacts. Foundation integration reuses those exact artifacts and verifies Rust, Android APK packaging, emulator integration, Apple device compilation and simulator execution. Source checks run automatically; integration dispatch is explicit during foundation bring-up. Workflow files alone are not acceptance evidence; see PROGRESS.md for inspected runs.
 
 The final physical source roots are `core/`, `android/` and `ios/`, with lowercase native `src/ui/` directories. Migration is in progress: Android sources now live in root `android/`; the established shared iOS bridge remains temporarily until direct Swift interoperability and its functional replacement have demonstrated real operation. Each native application session owns one Rust engine for the process; screens do not own shutdown. Preserve in-progress Rust work and user media through this transition. See IMPLEMENTATION.md for sequencing and PROGRESS.md for actual state.
