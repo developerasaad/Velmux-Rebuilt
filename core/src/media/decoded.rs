@@ -241,10 +241,40 @@ mod tests {
                 (1000, 400)
             );
             let mastering = video.mastering_display.unwrap();
-            assert_eq!(mastering.primaries, vec![0.5; 6]);
-            assert_eq!(mastering.white_point, vec![0.25; 2]);
-            assert_eq!(mastering.min_luminance, Some(0.005));
-            assert_eq!(mastering.max_luminance, Some(1000.0));
+            assert_eq!(
+                mastering.primaries,
+                vec![
+                    super::super::Rational {
+                        numerator: 1,
+                        denominator: 2
+                    };
+                    6
+                ]
+            );
+            assert_eq!(
+                mastering.white_point,
+                vec![
+                    super::super::Rational {
+                        numerator: 1,
+                        denominator: 4
+                    };
+                    2
+                ]
+            );
+            assert_eq!(
+                mastering.min_luminance,
+                Some(super::super::Rational {
+                    numerator: 50,
+                    denominator: 10000
+                })
+            );
+            assert_eq!(
+                mastering.max_luminance,
+                Some(super::super::Rational {
+                    numerator: 1000,
+                    denominator: 1
+                })
+            );
         }
     }
 }
