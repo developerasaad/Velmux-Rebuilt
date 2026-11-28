@@ -478,6 +478,11 @@ final class ConversionIntegrationTests: XCTestCase {
         var configuration = try await session.defaults(sourceId: inspected.id, operation: .videoConverter)
         configuration.format = .mp4; configuration.videoCodec = .h264
         configuration.frameRate = .fps60
+        // The small 160×90 source can finish before a progress snapshot reaches
+        // the UI on fast runners. Explicit custom upscaling creates enough real
+        // encoding work to test in-flight cancellation without a synthetic gate.
+        configuration.videoSize = .custom
+        configuration.customWidth = 1920; configuration.customHeight = 1080
         configuration.fileName = "ios-cancellation-" + UUID().uuidString.lowercased()
         var invalid = configuration; invalid.customWidth = 0; invalid.customHeight = 180; invalid.videoSize = .custom
         do { try await session.validate(sourceId: inspected.id, configuration: invalid); XCTFail("Rust accepted invalid geometry") }

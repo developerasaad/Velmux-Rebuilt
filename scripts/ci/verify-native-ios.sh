@@ -36,12 +36,14 @@ capture_result() {
   if [ -d "$result_bundle" ]; then
     xcrun xcresulttool export attachments --path "$result_bundle" --output-path "$evidence/attachments" || true
   fi
-  if [ "$result" -eq 0 ]; then
-    if container=$(xcrun simctl get_app_container "$device" com.velmux.mobile data); then
-      python3 scripts/ci/verify-mobile-outputs.py ios "$container" || result=1
-    else
-      result=1
+  # Retain independently verified picker output even if a separate native test
+  # failed. Preserve that original failure; media evidence never makes it green.
+  if container=$(xcrun simctl get_app_container "$device" com.velmux.mobile data); then
+    if ! python3 scripts/ci/verify-mobile-outputs.py ios "$container"; then
+      if [ "$result" -eq 0 ]; then result=1; fi
     fi
+  elif [ "$result" -eq 0 ]; then
+    result=1
   fi
   exit "$result"
 }
