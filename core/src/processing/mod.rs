@@ -39,10 +39,13 @@ impl Plan {
     pub(crate) fn output(&self) -> Result<OutputRepresentation, EngineError> {
         // M2 accepted plans always stored an explicit format. Retaining that
         // exact representation does not invoke newer configuration defaults.
-        let output = self
-            .output
-            .clone()
-            .unwrap_or_else(|| OutputRepresentation::from_format(self.config.format));
+        let output = self.output.clone().unwrap_or_else(|| {
+            let mut legacy = OutputRepresentation::from_format(self.config.format);
+            if self.config.format == OutputFormat::M4a {
+                legacy.muxer = "ipod".into();
+            }
+            legacy
+        });
         output.validate()?;
         Ok(output)
     }
@@ -386,8 +389,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
             if config.video_codec == VideoCodec::Copy && transform {
                 return Err(invalid("These video settings require encoding. Choose an applicable codec or Automatic."));
             }
-            let compatible =
-                unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) } > 0;
+            let compatible = muxer_accepts(format, stream.codec_id);
             let encode = !matches!(config.video_codec, VideoCodec::Automatic | VideoCodec::Copy)
                 || config.video_codec == VideoCodec::Automatic && (transform || !compatible);
             if encode {
@@ -423,9 +425,8 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 .audio
                 .as_ref()
                 .ok_or_else(|| invalid("Audio properties could not be inspected."))?;
-            let compatible = unsafe { sys::avformat_query_codec(muxer, stream.codec_id as _, 0) }
-                > 0
-                && audio_copy_allowed(format, &stream.codec);
+            let compatible =
+                muxer_accepts(format, stream.codec_id) && audio_copy_allowed(format, &stream.codec);
             if config.audio_codec == AudioCodec::Copy && audio_transform_requested(stream, config) {
                 return Err(invalid("These audio settings require encoding. Choose an applicable codec or Automatic."));
             }
@@ -479,7 +480,7 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
         } else {
             stream.codec_id
         };
-        if unsafe { sys::avformat_query_codec(muxer, target_id as _, 0) } <= 0
+        if !muxer_accepts(format, target_id)
             || stream.kind == StreamKind::Audio && !audio_copy_allowed(format, &item.expected_codec)
         {
             return Err(invalid(format!("{} stream {} is incompatible with this container. Choose a compatible representation or an explicit track decision; tracks are never silently discarded.",stream.codec,stream.index)));
@@ -591,7 +592,7 @@ pub(crate) fn verify_output(
                         invalid("The finalized speaker layout could not be verified.")
                     })?;
                 if actual != layout {
-                    return Err(EngineError::InvalidMedia { detail:"The finalized audio speaker layout differs from the accepted requirements.".into() });
+                    return Err(EngineError::InvalidMedia { detail:format!("The finalized audio speaker layout ({actual}) differs from the accepted requirements ({layout}).") });
                 }
             }
         }

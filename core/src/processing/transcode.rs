@@ -956,6 +956,11 @@ impl Transform {
             if (*self.encoder).flags & sys::AV_CODEC_FLAG_QSCALE as i32 != 0 {
                 (*frame.0).quality = (*self.encoder).global_quality;
             }
+            if (*self.encoder).codec_type == sys::AVMEDIA_TYPE_VIDEO {
+                // Decoder frame types belong to the source GOP. The selected
+                // encoder must choose its own references and keyframes.
+                (*frame.0).pict_type = sys::AV_PICTURE_TYPE_NONE;
+            }
             let result = sys::avcodec_send_frame(self.encoder, frame.0);
             sys::av_frame_unref(frame.0);
             check(result, "Encode")?;

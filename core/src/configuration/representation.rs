@@ -28,7 +28,14 @@ impl OutputRepresentation {
                 .extension
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
-        if !safe_extension || self != &Self::from_format(self.format) {
+        let canonical = Self::from_format(self.format);
+        // Earlier accepted requests used FFmpeg's restricted iPod muxer. Keep
+        // their exact persisted route; new MP4-family profiles are broader.
+        let legacy_ipod = matches!(self.format, OutputFormat::M4a | OutputFormat::M4v)
+            && self.muxer == "ipod"
+            && self.extension == canonical.extension
+            && self.mime_type == canonical.mime_type;
+        if !safe_extension || self != &canonical && !legacy_ipod {
             return Err(EngineError::Recovery {
                 detail: "The accepted output representation is invalid or unsupported. Its working resources have been preserved.".into(),
             });
@@ -55,6 +62,16 @@ mod tests {
             output.validate().unwrap();
             assert_eq!(output.extension, format.extension());
             assert_eq!(output.mime_type, format.mime_type());
+        }
+    }
+
+    #[test]
+    fn accepted_ipod_representations_keep_their_saved_muxer() {
+        for format in [OutputFormat::M4a, OutputFormat::M4v] {
+            let mut legacy = OutputRepresentation::from_format(format);
+            legacy.muxer = "ipod".into();
+            legacy.validate().unwrap();
+            assert_eq!(legacy.muxer, "ipod");
         }
     }
 

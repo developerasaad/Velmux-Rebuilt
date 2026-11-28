@@ -340,7 +340,7 @@ fn muxer_available(format: OutputFormat) -> bool {
     }
 }
 
-fn muxer_accepts(format: OutputFormat, codec: i32) -> bool {
+pub(crate) fn muxer_accepts(format: OutputFormat, codec: i32) -> bool {
     let Ok(name) = std::ffi::CString::new(format.muxer()) else {
         return false;
     };
@@ -350,7 +350,39 @@ fn muxer_accepts(format: OutputFormat, codec: i32) -> bool {
     unsafe {
         let muxer =
             crate::ffmpeg::sys::av_guess_format(name.as_ptr(), std::ptr::null(), std::ptr::null());
-        !muxer.is_null() && crate::ffmpeg::sys::avformat_query_codec(muxer, codec as _, 0) > 0
+        if muxer.is_null() {
+            return false;
+        }
+        let query = crate::ffmpeg::sys::avformat_query_codec(muxer, codec as _, 0);
+        if query > 0 {
+            // MOV's tag table includes AV1, but its actual header writer only
+            // permits AV1 in MP4/AVIF. The product matrix follows execution.
+            return !(format == OutputFormat::Mov
+                && codec == crate::ffmpeg::sys::AV_CODEC_ID_AV1 as i32);
+        }
+        if query == 0 {
+            return false;
+        }
+        // Negative means this muxer provides no complete codec query. Admit
+        // only the explicitly audited MPEG-TS stream types, never all codecs.
+        format == OutputFormat::MpegTs
+            && [
+                crate::ffmpeg::sys::AV_CODEC_ID_H264,
+                crate::ffmpeg::sys::AV_CODEC_ID_HEVC,
+                crate::ffmpeg::sys::AV_CODEC_ID_MPEG1VIDEO,
+                crate::ffmpeg::sys::AV_CODEC_ID_MPEG2VIDEO,
+                crate::ffmpeg::sys::AV_CODEC_ID_MPEG4,
+                crate::ffmpeg::sys::AV_CODEC_ID_AAC,
+                crate::ffmpeg::sys::AV_CODEC_ID_MP2,
+                crate::ffmpeg::sys::AV_CODEC_ID_MP3,
+                crate::ffmpeg::sys::AV_CODEC_ID_AC3,
+                crate::ffmpeg::sys::AV_CODEC_ID_EAC3,
+                crate::ffmpeg::sys::AV_CODEC_ID_DTS,
+                crate::ffmpeg::sys::AV_CODEC_ID_DVB_SUBTITLE,
+                crate::ffmpeg::sys::AV_CODEC_ID_DVB_TELETEXT,
+            ]
+            .iter()
+            .any(|allowed| codec == *allowed as i32)
     }
 }
 

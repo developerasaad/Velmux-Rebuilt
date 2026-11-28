@@ -972,8 +972,11 @@ fn real_inspection_and_invalid_direct_core_requests() {
         90.0
     );
     let tracks = harness.inspect("multi-track.mkv", Operation::VideoConverter);
-    let tracks_default = harness.defaults(&tracks, Operation::VideoConverter);
-    assert_eq!(tracks_default.format, OutputFormat::Matroska);
+    let tracks_default = harness
+        .engine()
+        .default_configuration(tracks.id.clone(), Operation::VideoConverter)
+        .unwrap();
+    assert_eq!(tracks_default.format, OutputFormat::Original);
     harness
         .engine()
         .validate_configuration(tracks.id.clone(), tracks_default)
@@ -2297,12 +2300,18 @@ fn basic_conversion_preserves_compatible_tracks_metadata_and_chapters() {
         .engine()
         .default_configuration(source.id.clone(), Operation::VideoConverter)
         .unwrap();
-    assert_eq!(config.format, OutputFormat::Matroska);
+    assert_eq!(config.format, OutputFormat::Original);
     let catalog = harness
         .engine()
         .media_catalog_for_source(source.id.clone(), Operation::VideoConverter)
         .unwrap();
-    assert_eq!(catalog.len(), 1);
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|option| option.format)
+            .collect::<Vec<_>>(),
+        vec![OutputFormat::Original, OutputFormat::Matroska]
+    );
     let mut incompatible = config.clone();
     incompatible.format = OutputFormat::Mp4;
     assert!(matches!(

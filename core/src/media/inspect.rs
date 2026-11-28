@@ -368,7 +368,18 @@ unsafe fn audio_info(parameters: &sys::AVCodecParameters) -> AudioInfo {
     AudioInfo {
         sample_rate: positive_i32(parameters.sample_rate),
         channels: positive_i32(parameters.ch_layout.nb_channels),
-        channel_layout: if result >= 0 && (result as usize) < layout.len() {
+        channel_layout: if parameters.ch_layout.order == sys::AV_CHANNEL_ORDER_UNSPEC
+            && matches!(parameters.ch_layout.nb_channels, 1 | 2)
+        {
+            Some(
+                if parameters.ch_layout.nb_channels == 1 {
+                    "mono"
+                } else {
+                    "stereo"
+                }
+                .into(),
+            )
+        } else if result >= 0 && (result as usize) < layout.len() {
             text(layout.as_ptr())
         } else {
             None
