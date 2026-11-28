@@ -169,8 +169,17 @@ final class PickerFlowUITests: XCTestCase {
         try waitFor("The accepted native job did not publish \(name)", timeout: 90) {
             status.exists && status.label == "Completed"
         }
-        XCTAssertTrue(app.buttons["job-open-" + name].exists, "The completed job must offer Open")
-        XCTAssertTrue(app.buttons["job-share-" + name].exists, "The completed job must offer Share")
+        XCTAssertTrue(app.staticTexts[name].exists, "The completed result must display this exact request's filename")
+        for (identifier, title) in [("job-open-", "Open"), ("job-share-", "Share")] {
+            let action = app.buttons[identifier + name]
+            for _ in 0..<6 {
+                if action.exists && action.isHittable { break }
+                app.swipeUp()
+            }
+            XCTAssertTrue(action.exists && action.isEnabled && action.isHittable,
+                          "This completed result must have its own reachable \(title) action")
+            XCTAssertEqual(action.label, title)
+        }
         XCTAssertNotEqual(status.label, "Failed")
     }
 
