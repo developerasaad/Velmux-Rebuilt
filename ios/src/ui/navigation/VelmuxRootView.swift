@@ -118,7 +118,9 @@ struct VelmuxRootView: View {
                     owned = nil; workspaceActive = true
                 } catch {
                     if let owned { try? await session.releaseInspection(id: owned.id) }
-                    session.present(error: error, scope: "home", title: "Unable to inspect source")
+                    if selection == identifier, !Task.isCancelled {
+                        session.present(error: error, scope: "home", title: "Unable to inspect source")
+                    }
                 }
                 if selection == identifier { preparing = false; preparation = nil }
             }
@@ -136,8 +138,9 @@ struct NativePresentationError: LocalizedError {
 struct SessionAlertPresenter: ViewModifier {
     @ObservedObject var session: AppSession
     func body(content: Content) -> some View {
-        content.alert(item: Binding(get: { session.alert }, set: { value in
-            if value == nil, let current = session.alert { session.dismissAlert(id: current.id) }
+        let displayedId = session.alert?.id
+        return content.alert(item: Binding(get: { session.alert }, set: { value in
+            if value == nil, let displayedId { session.dismissAlert(id: displayedId) }
         })) { alert in
             Alert(title: Text(alert.title), message: Text(alert.detail), dismissButton: .default(Text("OK")) { session.dismissAlert(id: alert.id) })
         }

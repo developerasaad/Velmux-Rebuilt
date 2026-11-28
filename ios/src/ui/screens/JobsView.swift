@@ -51,6 +51,7 @@ struct JobsView: View {
                     }
                     if [.completed, .canceled].contains(job.state) { Button("Dismiss") { run(job.id) { try await session.dismissJob(id: job.id) } } }
                 }.disabled(busy.contains(job.id))
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("job-" + job.fileName)
             }
         }

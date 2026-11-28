@@ -99,8 +99,10 @@ if [ "$verify_only" = true ]; then
   }
   exit 0
 fi
+build_directory="$root/build/xcode/native/$sdk/$configuration"
+mkdir -p "$build_directory"
 xcodebuild -project ios/Velmux.xcodeproj -scheme Velmux -configuration "$configuration" \
   -sdk "$sdk" -destination "$destination" \
   -derivedDataPath "build/xcode/native/$sdk/$configuration" \
   -xcconfig "$core_directory/native-app.xcconfig" \
-  CODE_SIGNING_ALLOWED=NO "$@" build
+  CODE_SIGNING_ALLOWED=NO "$@" build 2>&1 | tee "$build_directory/build.log"

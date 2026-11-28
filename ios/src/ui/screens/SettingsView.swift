@@ -5,14 +5,21 @@ struct SettingsView: View {
     @ObservedObject var session: AppSession
     @State private var clearing = false
     @State private var confirmClear = false
+    @State private var changingAppearance = false
     var body: some View {
         Form {
             Section("Appearance") {
                 Picker("Appearance", selection: Binding(get: { session.appearance }, set: { value in
-                    Task { do { try await session.setAppearance(value) } catch { session.present(error: error, scope: "settings", title: "Unable to change appearance") } }
+                    guard !changingAppearance else { return }
+                    changingAppearance = true
+                    Task {
+                        defer { changingAppearance = false }
+                        do { try await session.setAppearance(value) }
+                        catch { session.present(error: error, scope: "settings", title: "Unable to change appearance") }
+                    }
                 })) {
                     Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
-                }.pickerStyle(.inline)
+                }.pickerStyle(.inline).disabled(changingAppearance)
             }
             Section("Storage") {
                 LabeledContentRow(title: "Save location", value: session.outputLocation)

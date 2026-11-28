@@ -150,7 +150,11 @@ def first_rgb(path, width, height, start=0, tone_map=False):
         filters += ["zscale=t=linear:npl=100", "format=gbrpf32le", "zscale=p=bt709",
                     "tonemap=tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:r=limited", "format=yuv420p"]
     filters.append(f"scale={width}:{height}:flags=bicubic")
-    return run(["ffmpeg", "-v", "error", "-nostdin", "-threads", "1", "-ss", str(start),
+    # Decode the first presentation frame sequentially. An unnecessary demuxer
+    # seek to zero can skip an FLV's initial keyframe when reordered video and
+    # audio have different positive starting timestamps.
+    seek = ["-ss", str(start)] if start > 0 else []
+    return run(["ffmpeg", "-v", "error", "-nostdin", "-threads", "1", *seek,
                 "-i", str(path), "-map", "0:v:0", "-vf", ",".join(filters),
                 "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
 
@@ -409,7 +413,10 @@ def main():
     checked = []
     for manifest in manifests:
         for case in json.loads(manifest.read_text()):
-            checked.append(check_case(case))
+            try:
+                checked.append(check_case(case))
+            except AssertionError as error:
+                raise AssertionError(f"{manifest}: {case.get('path', '<missing output>')}: {error}") from error
     assert len(checked) >= 8, f"Incomplete conversion output set: {checked}"
     result = {"verified_outputs": checked, "fixture_tool": fixture_manifest["ffmpeg_version"],
               "verification_tool": run(["ffprobe", "-version"]).decode().splitlines()[0],

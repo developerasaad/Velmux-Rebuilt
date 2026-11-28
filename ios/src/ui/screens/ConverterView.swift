@@ -36,6 +36,7 @@ struct ConverterView: View {
     @State private var previewGeneration = UUID()
     @State private var previewBusy = false
     @State private var previewPosition = 0.0
+    @FocusState private var focusedField: String?
 
     init(seed: WorkspaceSeed, session: AppSession, actions: IosMediaActions, isPresented: Binding<Bool>) {
         self.seed = seed
@@ -74,6 +75,8 @@ struct ConverterView: View {
                 } else { audioSettings }
                 TextField("Filename", text: binding(\.fileName))
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
+                    .focused($focusedField, equals: "filename").submitLabel(.done)
+                    .onSubmit { focusedField = nil }
                     .accessibilityIdentifier("output-filename")
                 if let compatibility { Text(compatibility).font(.footnote).foregroundColor(.red).textSelection(.enabled) }
             }.disabled(submitting)
@@ -107,6 +110,10 @@ struct ConverterView: View {
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 NavigationLink(isActive: $jobsActive) { JobsView(session: session, actions: actions) } label: { Text("Jobs") }.accessibilityIdentifier("jobs-action")
+            }
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { focusedField = nil }
             }
         }
         .sheet(item: $choice) { field in choiceSheet(field) }
@@ -165,7 +172,7 @@ struct ConverterView: View {
     }
 
     private func numeric(_ title: String, text: Binding<String>) -> some View {
-        HStack { Text(title); TextField(title, text: text).keyboardType(.numberPad).multilineTextAlignment(.trailing) }
+        HStack { Text(title); TextField(title, text: text).keyboardType(.numberPad).multilineTextAlignment(.trailing).focused($focusedField, equals: title) }
     }
 
     @ViewBuilder private func choiceSheet(_ field: ConverterChoice) -> some View {

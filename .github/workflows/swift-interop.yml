@@ -41,8 +41,8 @@ jobs:
         run: bash scripts/ci/verify-swift-interop.sh
       - name: Build the native SwiftUI device application
         run: bash scripts/ci/apple-native-app.sh iphoneos Release
-      - name: Build the native SwiftUI simulator application
-        run: bash scripts/ci/apple-native-app.sh iphonesimulator Debug
+      - name: Verify the native SwiftUI application at runtime
+        run: bash scripts/ci/verify-native-ios.sh
       - uses: actions/cache/save@v4
         if: always() && steps.native.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
         with:
@@ -61,4 +61,6 @@ jobs:
             build/ios/**/native-link-flags.json
             build/ios/**/TARGET-IDENTITY
             build/xcode/native/**/*.log
+            build/native-ios
+            build/ios-screenshots
           retention-days: 7

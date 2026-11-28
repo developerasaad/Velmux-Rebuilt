@@ -2057,7 +2057,30 @@ fn actual_previews_seek_bound_duration_and_preserve_cache_ownership() {
 #[test]
 fn canceled_and_obsolete_preview_requests_release_native_sources_and_scratch() {
     let harness = Harness::new("preview-cancellation");
+    let original_hash = digest(&fixture("video.mp4"));
     let source = harness.inspect("video.mp4", Operation::VideoConverter);
+    let defaults = harness
+        .engine()
+        .default_configuration(source.id.clone(), Operation::VideoConverter)
+        .unwrap();
+    let catalog = || {
+        harness
+            .engine()
+            .media_catalog_for_source(source.id.clone(), Operation::VideoConverter)
+            .unwrap()
+            .into_iter()
+            .map(|option| {
+                (
+                    option.format,
+                    option.label,
+                    option.extension,
+                    option.video_codecs,
+                    option.audio_codecs,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let original_catalog = catalog();
     let canceled = CancellationToken::new();
     canceled.cancel();
     assert!(matches!(
@@ -2079,6 +2102,18 @@ fn canceled_and_obsolete_preview_requests_release_native_sources_and_scratch() {
         .spawn(move || engine.prepare_preview(source_id, 0, worker_token))
         .unwrap();
     harness.provider.preview_gate.wait_entered();
+    harness.engine().release_preview(source.id.clone()).unwrap();
+    assert!(obsolete.is_cancelled());
+    assert!(
+        !preparation.is_finished(),
+        "Cancellation must not pretend the blocked native worker has already terminated"
+    );
+    assert!(harness
+        .provider
+        .retained_sources
+        .lock()
+        .unwrap()
+        .contains(&source.locator));
     let replacement_token = CancellationToken::new();
     let replacement_engine = harness.engine().clone();
     let replacement_source = source.id.clone();
@@ -2117,15 +2152,69 @@ fn canceled_and_obsolete_preview_requests_release_native_sources_and_scratch() {
     assert!(!orphan.exists());
     assert!(unidentified.exists());
     assert!(replacement_path.exists());
-    harness.engine().release_inspection(source.id).unwrap();
+    harness.engine().release_preview(source.id.clone()).unwrap();
     assert!(replacement_token.is_cancelled());
     assert!(!replacement_path.exists());
     assert!(harness.provider.leases.lock().unwrap().is_empty());
+    assert!(harness.provider.lease_locators.lock().unwrap().is_empty());
     let remaining: Vec<_> = fs::read_dir(replacement_path.parent().unwrap())
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect();
     assert_eq!(remaining, vec![unidentified]);
+    assert!(harness.engine().jobs().unwrap().is_empty());
+    assert_eq!(catalog(), original_catalog);
+    assert_eq!(
+        serde_json::to_value(
+            harness
+                .engine()
+                .default_configuration(source.id.clone(), Operation::VideoConverter)
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(&defaults).unwrap(),
+        "Releasing only a preview invalidated the primary inspection"
+    );
+    harness
+        .engine()
+        .validate_configuration(source.id.clone(), defaults)
+        .unwrap();
+    let prepared_again = harness
+        .engine()
+        .prepare_preview(source.id.clone(), 0, CancellationToken::new())
+        .unwrap();
+    let new_path = cached_preview_path(&prepared_again.locator, &harness);
+    assert_ne!(new_path, replacement_path);
+    assert!(new_path.is_file());
+    harness.engine().release_preview(source.id.clone()).unwrap();
+    assert!(!new_path.exists());
+    assert_eq!(
+        harness.engine().cache_bytes().unwrap(),
+        b"preserve unidentified data".len() as u64
+    );
+    let mut config = harness.defaults(&source, Operation::VideoConverter);
+    config.video_codec = VideoCodec::H264;
+    let completed = harness.complete(&harness.submit(&source, config).id);
+    let published = PathBuf::from(&completed.output.as_ref().unwrap().locator);
+    let published_hash = digest(&published);
+    harness.expect(vec![json!({
+        "path":published,"source":"video.mp4","video_codec":"h264",
+        "width":320,"height":180,"frame_rate":24000.0/1001.0,
+        "audio_codecs":["aac"],"sample_rate":48000,"channels":2,
+        "duration":2.0,"tones":true,"reencoded_video":true,
+        "decoded_video_frames":48,"match_source_frame":true,
+        "preserve_video_timestamps":true,
+    })]);
+    harness
+        .engine()
+        .release_inspection(source.id.clone())
+        .unwrap();
+    harness.engine().dismiss_job(completed.id).unwrap();
+    assert_eq!(digest(&published), published_hash);
+    assert_eq!(digest(&fixture("video.mp4")), original_hash);
+    assert!(harness.provider.retained_sources.lock().unwrap().is_empty());
+    assert!(harness.provider.leases.lock().unwrap().is_empty());
+    assert!(harness.provider.lease_locators.lock().unwrap().is_empty());
     assert!(harness.engine().jobs().unwrap().is_empty());
 }
 
