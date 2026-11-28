@@ -184,6 +184,10 @@ final class AppSession: ObservableObject {
         try engine.parseTargetSize(value: value, unit: unit)
     }
 
+    func audioAdjustmentDefaults() -> AudioAdjustments {
+        engine.audioAdjustmentDefaults()
+    }
+
     func videoCompressionControl(kind: CompressionControlKind, value: UInt64) throws -> VideoRateControl {
         try engine.videoCompressionControl(kind: kind, value: value)
     }

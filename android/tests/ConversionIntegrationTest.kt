@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.database.sqlite.SQLiteDatabase
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
 import android.os.SystemClock
 import android.os.Build
 import android.os.Bundle
@@ -45,7 +46,6 @@ import org.junit.runner.Description
 import org.junit.runner.RunWith
 import org.json.JSONObject
 import uniffi.velmux_core.AudioCodec
-import uniffi.velmux_core.AudioAdjustments
 import uniffi.velmux_core.EngineException
 import uniffi.velmux_core.OutputFormat
 import java.io.ByteArrayOutputStream
@@ -285,8 +285,18 @@ class ConversionIntegrationTest {
                 // Do not edit the bitrate again. The new sampling makes that
                 // visible draft applicable, so acceptance must use 128000,
                 // rather than the prior representable 32000 configuration.
-                clickText("Sample rate")
-                clickText("48000 Hz", exact = true)
+                try {
+                    openSettledSampleRateSheet()
+                    clickText("48000 Hz", exact = true)
+                    waitUntil("The Sample rate sheet did not acknowledge its selection") {
+                        !hasOptionSheetHeading("Sample rate")
+                    }
+                } catch (failure: Throwable) {
+                    // Capture before ActivityScenario closes the real screen;
+                    // TestWatcher's later teardown capture shows Launcher.
+                    runCatching { capture("failure-audio-custom-sample-rate-options.png") }
+                    throw failure
+                }
                 waitUntil("Changing sampling did not make the retained Custom draft applicable") {
                     convertControl()?.let { it.isEnabled && it.isClickable } == true
                 }
@@ -398,10 +408,11 @@ class ConversionIntegrationTest {
             val configuration = media.defaultsNative(source.id, false).copy(
                 format = OutputFormat.WAV, audioCodec = AudioCodec.PCM,
                 fileName = "native-adjustments-${UUID.randomUUID()}",
-                audioAdjustments = AudioAdjustments(-602, 500_000uL, 500_000uL),
+                audioAdjustments = media.audioAdjustmentDefaults().copy(gainCentidb = -602, fadeInUs = 500_000uL, fadeOutUs = 500_000uL),
             )
             try {
-                media.submitNative(source.id, UUID.randomUUID().toString(), configuration.copy(audioAdjustments = AudioAdjustments(2401, 0uL, 0uL)))
+                media.submitNative(source.id, UUID.randomUUID().toString(), configuration.copy(
+                    audioAdjustments = media.audioAdjustmentDefaults().copy(gainCentidb = 2401)))
                 fail("Rust accepted an invalid gain submitted without UI constraints")
             } catch (_: EngineException.Configuration) { }
             val accepted = media.submitNative(source.id, UUID.randomUUID().toString(), configuration)
@@ -424,6 +435,70 @@ class ConversionIntegrationTest {
         } finally {
             media.releaseNative(source.id)
             acceptedId?.let { cleanupJob(it) }
+            revoke("stereo.wav")
+        }
+    }
+
+    @Test
+    fun audioSpeedChangesRealSamplesAndPreservesOrChangesPitchAsRequested() {
+        media.beginNative()
+        val uri = grant("stereo.wav")
+        val sourceHash = hash(uri)
+        val source = media.inspectNative(uri.toString(), "stereo.wav", false)
+        val acceptedIds = mutableListOf<String>()
+        try {
+            val defaults = media.audioAdjustmentDefaults()
+            assertEquals(1000u, defaults.speedMilli)
+            assertTrue("Audio speed must preserve pitch by default", defaults.preservePitch)
+            val base = media.defaultsNative(source.id, false).copy(format = OutputFormat.WAV, audioCodec = AudioCodec.PCM)
+            val beforeInvalid = media.jobsNative().map { it.id }.toSet()
+            try {
+                media.submitNative(source.id, UUID.randomUUID().toString(), base.copy(
+                    audioAdjustments = defaults.copy(speedMilli = 499u)))
+                fail("Rust accepted an out-of-range speed submitted without UI restrictions")
+            } catch (_: EngineException.Configuration) { }
+            assertEquals(beforeInvalid, media.jobsNative().map { it.id }.toSet())
+            for ((speed, preservePitch) in listOf(2000u to true, 2000u to false, 500u to true)) {
+                val name = "android-audio-speed-$speed-${if (preservePitch) "preserved" else "shifted"}.wav"
+                val configuration = base.copy(fileName = "native-speed-${UUID.randomUUID()}",
+                    audioAdjustments = defaults.copy(speedMilli = speed, preservePitch = preservePitch))
+                val accepted = media.submitNative(source.id, UUID.randomUUID().toString(), configuration)
+                acceptedIds += accepted.id
+                val frozen = acceptedRequestJson(accepted.id)
+                val completed = awaitJob(accepted.id)
+                assertEquals("completed", completed.state)
+                assertEquals("Speed processing changed immutable accepted intent", frozen, acceptedRequestJson(accepted.id))
+                val output = Uri.parse(requireNotNull(completed.outputLocator))
+                val track = tracks(output).single()
+                assertEquals("audio/raw", track.getString(MediaFormat.KEY_MIME))
+                assertEquals(48_000, track.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                assertEquals(2, track.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                val pcm = decodeAudio(output)
+                assertEquals("Decoded audio did not contain complete stereo PCM16 frames", 0, pcm.size % 4)
+                val frames = pcm.size / 4
+                val expectedFrames = (96_000uL * 1000uL / speed.toULong()).toInt()
+                // atempo is a windowed time-domain algorithm; asetrate with
+                // exact-ratio resampling preserves the expected sample count.
+                // FFmpeg 7.1.5 uses 2048-sample windows at 48 kHz. Bound
+                // approximate tempo duration by two windows, and verify the
+                // independent tone frequencies as well as actual frame counts.
+                val frameTolerance = if (preservePitch) 4096 else 1
+                assertTrue("Speed $speed produced $frames frames instead of approximately $expectedFrames",
+                    abs(frames - expectedFrames) <= frameTolerance)
+                val expectedDurationUs = 2_000_000L * 1000 / speed.toLong()
+                assertTrue("The WAV timeline disagrees with the accepted speed",
+                    track.containsKey(MediaFormat.KEY_DURATION) &&
+                        abs(track.getLong(MediaFormat.KEY_DURATION) - expectedDurationUs) <= if (preservePitch) 85_334 else 1_000)
+                val ratio = if (preservePitch) 1.0 else speed.toDouble() / 1000
+                verifySpeedTones(pcm, 440.0 * ratio, 660.0 * ratio)
+                retainOutput(name, output)
+                retainText(name.removeSuffix(".wav") + "-facts.txt",
+                    "Actual native decoded PCM16 stereo at 48,000 Hz: $frames frames; speedMilli=$speed; preservePitch=$preservePitch; expectedFrames=$expectedFrames.\n$track")
+                assertEquals("Speed conversion altered its user original", sourceHash, hash(uri))
+            }
+        } finally {
+            media.releaseNative(source.id)
+            acceptedIds.forEach { cleanupJob(it) }
             revoke("stereo.wav")
         }
     }
@@ -893,6 +968,30 @@ class ConversionIntegrationTest {
         }
     }
 
+    private fun verifySpeedTones(pcm: ByteArray, leftFrequency: Double, rightFrequency: Double) {
+        val samples = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        val frames = samples.remaining() / 2
+        val start = frames / 10
+        val end = frames * 9 / 10
+        assertTrue("The speed-adjusted signal is too short to inspect", end - start >= 24_000)
+        for ((channel, expected) in listOf(0 to leftFrequency, 1 to rightFrequency)) {
+            var crossings = 0
+            var squareSum = 0.0
+            var previous = samples.get(start * 2 + channel).toInt()
+            for (frame in start + 1 until end) {
+                val sample = samples.get(frame * 2 + channel).toInt()
+                if (previous <= 0 && sample > 0) crossings += 1
+                squareSum += sample.toDouble() * sample
+                previous = sample
+            }
+            val count = end - start - 1
+            assertTrue("Speed processing silenced channel $channel", sqrt(squareSum / count) > 1_000)
+            val frequency = crossings * 48_000.0 / count
+            assertTrue("Channel $channel expected $expected Hz but speed processing produced $frequency Hz",
+                abs(frequency - expected) < 12)
+        }
+    }
+
     private fun wavPcm(bytes: ByteArray): ByteArray {
         assertEquals("RIFF", String(bytes, 0, 4, Charsets.US_ASCII))
         assertEquals("WAVE", String(bytes, 8, 4, Charsets.US_ASCII))
@@ -1064,6 +1163,61 @@ class ConversionIntegrationTest {
             node = current.parent
         }
         return null
+    }
+
+    private fun openSettledSampleRateSheet() {
+        reachableText("Sample rate", exact = true)
+        device.waitForIdle(2_000)
+        var settledBounds: Rect? = null
+        var unchangedSince = SystemClock.elapsedRealtime()
+        fun action(): UiObject2? {
+            var node = device.findObject(By.text("Sample rate"))
+            repeat(4) {
+                val current = node ?: return null
+                if (current.isEnabled && current.isClickable) return current
+                node = current.parent
+            }
+            return null
+        }
+        waitUntil("The actual Sample rate action did not settle after scrolling", 5_000) {
+            val current = action() ?: return@waitUntil false
+            val bounds = current.visibleBounds
+            if (bounds.isEmpty) return@waitUntil false
+            if (settledBounds != bounds) {
+                settledBounds = Rect(bounds)
+                unchangedSince = SystemClock.elapsedRealtime()
+                false
+            } else SystemClock.elapsedRealtime() - unchangedSince >= 200
+        }
+        capture("ui-audio-custom-sample-rate-action.png")
+        val current = requireNotNull(action()) { "The settled Sample rate action disappeared" }
+        assertEquals("Sample rate moved before its actual action was tapped", settledBounds, current.visibleBounds)
+        assertTrue(current.isEnabled && current.isClickable)
+        current.click()
+        capture("ui-audio-custom-sample-rate-options.png")
+        waitUntil("The actual Sample rate options heading did not appear", 10_000) {
+            hasOptionSheetHeading("Sample rate")
+        }
+    }
+
+    private fun hasOptionSheetHeading(title: String): Boolean {
+        var remaining = 256
+        fun visit(node: AccessibilityNodeInfo, depth: Int): Boolean {
+            try {
+                if (--remaining < 0 || depth > 20) return false
+                if (node.isVisibleToUser && node.packageName?.toString() == context.packageName &&
+                    node.isHeading && node.text?.toString() == title) return true
+                for (index in 0 until node.childCount) {
+                    if (remaining <= 0) return false
+                    val child = node.getChild(index) ?: continue
+                    if (visit(child, depth + 1)) return true
+                }
+                return false
+            } finally {
+                node.recycle()
+            }
+        }
+        return instrumentation.uiAutomation.rootInActiveWindow?.let { visit(it, 0) } == true
     }
 
     private fun labeledEditText(description: String): UiObject2? {

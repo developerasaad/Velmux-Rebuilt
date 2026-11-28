@@ -13,6 +13,7 @@ pub(crate) use transcode::convert;
 pub(crate) enum ProcessingProgress {
     Started,
     Timestamp(i64),
+    AnalysisTimestamp(i64),
     Finalizing,
     Restarted,
     Validating,
@@ -332,7 +333,6 @@ pub(crate) fn validate_operation(
 pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, EngineError> {
     validate_fields(config)?;
     validate_operation(info, config.operation)?;
-    let audio_filters = adjustments::audio_plan(info, config.audio_adjustments.as_ref())?;
     let accepted = config;
     let effective = effective_config(info, config)?;
     let config = &effective;
@@ -416,7 +416,8 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
                 item.encoding = Some(output.settings);
             }
         } else if stream.kind == StreamKind::Audio {
-            item.audio_filters = audio_filters.clone();
+            item.audio_filters =
+                adjustments::audio_plan(info, stream, config.audio_adjustments.as_ref())?;
             if let Some(AudioOutput {
                 sample_rate,
                 channels,
@@ -454,11 +455,83 @@ pub(crate) fn plan(info: &MediaInfo, config: &ConversionConfig) -> Result<Plan, 
     Ok(plan)
 }
 
+fn audio_output_tolerance(
+    actual: &crate::StreamInfo,
+    expected: &StreamPlan,
+    filters: &adjustments::AudioFilterPlan,
+) -> u64 {
+    let rate = expected.sample_rate.unwrap_or(1).max(1);
+    let codec_samples = match expected.expected_codec.as_str() {
+        codec if codec.starts_with("pcm_") || matches!(codec, "flac" | "alac" | "wavpack") => 2,
+        "aac" => 2048,
+        "mp3" => 2304,
+        "ac3" | "eac3" => 3072,
+        "opus" => 5760,
+        _ => 8192,
+    };
+    let sample_time = (codec_samples * 1_000_000u64).div_ceil(u64::from(rate));
+    let tick = actual
+        .time_base
+        .as_ref()
+        .filter(|base| base.numerator > 0 && base.denominator > 0)
+        .map_or(0, |base| {
+            (base.numerator as u64 * 1_000_000).div_ceil(base.denominator as u64)
+        });
+    filters
+        .timing_tolerance_us()
+        .unwrap_or(0)
+        .saturating_add(sample_time)
+        .saturating_add(tick)
+}
+
 pub(crate) fn verify_output(
     info: &MediaInfo,
     source: &MediaInfo,
     plan: &Plan,
 ) -> Result<(), EngineError> {
+    verify_output_with_evidence(info, source, plan, DurationEvidence::Fresh)
+}
+
+/// Exact previously verified bytes retain their original measured-duration
+/// proof. The capability is constructed privately by Jobs only after checking
+/// its committed verified flag and complete size/hash, never by a fresh encode.
+pub(crate) fn verify_retained_output(
+    retained: &crate::jobs::VerifiedWorkingOutput<'_>,
+    source: &MediaInfo,
+    plan: &Plan,
+    token: std::sync::Arc<crate::CancellationToken>,
+) -> Result<(), EngineError> {
+    let info = crate::media::inspect_file(retained.path(), token)?;
+    verify_output_with_evidence(&info, source, plan, DurationEvidence::RetainedVerifiedBytes)
+}
+
+#[derive(Clone, Copy)]
+enum DurationEvidence {
+    Fresh,
+    RetainedVerifiedBytes,
+}
+impl DurationEvidence {
+    fn reuses_measurement(self, filters: &adjustments::AudioFilterPlan) -> bool {
+        matches!(self, Self::RetainedVerifiedBytes) && filters.needs_measurement()
+    }
+}
+
+fn verify_output_with_evidence(
+    info: &MediaInfo,
+    source: &MediaInfo,
+    plan: &Plan,
+    duration_evidence: DurationEvidence,
+) -> Result<(), EngineError> {
+    if matches!(duration_evidence, DurationEvidence::Fresh)
+        && plan.streams.iter().any(|stream| {
+            stream
+                .audio_filters
+                .as_ref()
+                .is_some_and(|filters| filters.needs_measurement())
+        })
+    {
+        return Err(EngineError::Internal { detail: "Fresh output verification requires the accepted decoded-duration measurement before any verified commitment.".into() });
+    }
     if info.streams.len() != plan.streams.len() {
         return Err(EngineError::InvalidMedia {
             detail: "The finalized output has an unexpected stream count.".into(),
@@ -560,6 +633,28 @@ pub(crate) fn verify_output(
                 .audio
                 .as_ref()
                 .ok_or_else(|| invalid("The output audio stream is missing."))?;
+            if let Some(filters) = &expected.audio_filters {
+                if let Some(timing) = filters.timing() {
+                    let tolerance = audio_output_tolerance(stream, expected, filters);
+                    if !duration_evidence.reuses_measurement(filters)
+                        && stream
+                            .duration_us
+                            .filter(|duration| *duration > 0)
+                            .zip(timing.output_duration_us)
+                            .is_some_and(|(actual, required)| {
+                                actual.abs_diff(required as i64) > tolerance
+                            })
+                    {
+                        return Err(EngineError::InvalidMedia { detail: format!("The finalized audio track {} duration does not match the accepted playback speed.", stream.index) });
+                    }
+                    let actual_start = stream
+                        .start_time_us
+                        .unwrap_or_else(|| common_origin(info).unwrap_or(0));
+                    if actual_start.abs_diff(timing.output_start_us) > tolerance {
+                        return Err(EngineError::InvalidMedia { detail: format!("The finalized audio track {} origin does not match the accepted playback speed.", stream.index) });
+                    }
+                }
+            }
             if expected.bit_depth.is_some() && audio.bit_depth != expected.bit_depth {
                 return Err(EngineError::InvalidMedia {
                     detail:
@@ -582,6 +677,71 @@ pub(crate) fn verify_output(
             .ok_or_else(|| invalid("The preview has no verifiable duration."))?;
         if actual <= 0 || actual > range.duration_us.saturating_add(250_000) {
             return Err(invalid("The preview exceeds its bounded time range."));
+        }
+        return Ok(());
+    }
+    if plan.streams.iter().any(|stream| {
+        stream
+            .audio_filters
+            .as_ref()
+            .is_some_and(|filters| duration_evidence.reuses_measurement(filters))
+    }) {
+        // The previous full validation used execution-local decoded timing.
+        // Re-inspection above still checks composition, codec, geometry, color,
+        // sampling and origins. Re-deriving duration from coded padding here
+        // would reject the unchanged bytes whose measured proof was committed.
+        if info.duration_us.is_none_or(|duration| duration <= 0) {
+            return Err(invalid(
+                "The retained verified output has no positive media duration.",
+            ));
+        }
+        return Ok(());
+    }
+    let transformed = plan.streams.iter().any(|stream| {
+        stream
+            .audio_filters
+            .as_ref()
+            .and_then(|filters| filters.timing())
+            .is_some()
+    });
+    if transformed {
+        let mut end = 0i64;
+        let mut start = i64::MAX;
+        let mut tolerance = 0;
+        for (actual, expected) in info.streams.iter().zip(&plan.streams) {
+            let Some(filters) = &expected.audio_filters else {
+                continue;
+            };
+            let Some(timing) = filters.timing() else {
+                continue;
+            };
+            let duration = timing
+                .output_duration_us
+                .and_then(|value| i64::try_from(value).ok())
+                .ok_or_else(|| invalid("The accepted transformed audio duration is missing."))?;
+            let endpoint = timing
+                .output_start_us
+                .checked_add(duration)
+                .ok_or_else(|| {
+                    invalid("The transformed audio endpoint exceeds supported bounds.")
+                })?;
+            end = end.max(endpoint);
+            start = start.min(timing.output_start_us);
+            tolerance = tolerance.max(audio_output_tolerance(actual, expected, filters));
+        }
+        let required = end
+            .checked_sub(start)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid("The transformed audio interval is invalid."))?;
+        let actual = info.duration_us.filter(|value| *value > 0).ok_or_else(|| {
+            invalid("The finalized transformed audio has no verifiable duration.")
+        })?;
+        if actual.abs_diff(required) > tolerance {
+            return Err(EngineError::InvalidMedia {
+                detail:
+                    "The finalized duration differs from the accepted transformed audio timeline."
+                        .into(),
+            });
         }
         return Ok(());
     }
@@ -650,6 +810,78 @@ mod preview_tests {
                 }),
             }],
         }
+    }
+
+    #[test]
+    fn speed_target_budget_and_internal_multitrack_timing_preserve_cached_intent() {
+        let mut source = audio_source();
+        source.streams[0].codec_id = sys::AV_CODEC_ID_PCM_S16LE as i32;
+        source.streams[0].audio.as_mut().unwrap().sample_rate = Some(48000);
+        source.streams[0].time_base = Some(crate::Rational {
+            numerator: 1,
+            denominator: 48000,
+        });
+        let mut config = default_config(Operation::AudioConverter, &source, "timed.wav");
+        config.format = OutputFormat::M4a;
+        config.audio_codec = AudioCodec::Aac;
+        config.compression = Some(CompressionSettings {
+            reduce_file_size: true,
+            mode: CompressionMode::TargetSize,
+            target: Some(TargetSize {
+                amount_milli: 1000,
+                unit: TargetSizeUnit::Megabytes,
+            }),
+            ..Default::default()
+        });
+        let mut bitrates = Vec::new();
+        for speed_milli in [500, 2000] {
+            config.audio_adjustments = Some(AudioAdjustments {
+                speed_milli,
+                ..Default::default()
+            });
+            let intent = serde_json::to_value(&config).unwrap();
+            let accepted = plan(&source, &config).unwrap();
+            assert_eq!(serde_json::to_value(&config).unwrap(), intent);
+            bitrates.push(
+                accepted.streams[0]
+                    .encoding
+                    .as_ref()
+                    .unwrap()
+                    .bit_rate
+                    .unwrap(),
+            );
+            assert_eq!(
+                accepted.streams[0]
+                    .audio_filters
+                    .as_ref()
+                    .unwrap()
+                    .timing()
+                    .unwrap()
+                    .output_duration_us,
+                Some(60_000_000 * 1000 / u64::from(speed_milli))
+            );
+        }
+        assert!(
+            bitrates[1] >= bitrates[0] * 3,
+            "Target allocation ignored speed-adjusted duration: {bitrates:?}"
+        );
+        let mut second = source.streams[0].clone();
+        second.index = 1;
+        second.id = "fixture:1".into();
+        second.start_time_us = Some(10_500_000);
+        second.duration_us = Some(20_000_000);
+        source.streams.push(second);
+        // Internal prerequisite only: current Audio Converter acceptance still
+        // rejects multiple audio streams, independently of this timing helper.
+        assert!(validate_operation(&source, Operation::AudioConverter).is_err());
+        let second_timing = audio_timing(
+            &source,
+            &source.streams[1],
+            config.audio_adjustments.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(second_timing.output_duration_us, Some(10_000_000));
+        assert_eq!(second_timing.output_start_us, 250_000);
     }
 
     #[test]

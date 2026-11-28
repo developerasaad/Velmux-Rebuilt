@@ -112,7 +112,7 @@ struct AcceptedRequest {
     plan: Plan,
 }
 
-const CURRENT_ACCEPTED_REQUEST_VERSION: u32 = 2;
+const CURRENT_ACCEPTED_REQUEST_VERSION: u32 = 3;
 
 fn legacy_accepted_request_version() -> u32 {
     1
@@ -1208,13 +1208,13 @@ impl Runtime {
                 self.cleanup(&record);
                 return Ok(());
             }
-            let (size, hash) = verified_identity(&path, &token)?;
-            if record.verified_size != Some(size) || record.verified_hash.as_deref() != Some(&hash)
-            {
-                return Err(EngineError::Recovery{detail:"The retained working output changed. It cannot be published as the previously verified result.".into()});
-            }
-            let output = media::inspect_file(&path, token.clone())?;
-            processing::verify_output(&output, &request.source.info, &request.plan)?;
+            let retained = VerifiedWorkingOutput::check(&record, &path, &token)?;
+            processing::verify_retained_output(
+                &retained,
+                &request.source.info,
+                &request.plan,
+                token.clone(),
+            )?;
         }
         if !record.verified {
             self.prepare_workdir(&record)?;
@@ -1232,15 +1232,24 @@ impl Runtime {
                     if token.is_cancelled() {
                         return Err(EngineError::Cancelled);
                     }
-                    let transition = !matches!(event, processing::ProcessingProgress::Timestamp(_));
+                    let transition = !matches!(
+                        event,
+                        processing::ProcessingProgress::Timestamp(_)
+                            | processing::ProcessingProgress::AnalysisTimestamp(_)
+                    );
                     if transition || reported.elapsed() >= Duration::from_millis(250) {
                         let mut latest = self.store.get(id)?;
                         match event {
                             processing::ProcessingProgress::Started => {
+                                latest.processed_us = 0;
                                 latest.state = JobState::Processing;
                             }
                             processing::ProcessingProgress::Timestamp(position) => {
                                 latest.processed_us = position
+                            }
+                            processing::ProcessingProgress::AnalysisTimestamp(position) => {
+                                latest.state = JobState::Preparing;
+                                latest.processed_us = position;
                             }
                             processing::ProcessingProgress::Finalizing => {
                                 latest.state = JobState::Finalizing
@@ -1383,6 +1392,37 @@ fn target_requires_decision(record: &JobRecord, plan: &Plan) -> bool {
             .verified_size
             .zip(plan.target_size_bytes)
             .is_some_and(|(actual, target)| actual > target)
+}
+
+/// An internal capability for one retained working path. Only a previously
+/// committed verification plus exact full-file identity can construct it.
+/// File existence or a processing success response cannot authorize proof reuse.
+pub(crate) struct VerifiedWorkingOutput<'a> {
+    path: &'a std::path::Path,
+}
+impl<'a> VerifiedWorkingOutput<'a> {
+    fn check(
+        record: &JobRecord,
+        path: &'a std::path::Path,
+        token: &CancellationToken,
+    ) -> Result<Self, EngineError> {
+        if !record.verified {
+            return Err(EngineError::Recovery {
+                detail: "This working output has no committed media verification.".into(),
+            });
+        }
+        let (size, hash) = verified_identity(path, token)?;
+        if size == 0
+            || record.verified_size != Some(size)
+            || record.verified_hash.as_deref() != Some(hash.as_str())
+        {
+            return Err(EngineError::Recovery { detail: "The retained working output changed. It cannot be published as the previously verified result.".into() });
+        }
+        Ok(Self { path })
+    }
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.path
+    }
 }
 
 fn verified_identity(

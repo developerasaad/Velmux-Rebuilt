@@ -5,11 +5,24 @@ private enum ConverterChoice: String, Identifiable {
     var id: String { rawValue }
 }
 
+private enum ConverterSheet: Identifiable {
+    case output(ConverterChoice)
+    case compression(CompressionField)
+
+    var id: String {
+        switch self {
+        case .output(let field): return "output-" + field.id
+        case .compression(let field): return "compression-" + field.id
+        }
+    }
+}
+
 /// Workspace state is transient user intent. Catalogs and applicable choices
 /// are cheap Rust queries over the already inspected source.
 @MainActor
 struct ConverterView: View {
     let seed: WorkspaceSeed
+    private let adjustmentDefaults: AudioAdjustments
     @ObservedObject var session: AppSession
     @ObservedObject var actions: IosMediaActions
     @Binding var isPresented: Bool
@@ -17,6 +30,7 @@ struct ConverterView: View {
     @State private var formats: [FormatOption] = []
     @State private var choices: ConfigurationChoices?
     @State private var choice: ConverterChoice?
+    @State private var compressionChoice: CompressionField?
     @State private var compatibility: String?
     @State private var edited = false
     @State private var confirmLeave = false
@@ -34,6 +48,8 @@ struct ConverterView: View {
     @State private var gainText: String
     @State private var fadeInText: String
     @State private var fadeOutText: String
+    @State private var speedText: String
+    @State private var preservePitch: Bool
     @State private var width = ""
     @State private var height = ""
     @State private var numerator = ""
@@ -55,10 +71,14 @@ struct ConverterView: View {
         _isPresented = isPresented
         _configuration = State(initialValue: seed.configuration)
         _compressionDraft = State(initialValue: CompressionDraft(seed.configuration.compression))
-        let adjustments = seed.configuration.audioAdjustments
-        _gainText = State(initialValue: String(Double(adjustments?.gainCentidb ?? 0) / 100))
-        _fadeInText = State(initialValue: String(Double(adjustments?.fadeInUs ?? 0) / 1_000_000))
-        _fadeOutText = State(initialValue: String(Double(adjustments?.fadeOutUs ?? 0) / 1_000_000))
+        let defaults = session.audioAdjustmentDefaults()
+        adjustmentDefaults = defaults
+        let adjustments = seed.configuration.audioAdjustments ?? defaults
+        _gainText = State(initialValue: String(Double(adjustments.gainCentidb) / 100))
+        _fadeInText = State(initialValue: String(Double(adjustments.fadeInUs) / 1_000_000))
+        _fadeOutText = State(initialValue: String(Double(adjustments.fadeOutUs) / 1_000_000))
+        _speedText = State(initialValue: String(format: "%.3f", Double(adjustments.speedMilli) / 1000))
+        _preservePitch = State(initialValue: adjustments.preservePitch)
     }
 
     private var video: Bool { seed.operation == .videoConverter }
@@ -102,11 +122,7 @@ struct ConverterView: View {
                     DisclosureGroup("Audio settings", isExpanded: $advanced) { audioSettings }
                 }.disabled(submitting)
             }
-            CompressionControls(draft: $compressionDraft,
-                                choices: choices?.compressionChoices,
-                                video: video, hasAudio: hasAudio,
-                                error: compressionError, focus: $focusedField)
-                .disabled(submitting)
+            compressionControls.disabled(submitting)
             if !video, let limits = choices?.audioAdjustmentLimits {
                 Section {
                     DisclosureGroup("Audio adjustments", isExpanded: $adjustmentsExpanded) {
@@ -117,17 +133,35 @@ struct ConverterView: View {
                                 .accessibilityIdentifier("audio-gain")
                             Text("dB").foregroundColor(.secondary)
                         }
-                        Slider(value: Binding(get: { Double(configuration.audioAdjustments?.gainCentidb ?? 0) }, set: { value in
+                        Slider(value: Binding(get: { Double(configuration.audioAdjustments?.gainCentidb ?? adjustmentDefaults.gainCentidb) }, set: { value in
                             gainText = String(format: "%.2f", value.rounded() / 100)
                         }), in: Double(limits.minimumGainCentidb)...Double(limits.maximumGainCentidb), step: 10)
                             .accessibilityLabel("Audio gain")
+                        HStack {
+                            Text("Playback speed")
+                            TextField("Multiplier", text: $speedText).keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing).focused($focusedField, equals: "audio-speed")
+                                .accessibilityIdentifier("audio-speed")
+                            Text("×").foregroundColor(.secondary)
+                        }
+                        Slider(value: Binding(get: {
+                            Double(configuration.audioAdjustments?.speedMilli ?? adjustmentDefaults.speedMilli)
+                        }, set: { value in speedText = String(format: "%.3f", value.rounded() / 1000) }),
+                               in: Double(limits.minimumSpeedMilli)...Double(limits.maximumSpeedMilli), step: 1)
+                            .accessibilityLabel("Audio playback speed")
+                            .accessibilityIdentifier("audio-speed-slider")
+                        Text("\(String(format: "%.3g", Double(limits.minimumSpeedMilli) / 1000))×–\(String(format: "%.3g", Double(limits.maximumSpeedMilli) / 1000))× · up to three decimal places")
+                            .font(.footnote).foregroundColor(.secondary)
+                        Toggle("Preserve pitch", isOn: $preservePitch)
+                            .disabled(parsedSpeed == nil || parsedSpeed == adjustmentDefaults.speedMilli)
+                            .accessibilityIdentifier("audio-preserve-pitch")
                         if limits.maximumFadeUs != nil {
                             decimalSeconds("Fade in", text: $fadeInText)
                             decimalSeconds("Fade out", text: $fadeOutText)
                         }
-                        Text("Positive gain includes peak protection. Fades use a linear envelope and preserve duration.")
+                        Text("Speed changes output duration. Fades use output seconds after the speed change. Positive gain includes peak protection.")
                             .font(.footnote).foregroundColor(.secondary)
-                        if parsedAdjustments == nil { Text("Enter a signed gain and nonnegative fade durations.").font(.footnote).foregroundColor(.red) }
+                        if parsedAdjustments == nil { Text("Enter a signed gain, nonnegative fade durations and a playback speed within the displayed range, using at most three decimal places.").font(.footnote).foregroundColor(.red) }
                     }
                 }.disabled(submitting)
             }
@@ -153,7 +187,12 @@ struct ConverterView: View {
                 Button("Done") { focusedField = nil }
             }
         }
-        .sheet(item: $choice) { field in choiceSheet(field) }
+        .sheet(item: sheetBinding) { sheet in
+            switch sheet {
+            case .output(let field): choiceSheet(field)
+            case .compression(let field): compressionControls.sheet(field)
+            }
+        }
         .confirmationDialog("Discard workspace changes?", isPresented: $confirmLeave, titleVisibility: .visible) {
             Button("Discard changes", role: .destructive, action: leave)
             Button("Keep editing", role: .cancel) {}
@@ -170,6 +209,31 @@ struct ConverterView: View {
         .onChange(of: gainText) { _ in commitAdjustments() }
         .onChange(of: fadeInText) { _ in commitAdjustments() }
         .onChange(of: fadeOutText) { _ in commitAdjustments() }
+        .onChange(of: speedText) { _ in commitAdjustments() }
+        .onChange(of: preservePitch) { _ in commitAdjustments() }
+    }
+
+    private var compressionControls: CompressionControls {
+        CompressionControls(draft: $compressionDraft,
+                            choices: choices?.compressionChoices,
+                            video: video, hasAudio: hasAudio,
+                            error: compressionError, focus: $focusedField,
+                            selection: $compressionChoice)
+    }
+
+    // A Section inside Form becomes multiple native cells. Present choices
+    // from the stable converter host rather than those transient cell hosts.
+    private var sheetBinding: Binding<ConverterSheet?> {
+        Binding(get: {
+            if let choice { return .output(choice) }
+            return compressionChoice.map { .compression($0) }
+        }, set: { value in
+            switch value {
+            case .output(let field): choice = field; compressionChoice = nil
+            case .compression(let field): compressionChoice = field; choice = nil
+            case nil: choice = nil; compressionChoice = nil
+            }
+        })
     }
 
     private var sourceSection: some View {
@@ -279,14 +343,29 @@ struct ConverterView: View {
         HStack { Text(title); TextField("Seconds", text: text).keyboardType(.decimalPad).multilineTextAlignment(.trailing).focused($focusedField, equals: title); Text("s").foregroundColor(.secondary) }
     }
 
+    private var parsedSpeed: UInt32? {
+        guard let speed = decimalValue(speedText, precision: 3, signed: false),
+              let milli = UInt32(exactly: (speed * 1000).rounded()) else { return nil }
+        if let limits = choices?.audioAdjustmentLimits,
+           !(limits.minimumSpeedMilli...limits.maximumSpeedMilli).contains(milli) { return nil }
+        return milli
+    }
+
     private var parsedAdjustments: AudioAdjustments? {
         guard let gain = decimalValue(gainText, precision: 2, signed: true),
               let centidb = Int32(exactly: (gain * 100).rounded()),
               let fadeIn = decimalValue(fadeInText, precision: 6, signed: false),
               let inUs = UInt64(exactly: (fadeIn * 1_000_000).rounded()),
               let fadeOut = decimalValue(fadeOutText, precision: 6, signed: false),
-              let outUs = UInt64(exactly: (fadeOut * 1_000_000).rounded()) else { return nil }
-        return AudioAdjustments(gainCentidb: centidb, fadeInUs: inUs, fadeOutUs: outUs)
+              let outUs = UInt64(exactly: (fadeOut * 1_000_000).rounded()),
+              let speed = parsedSpeed else { return nil }
+        var adjustments = configuration.audioAdjustments ?? adjustmentDefaults
+        adjustments.gainCentidb = centidb
+        adjustments.fadeInUs = inUs
+        adjustments.fadeOutUs = outUs
+        adjustments.speedMilli = speed
+        adjustments.preservePitch = preservePitch
+        return adjustments
     }
 
     private func decimalValue(_ text: String, precision: Int, signed: Bool) -> Double? {
@@ -387,6 +466,7 @@ struct ConverterView: View {
     private func submit() {
         // Read the visible draft synchronously as well as on field changes.
         // A keyboard edit must never submit a previous valid compression value.
+        if !video, let parsedAdjustments { configuration.audioAdjustments = parsedAdjustments }
         commitCompression(refresh: false)
         guard !submitting, validNumbers, compatibility == nil else { return }
         submitting = true
@@ -610,12 +690,20 @@ private struct CompressionControls: View {
     let hasAudio: Bool
     let error: String?
     var focus: FocusState<String?>.Binding
-    @State private var selection: CompressionField?
+    @Binding var selection: CompressionField?
+
+    private var hasVideoControls: Bool { !(choices?.video.isEmpty ?? true) }
+    private var hasCompressionControls: Bool { hasVideoControls || !(choices?.audio.isEmpty ?? true) }
 
     var body: some View {
         Section("Compression") {
             Toggle("Reduce File Size", isOn: $draft.enabled)
+                .disabled(!hasCompressionControls && !draft.enabled)
                 .accessibilityIdentifier("reduce-file-size")
+            if choices != nil && !hasCompressionControls {
+                Text("Choose a compatible compressed codec with applicable compression controls.")
+                    .font(.footnote).foregroundColor(.secondary)
+            }
             if draft.enabled {
                 choiceRow("Mode", value: compressionModeLabel(draft.mode), field: .mode)
                     .accessibilityIdentifier("compression-mode")
@@ -646,14 +734,19 @@ private struct CompressionControls: View {
                 }
                 if video {
                     Toggle("Optimize resolution", isOn: $draft.optimizeResolution)
+                        .disabled(!hasVideoControls && !draft.optimizeResolution)
                         .accessibilityIdentifier("compression-optimize-resolution")
                     Toggle("Optimize frame rate", isOn: $draft.optimizeFrameRate)
+                        .disabled(!hasVideoControls && !draft.optimizeFrameRate)
                         .accessibilityIdentifier("compression-optimize-frame-rate")
+                    if choices != nil && !hasVideoControls {
+                        Text("Video optimization requires an applicable video encoder.")
+                            .font(.footnote).foregroundColor(.secondary)
+                    }
                 }
                 if let error { Text(error).font(.footnote).foregroundColor(.red).textSelection(.enabled) }
             }
         }
-        .sheet(item: $selection) { field in sheet(field) }
     }
 
     private func choiceRow(_ title: String, value: String, field: CompressionField) -> some View {
@@ -686,7 +779,7 @@ private struct CompressionControls: View {
         }
     }
 
-    @ViewBuilder private func sheet(_ field: CompressionField) -> some View {
+    @ViewBuilder func sheet(_ field: CompressionField) -> some View {
         switch field {
         case .mode:
             NativeChoiceSheet(title: "Compression mode", values: [.highQuality, .balanced, .smallerFile, .targetSize, .custom],

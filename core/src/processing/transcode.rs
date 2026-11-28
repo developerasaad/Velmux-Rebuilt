@@ -121,6 +121,14 @@ struct Transform {
     preview_finished: bool,
     tone_map: bool,
     deadline: Option<Instant>,
+    audio_speed: Option<AudioSpeedRuntime>,
+    measure_only: bool,
+    measured_samples: u64,
+}
+struct AudioSpeedRuntime {
+    next_sample: i64,
+    input_rate: u32,
+    timestamp_tolerance: i64,
 }
 impl Drop for Transform {
     fn drop(&mut self) {
@@ -471,6 +479,7 @@ struct TransformContext<'a> {
     preview: Option<&'a super::PreviewRange>,
     deadline: Option<Instant>,
     hdr_frame: Option<&'a Frame>,
+    measure_only: bool,
 }
 
 unsafe fn make_transform(
@@ -487,6 +496,7 @@ unsafe fn make_transform(
         preview,
         deadline,
         hdr_frame,
+        measure_only,
     } = *context;
     let decoder_codec = sys::avcodec_find_decoder((*(*input).codecpar).codec_id);
     if decoder_codec.is_null() {
@@ -517,6 +527,9 @@ unsafe fn make_transform(
         preview_finished: false,
         tone_map: false,
         deadline,
+        audio_speed: None,
+        measure_only,
+        measured_samples: 0,
     };
     if let Some(range) = preview {
         let end = origin_in_time_base(Some(range.duration_us), (*input).time_base)?;
@@ -951,13 +964,29 @@ unsafe fn make_transform(
             "abuffer",
             "abuffersink",
             args,
-            format!(
+            if let Some(speed) = plan
+                .audio_filters
+                .as_ref()
+                .map(|filters| {
+                    filters.speed_filters(
+                        (*enc).sample_rate,
+                        &CStr::from_ptr(out_layout.as_ptr()).to_string_lossy(),
+                        &CStr::from_ptr(output_sample).to_string_lossy(),
+                    )
+                })
+                .transpose()?
+                .flatten()
+            {
+                format!("{trim}{speed}")
+            } else {
+                format!(
                 "{trim}{adjustments}aresample={},aformat=sample_fmts={}:sample_rates={}:channel_layouts={}",
                 (*enc).sample_rate,
                 CStr::from_ptr(output_sample).to_string_lossy(),
                 (*enc).sample_rate,
                 CStr::from_ptr(out_layout.as_ptr()).to_string_lossy()
-            ),
+            )
+            },
         )
     };
     let source_filter = sys::avfilter_get_by_name(text(src_name)?.as_ptr());
@@ -1018,8 +1047,37 @@ unsafe fn make_transform(
         sys::avfilter_graph_config(transform.graph, ptr::null_mut()),
         "Filter",
     )?;
-    if !is_video && (*enc).frame_size > 0 {
+    if !is_video && (*enc).frame_size > 0 && !measure_only {
         sys::av_buffersink_set_frame_size(transform.sink, (*enc).frame_size as u32);
+    }
+    if let Some(speed) = plan
+        .audio_filters
+        .as_ref()
+        .and_then(|filters| filters.speed.as_ref())
+    {
+        if speed.input_rate as i32 != (*dec).sample_rate {
+            return Err(EngineError::SourceAccess {
+                detail:
+                    "The decoded source sampling differs from the accepted speed configuration."
+                        .into(),
+            });
+        }
+        let sample_base = sys::AVRational {
+            num: 1,
+            den: (*dec).sample_rate,
+        };
+        if (*input).time_base.num <= 0 || (*input).time_base.den <= 0 {
+            return Err(failure(-libc::EINVAL, "Filter"));
+        }
+        let numerator = i128::from((*input).time_base.num) * i128::from(speed.input_rate);
+        let denominator = i128::from((*input).time_base.den);
+        let tolerance = ((numerator + denominator - 1) / denominator).max(1);
+        transform.audio_speed = Some(AudioSpeedRuntime {
+            next_sample: origin_in_time_base(Some(speed.timing.input_start_us), sample_base)?,
+            input_rate: speed.input_rate,
+            timestamp_tolerance: i64::try_from(tolerance)
+                .map_err(|_| failure(-libc::EINVAL, "Filter"))?,
+        });
     }
     Ok(transform)
 }
@@ -1067,6 +1125,17 @@ impl Transform {
                 return Ok(());
             }
             check(result, "Filter")?;
+            if self.measure_only {
+                self.measured_samples = self
+                    .measured_samples
+                    .checked_add(
+                        u64::try_from((*frame.0).nb_samples)
+                            .map_err(|_| failure(-libc::EINVAL, "Filter"))?,
+                    )
+                    .ok_or_else(|| failure(-libc::EINVAL, "Filter"))?;
+                sys::av_frame_unref(frame.0);
+                continue;
+            }
             if (*frame.0).pts != i64::MIN {
                 (*frame.0).pts = sys::av_rescale_q(
                     (*frame.0).pts,
@@ -1093,6 +1162,15 @@ impl Transform {
                     (*self.encoder).time_base,
                 )
                 .max(1)
+            } else if self.audio_speed.is_some() {
+                sys::av_rescale_q(
+                    i64::from((*frame.0).nb_samples),
+                    sys::AVRational {
+                        num: 1,
+                        den: (*self.encoder).sample_rate,
+                    },
+                    (*self.encoder).time_base,
+                )
             } else if (*frame.0).duration > 0 {
                 sys::av_rescale_q(
                     (*frame.0).duration,
@@ -1132,6 +1210,92 @@ impl Transform {
             self.drain_encoder(out, packet, token)?;
         }
     }
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_audio_gap(
+        &mut self,
+        frame: &Frame,
+        out: *mut sys::AVFormatContext,
+        filtered: &mut Frame,
+        packet: &mut Packet,
+        token: &CancellationToken,
+        progress: &mut impl FnMut(i64) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        let Some(speed) = self.audio_speed.as_ref() else {
+            return Ok(());
+        };
+        let rate = speed.input_rate;
+        let sample_base = sys::AVRational {
+            num: 1,
+            den: rate as i32,
+        };
+        let current = sys::av_rescale_q((*frame.0).pts, self.input_time_base, sample_base);
+        if current == i64::MIN || (*frame.0).nb_samples <= 0 {
+            return Err(failure(-libc::EINVAL, "Filter"));
+        }
+        let mut next = speed.next_sample;
+        let delta = current
+            .checked_sub(next)
+            .ok_or_else(|| failure(-libc::EINVAL, "Filter"))?;
+        if delta < -speed.timestamp_tolerance {
+            return Err(EngineError::InvalidMedia { detail: "This audio has overlapping timestamps that cannot be interpreted unambiguously for playback speed. No samples or tracks were silently discarded.".into() });
+        }
+        if delta > speed.timestamp_tolerance {
+            while next < current {
+                check_work(token, self.deadline)?;
+                let count = (current - next).min(1024) as i32;
+                let silent = Frame::new()?;
+                (*silent.0).format = (*self.decoder).sample_fmt as i32;
+                (*silent.0).sample_rate = rate as i32;
+                (*silent.0).nb_samples = count;
+                check(
+                    sys::av_channel_layout_copy(
+                        &mut (*silent.0).ch_layout,
+                        &(*self.decoder).ch_layout,
+                    ),
+                    "Filter",
+                )?;
+                check(sys::av_frame_get_buffer(silent.0, 0), "Filter")?;
+                check(
+                    sys::av_samples_set_silence(
+                        (*silent.0).extended_data,
+                        0,
+                        count,
+                        (*silent.0).ch_layout.nb_channels,
+                        (*self.decoder).sample_fmt,
+                    ),
+                    "Filter",
+                )?;
+                (*silent.0).pts = sys::av_rescale_q(next, sample_base, self.input_time_base);
+                check(
+                    sys::av_buffersrc_add_frame_flags(
+                        self.source,
+                        silent.0,
+                        sys::AV_BUFFERSRC_FLAG_KEEP_REF as i32,
+                    ),
+                    "Filter",
+                )?;
+                drop(silent);
+                self.drain_filter(out, filtered, packet, token)?;
+                next = next
+                    .checked_add(i64::from(count))
+                    .ok_or_else(|| failure(-libc::EINVAL, "Filter"))?;
+                progress(sys::av_rescale_q(
+                    next,
+                    sample_base,
+                    sys::AVRational {
+                        num: 1,
+                        den: 1000000,
+                    },
+                ))?;
+            }
+        }
+        self.audio_speed.as_mut().unwrap().next_sample = next
+            .checked_add(i64::from((*frame.0).nb_samples))
+            .ok_or_else(|| failure(-libc::EINVAL, "Filter"))?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     unsafe fn drain_decoder(
         &mut self,
         out: *mut sys::AVFormatContext,
@@ -1139,6 +1303,7 @@ impl Transform {
         filtered: &mut Frame,
         packet: &mut Packet,
         token: &CancellationToken,
+        progress: &mut impl FnMut(i64) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         loop {
             check_work(token, self.deadline)?;
@@ -1157,6 +1322,7 @@ impl Transform {
                 });
             }
             (*frame.0).pts = shift_timestamp((*frame.0).pts, self.timestamp_origin)?;
+            self.fill_audio_gap(frame, out, filtered, packet, token, progress)?;
             if let Some(duration_us) = self.preview_duration {
                 let end = origin_in_time_base(Some(duration_us), self.input_time_base)?;
                 if (*frame.0).pts >= end {
@@ -1195,7 +1361,183 @@ impl Transform {
             sys::av_frame_unref(frame.0);
             check(result, "Filter")?;
             self.drain_filter(out, filtered, packet, token)?;
+            if let Some(speed) = &self.audio_speed {
+                progress(sys::av_rescale_q(
+                    speed.next_sample,
+                    sys::AVRational {
+                        num: 1,
+                        den: speed.input_rate as i32,
+                    },
+                    sys::AVRational {
+                        num: 1,
+                        den: 1000000,
+                    },
+                ))?;
+            }
         }
+    }
+}
+
+/// Decode/filter tracks whose actual decoded endpoint is needed for an EOF
+/// fade, including lossy priming/padding, resampling and WSOLA boundaries. The graph is drained incrementally and only a sample count survives.
+/// No encoded intermediate, output file, source seek or media-length buffer exists.
+pub(super) fn measure_audio_duration(
+    input: Input,
+    source: &MediaInfo,
+    plan: &Plan,
+    token: Arc<CancellationToken>,
+    mut progress: impl FnMut(i64) -> Result<(), EngineError>,
+) -> Result<Vec<(u32, u64, u32)>, EngineError> {
+    let output = Output {
+        context: unsafe { sys::avformat_alloc_context() },
+    };
+    if output.context.is_null() {
+        return Err(failure(-libc::ENOMEM, "Filter"));
+    }
+    unsafe {
+        let inf = input.format();
+        if inf.is_null()
+            || (*inf).streams.is_null()
+            || (*inf).nb_streams as usize != source.streams.len()
+            || plan.streams.len() != source.streams.len()
+        {
+            return Err(EngineError::SourceAccess {
+                detail: "The source stream identities changed before audio timing analysis.".into(),
+            });
+        }
+        let muxer = text(&plan.output()?.muxer)?;
+        let format = sys::av_guess_format(muxer.as_ptr(), ptr::null(), ptr::null());
+        if format.is_null() {
+            return Err(failure(-libc::EINVAL, "Filter"));
+        }
+        let global = (*format).flags & sys::AVFMT_GLOBALHEADER as i32 != 0;
+        let mut transforms = Vec::with_capacity(plan.streams.len());
+        for (index, item) in plan.streams.iter().enumerate() {
+            check_work(&token, None)?;
+            if item.index as usize != index {
+                return Err(EngineError::Configuration {
+                    detail: "The accepted audio timing stream mapping is invalid.".into(),
+                });
+            }
+            if !item
+                .audio_filters
+                .as_ref()
+                .is_some_and(|filters| filters.needs_measurement())
+            {
+                transforms.push(None);
+                continue;
+            }
+            let stream = *(*inf).streams.add(index);
+            if stream.is_null()
+                || (*stream).codecpar.is_null()
+                || (*stream).index != index as i32
+                || (*(*stream).codecpar).codec_id as i32 != source.streams[index].codec_id
+            {
+                return Err(EngineError::SourceAccess {
+                    detail: "The source stream identities changed before audio timing analysis."
+                        .into(),
+                });
+            }
+            let mut measured = item.clone();
+            measured.audio_filters = item
+                .audio_filters
+                .as_ref()
+                .map(|filters| filters.measurement_clone());
+            let destination = sys::avformat_new_stream(output.context, ptr::null());
+            if destination.is_null() {
+                return Err(failure(-libc::ENOMEM, "Filter"));
+            }
+            let encoder = item
+                .encoder
+                .as_deref()
+                .ok_or_else(|| EngineError::Configuration {
+                    detail: "Audio timing analysis requires an accepted audio encoder.".into(),
+                })?;
+            transforms.push(Some(make_transform(
+                stream,
+                destination,
+                encoder,
+                &measured,
+                &TransformContext {
+                    config: &plan.config,
+                    global,
+                    origin_us: super::common_origin(source),
+                    preview: None,
+                    deadline: None,
+                    hdr_frame: None,
+                    measure_only: true,
+                },
+            )?));
+        }
+        let packet = Packet::new()?;
+        let mut unused_packet = Packet::new()?;
+        let mut decoded = Frame::new()?;
+        let mut filtered = Frame::new()?;
+        loop {
+            input.check_cancelled()?;
+            check_work(&token, None)?;
+            let result = sys::av_read_frame(inf, packet.0);
+            if result == EOF {
+                break;
+            }
+            input.check_result(
+                result,
+                "Unable to read the source during audio timing analysis",
+            )?;
+            let index = (*packet.0).stream_index;
+            if index < 0 || index as usize >= transforms.len() {
+                return Err(EngineError::InvalidMedia {
+                    detail: "An audio timing packet refers to an unknown stream.".into(),
+                });
+            }
+            if let Some(transform) = &mut transforms[index as usize] {
+                let result = sys::avcodec_send_packet(transform.decoder, packet.0);
+                sys::av_packet_unref(packet.0);
+                check(result, "Decode")?;
+                transform.drain_decoder(
+                    output.context,
+                    &mut decoded,
+                    &mut filtered,
+                    &mut unused_packet,
+                    &token,
+                    &mut progress,
+                )?;
+            } else {
+                sys::av_packet_unref(packet.0);
+            }
+        }
+        let mut counts = Vec::new();
+        for (index, transform) in transforms.iter_mut().enumerate() {
+            let Some(transform) = transform else {
+                continue;
+            };
+            check_work(&token, None)?;
+            check(
+                sys::avcodec_send_packet(transform.decoder, ptr::null()),
+                "Decode",
+            )?;
+            transform.drain_decoder(
+                output.context,
+                &mut decoded,
+                &mut filtered,
+                &mut unused_packet,
+                &token,
+                &mut progress,
+            )?;
+            check(
+                sys::av_buffersrc_add_frame_flags(transform.source, ptr::null_mut(), 0),
+                "Filter",
+            )?;
+            transform.drain_filter(output.context, &mut filtered, &mut unused_packet, &token)?;
+            let rate = u32::try_from((*transform.encoder).sample_rate)
+                .map_err(|_| failure(-libc::EINVAL, "Filter"))?;
+            counts.push((index as u32, transform.measured_samples, rate));
+        }
+        if input.source_identity()? != source.source_identity {
+            return Err(EngineError::SourceAccess { detail: "The source changed during audio timing analysis. Select it again before retrying.".into() });
+        }
+        input.check_cancelled()?;
+        Ok(counts)
     }
 }
 
@@ -1413,6 +1755,7 @@ pub(crate) fn convert(
                         preview: plan.preview_range.as_ref(),
                         deadline,
                         hdr_frame: hdr_frame.as_ref(),
+                        measure_only: false,
                     },
                 )?));
             } else {
@@ -1478,7 +1821,11 @@ pub(crate) fn convert(
                 continue;
             }
             let src = *(*inf).streams.add(index as usize);
-            if (*packet.0).pts != i64::MIN {
+            if (*packet.0).pts != i64::MIN
+                && !transforms[output_index]
+                    .as_ref()
+                    .is_some_and(|transform| transform.audio_speed.is_some())
+            {
                 let timestamp = sys::av_rescale_q(
                     (*packet.0).pts,
                     (*src).time_base,
@@ -1494,7 +1841,17 @@ pub(crate) fn convert(
                 let result = sys::avcodec_send_packet(transform.decoder, packet.0);
                 sys::av_packet_unref(packet.0);
                 check(result, "Decode")?;
-                transform.drain_decoder(out, &mut frame, &mut filtered, &mut encoded, &token)?;
+                transform.drain_decoder(
+                    out,
+                    &mut frame,
+                    &mut filtered,
+                    &mut encoded,
+                    &token,
+                    &mut |position| {
+                        furthest = furthest.max(position);
+                        progress(super::ProcessingProgress::Timestamp(furthest))
+                    },
+                )?;
             } else {
                 let dest = *(*out).streams.add(output_index);
                 let origin = origin_in_time_base(origin_us, (*src).time_base)?;
@@ -1526,7 +1883,17 @@ pub(crate) fn convert(
                 sys::avcodec_send_packet(transform.decoder, ptr::null()),
                 "Decode",
             )?;
-            transform.drain_decoder(out, &mut frame, &mut filtered, &mut encoded, &token)?;
+            transform.drain_decoder(
+                out,
+                &mut frame,
+                &mut filtered,
+                &mut encoded,
+                &token,
+                &mut |position| {
+                    furthest = furthest.max(position);
+                    progress(super::ProcessingProgress::Timestamp(furthest))
+                },
+            )?;
             check(
                 sys::av_buffersrc_add_frame_flags(transform.source, ptr::null_mut(), 0),
                 "Filter",

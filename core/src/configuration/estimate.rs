@@ -54,31 +54,6 @@ impl EstimateUnavailableReason {
     }
 }
 
-fn duration(source: &MediaInfo, stream: &StreamInfo) -> Option<u64> {
-    if let Some(duration) = stream.duration_us.filter(|value| *value > 0) {
-        return Some(duration as u64);
-    }
-    let timed_streams = source
-        .streams
-        .iter()
-        .filter(|stream| stream.kind == StreamKind::Audio || super::primary_video(stream))
-        .count();
-    // A container duration does not establish the length of each track. Only
-    // the sole timed stream with the same known origin may inherit that fact.
-    (timed_streams == 1
-        && stream
-            .start_time_us
-            .zip(source.start_time_us)
-            .is_some_and(|(stream_start, source_start)| stream_start == source_start))
-    .then(|| {
-        source
-            .duration_us
-            .filter(|value| *value > 0)
-            .map(|value| value as u64)
-    })
-    .flatten()
-}
-
 fn rate_bytes(bits_per_second: u64, duration_us: u64) -> Result<u64, EngineError> {
     let bytes = (u128::from(bits_per_second) * u128::from(duration_us)).div_ceil(8_000_000);
     u64::try_from(bytes)
@@ -136,7 +111,7 @@ fn copied_payload(
         // counts. A single packet/frame count is not a byte-size measurement.
         return Ok(Err(EstimateUnavailableReason::UnknownStreamPayload));
     }
-    let Some(duration) = duration(source, stream) else {
+    let Some(duration) = super::stream_duration(source, stream) else {
         return Ok(Err(EstimateUnavailableReason::UnknownDuration));
     };
     if stream.codec.starts_with("pcm_") {
@@ -258,7 +233,13 @@ pub(crate) fn estimate(
             } else {
                 profile
             };
-            encoded_payload(&profile, rate, channels, duration(info, stream))?
+            let duration = if stream.kind == StreamKind::Audio {
+                super::audio_timing(info, stream, effective.audio_adjustments.as_ref())?
+                    .output_duration_us
+            } else {
+                super::stream_duration(info, stream)
+            };
+            encoded_payload(&profile, rate, channels, duration)?
         } else {
             copied_payload(info, stream)?
         };

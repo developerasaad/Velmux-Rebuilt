@@ -101,6 +101,54 @@ pub(crate) fn execute_conversion(
     token: Arc<CancellationToken>,
     mut progress: impl FnMut(ProcessingProgress) -> Result<(), EngineError>,
 ) -> Result<MediaInfo, EngineError> {
+    // Coded duration includes lossy priming/padding, and WSOLA boundaries are
+    // content-dependent. Measure the exact accepted sampling tuple before an
+    // EOF fade without encoding intermediate samples.
+    // This execution-local plan never rewrites the persisted accepted request.
+    let measured_plan = if plan.streams.iter().any(|stream| {
+        stream
+            .audio_filters
+            .as_ref()
+            .is_some_and(|filters| filters.needs_measurement())
+    }) {
+        canceled(&token)?;
+        let opened = provider.open_source(locator.into())?;
+        let input = Input::open(opened, provider.clone(), token.clone())?;
+        if input.source_identity()? != source.source_identity {
+            return Err(EngineError::SourceAccess {
+                detail:
+                    "The original source changed before audio timing analysis. Select it again."
+                        .into(),
+            });
+        }
+        let counts = super::transcode::measure_audio_duration(
+            input,
+            source,
+            plan,
+            token.clone(),
+            |position| progress(ProcessingProgress::AnalysisTimestamp(position)),
+        )?;
+        // The count pass owns and drops its first input before run() reopens.
+        let mut measured_plan = plan.clone();
+        for (index, samples, rate) in counts {
+            measured_plan
+                .streams
+                .iter_mut()
+                .find(|stream| stream.index == index)
+                .and_then(|stream| stream.audio_filters.as_mut())
+                .ok_or_else(|| EngineError::Internal {
+                    detail: "Measured audio track is absent from the accepted plan.".into(),
+                })?
+                .apply_measurement(samples, rate)?;
+        }
+        if measured_plan.target_size_bytes.is_some() {
+            compression::rebudget_measured_target(source, &mut measured_plan)?;
+        }
+        Some(measured_plan)
+    } else {
+        None
+    };
+    let plan = measured_plan.as_ref().unwrap_or(plan);
     let first = run(
         provider.clone(),
         locator,

@@ -3,10 +3,15 @@ package com.velmux.ui.screens
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.text.KeyboardOptions
@@ -19,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.util.Locale
+import kotlin.math.roundToInt
 import uniffi.velmux_core.*
 
 private fun scaledDecimal(text: String, precision: Int, signed: Boolean): Long? {
@@ -42,19 +48,33 @@ fun ConverterWorkspace(
     var sheet by remember { mutableStateOf<String?>(null) }
     var advancedAudio by remember { mutableStateOf(false) }
     var adjustmentsExpanded by remember { mutableStateOf(false) }
-    val adjustments = config.audioAdjustments ?: AudioAdjustments(0, 0uL, 0uL)
+    val adjustmentDefaults = remember(media, source.id) { media.audioAdjustmentDefaults() }
+    val adjustments = config.audioAdjustments ?: adjustmentDefaults
     var gainText by remember(source.id, adjustments.gainCentidb) { mutableStateOf(BigDecimal(adjustments.gainCentidb).movePointLeft(2).toPlainString()) }
     var fadeInText by remember(source.id, adjustments.fadeInUs) { mutableStateOf(BigDecimal(adjustments.fadeInUs.toString()).movePointLeft(6).toPlainString()) }
     var fadeOutText by remember(source.id, adjustments.fadeOutUs) { mutableStateOf(BigDecimal(adjustments.fadeOutUs.toString()).movePointLeft(6).toPlainString()) }
+    var speedText by remember(source.id, adjustments.speedMilli) { mutableStateOf(BigDecimal(adjustments.speedMilli.toString()).movePointLeft(3).toPlainString()) }
+    var preservePitch by remember(source.id) { mutableStateOf(adjustments.preservePitch) }
     val gain = scaledDecimal(gainText, 2, true)?.toString()?.toIntOrNull()
     val fadeIn = scaledDecimal(fadeInText, 6, false)?.takeIf { it >= 0 }?.toULong()
     val fadeOut = scaledDecimal(fadeOutText, 6, false)?.takeIf { it >= 0 }?.toULong()
-    val adjustmentsValid = video || gain != null && fadeIn != null && fadeOut != null
-    fun updateAdjustments(gainValue: String = gainText, inValue: String = fadeInText, outValue: String = fadeOutText) {
+    val speed = scaledDecimal(speedText, 3, false)?.toString()?.toUIntOrNull()
+    val speedValid = speed != null && choices.audioAdjustmentLimits?.let { speed in it.minimumSpeedMilli..it.maximumSpeedMilli } == true
+    val adjustmentsValid = video || gain != null && fadeIn != null && fadeOut != null && speedValid
+    val visibleAdjustments = if (gain != null && fadeIn != null && fadeOut != null && speed != null) {
+        adjustments.copy(gainCentidb = gain, fadeInUs = fadeIn, fadeOutUs = fadeOut, speedMilli = speed, preservePitch = preservePitch)
+    } else adjustments
+    fun updateAdjustments(gainValue: String = gainText, inValue: String = fadeInText, outValue: String = fadeOutText,
+                          speedValue: String = speedText, pitchValue: Boolean = preservePitch) {
         val g = scaledDecimal(gainValue, 2, true)?.toString()?.toIntOrNull()
         val i = scaledDecimal(inValue, 6, false)?.takeIf { it >= 0 }?.toULong()
         val o = scaledDecimal(outValue, 6, false)?.takeIf { it >= 0 }?.toULong()
-        if (g != null && i != null && o != null) onChange(config.copy(audioAdjustments = AudioAdjustments(g, i, o)))
+        val s = scaledDecimal(speedValue, 3, false)?.toString()?.toUIntOrNull()
+        val validSpeed = s != null && choices.audioAdjustmentLimits?.let { s in it.minimumSpeedMilli..it.maximumSpeedMilli } == true
+        if (g != null && i != null && o != null && s != null && validSpeed) {
+            onChange(config.copy(audioAdjustments = adjustments.copy(gainCentidb = g, fadeInUs = i, fadeOutUs = o,
+                speedMilli = s, preservePitch = pitchValue)))
+        }
     }
     val compressionEditor = remember(source.id) { CompressionEditorState(config.compression) }
     val compression = compressionEditor.settings
@@ -62,7 +82,8 @@ fun ConverterWorkspace(
     // A draft may become applicable after another selector changes. Use its
     // freshly resolved value for both sizing and acceptance, never an older
     // representable value retained while that draft was invalid.
-    val visibleConfig = config.copy(compression = compressionEdit.settings, quality = 23u, audioBitrate = null)
+    val visibleConfig = config.copy(compression = compressionEdit.settings, quality = 23u, audioBitrate = null,
+        audioAdjustments = if (video) config.audioAdjustments else visibleAdjustments)
     var customWidthText by remember(source.id, config.videoSize, config.customWidth) { mutableStateOf(config.customWidth?.toString().orEmpty()) }
     var customHeightText by remember(source.id, config.videoSize, config.customHeight) { mutableStateOf(config.customHeight?.toString().orEmpty()) }
     var customRateNumeratorText by remember(source.id, config.frameRate, config.customFrameRate) { mutableStateOf(config.customFrameRate?.numerator?.toString().orEmpty()) }
@@ -174,6 +195,26 @@ fun ConverterWorkspace(
                         Text(if (adjustmentsExpanded) "Hide audio adjustments" else "Audio adjustments")
                     }
                     if (adjustmentsExpanded) {
+                        OutlinedTextField(speedText, onValueChange = { value -> speedText = value; updateAdjustments(speedValue = value) },
+                            label = { Text("Playback speed") }, suffix = { Text("×") }, singleLine = true, enabled = !submitting,
+                            isError = !speedValid, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            supportingText = { Text("${BigDecimal(limits.minimumSpeedMilli.toString()).movePointLeft(3).stripTrailingZeros().toPlainString()}–${BigDecimal(limits.maximumSpeedMilli.toString()).movePointLeft(3).stripTrailingZeros().toPlainString()}× · up to 3 decimal places") },
+                            modifier = Modifier.fillMaxWidth().testTag("audio-speed").semantics { contentDescription = "Audio playback speed" })
+                        Slider(value = (speed ?: adjustments.speedMilli).toFloat().coerceIn(limits.minimumSpeedMilli.toFloat(), limits.maximumSpeedMilli.toFloat()),
+                            onValueChange = { value ->
+                                val text = BigDecimal(value.roundToInt()).movePointLeft(3).toPlainString()
+                                speedText = text; updateAdjustments(speedValue = text)
+                            }, valueRange = limits.minimumSpeedMilli.toFloat()..limits.maximumSpeedMilli.toFloat(),
+                            enabled = !submitting, modifier = Modifier.semantics { contentDescription = "Audio speed" })
+                        if (speedValid && speed != adjustmentDefaults.speedMilli) {
+                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                .toggleable(value = preservePitch, enabled = !submitting, role = Role.Switch,
+                                    onValueChange = { value -> preservePitch = value; updateAdjustments(pitchValue = value) })
+                                .semantics { contentDescription = "Preserve audio pitch" }, verticalAlignment = Alignment.CenterVertically) {
+                                Text("Preserve pitch", Modifier.weight(1f))
+                                Switch(checked = preservePitch, onCheckedChange = null, enabled = !submitting)
+                            }
+                        }
                         OutlinedTextField(gainText, onValueChange = { value -> gainText = value; updateAdjustments(gainValue = value) },
                             label = { Text("Gain") }, suffix = { Text("dB") }, singleLine = true, enabled = !submitting,
                             isError = gain == null, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -184,13 +225,13 @@ fun ConverterWorkspace(
                         }, valueRange = limits.minimumGainCentidb.toFloat()..limits.maximumGainCentidb.toFloat(), enabled = !submitting)
                         if (limits.maximumFadeUs != null) {
                             OutlinedTextField(fadeInText, onValueChange = { value -> fadeInText = value; updateAdjustments(inValue = value) },
-                                label = { Text("Fade in") }, suffix = { Text("s") }, singleLine = true, enabled = !submitting,
+                                label = { Text("Fade in") }, suffix = { Text("output s") }, singleLine = true, enabled = !submitting,
                                 isError = fadeIn == null, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                             OutlinedTextField(fadeOutText, onValueChange = { value -> fadeOutText = value; updateAdjustments(outValue = value) },
-                                label = { Text("Fade out") }, suffix = { Text("s") }, singleLine = true, enabled = !submitting,
+                                label = { Text("Fade out") }, suffix = { Text("output s") }, singleLine = true, enabled = !submitting,
                                 isError = fadeOut == null, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                         }
-                        Text("Positive gain includes peak protection. Linear fades preserve duration.", style = MaterialTheme.typography.bodySmall)
+                        Text("Speed changes output duration. Fades use output seconds; positive gain includes peak protection.", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 if(format != null && (video && config.videoCodec !in format.videoCodecs || source.info.streams.any { it.kind == StreamKind.AUDIO } && config.audioCodec !in format.audioCodecs)) {
@@ -214,7 +255,7 @@ fun ConverterWorkspace(
             Surface(shadowElevation = 3.dp) {
                 Button(onClick = {
                     val current = compressionEditor.evaluate(media, compressionEditor.settings, choices.compressionChoices)
-                    if (current.error == null) onConvert(config.copy(compression = current.settings, quality = 23u, audioBitrate = null))
+                    if (current.error == null) onConvert(visibleConfig.copy(compression = current.settings))
                 }, enabled = !submitting && config.fileName.isNotBlank() && compressionEdit.error == null && customSizeValid && customRateValid && adjustmentsValid, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp).heightIn(min = 48.dp)) {
                     if(submitting) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(12.dp)) }
                     Text(if(submitting) "Validating request…" else "Convert")

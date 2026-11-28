@@ -807,7 +807,7 @@ fn accepted_m2_request_without_new_fields_restarts_without_replanning_or_rewriti
         })
         .unwrap();
     let mut legacy: Value = serde_json::from_str(&request).unwrap();
-    assert_eq!(legacy["version"], 2);
+    assert_eq!(legacy["version"], 3);
     assert_eq!(legacy["plan"]["output"]["format"], "Mp4");
     legacy.as_object_mut().unwrap().remove("version");
     legacy["plan"].as_object_mut().unwrap().remove("output");
@@ -3253,6 +3253,7 @@ fn audio_gain_fades_and_peak_protection_transform_real_samples_without_changing_
             gain_centidb,
             fade_in_us,
             fade_out_us,
+            ..Default::default()
         });
         let job = harness.complete(&harness.submit(&source, config).id);
         let accepted: Value =
@@ -3277,6 +3278,7 @@ fn audio_gain_fades_and_peak_protection_transform_real_samples_without_changing_
         gain_centidb: 0,
         fade_in_us: 1_500_000,
         fade_out_us: 1_000_000,
+        ..Default::default()
     });
     assert!(matches!(
         harness
@@ -3308,6 +3310,423 @@ fn audio_gain_fades_and_peak_protection_transform_real_samples_without_changing_
     assert_eq!(digest(&fixture("stereo.wav")), before);
     harness.engine().release_inspection(source.id).unwrap();
     harness.expect(cases);
+}
+
+#[test]
+fn audio_speed_pitch_fractional_sampling_and_measured_fades_process_actual_samples() {
+    use velmux_core::EstimatedOutputSize;
+    let harness = Harness::new("m3-audio-speed");
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let before = digest(&fixture("stereo.wav"));
+    let mut cases = Vec::new();
+    let mut speed_outputs = HashMap::new();
+    assert_eq!(
+        harness.engine().audio_adjustment_defaults(),
+        AudioAdjustments::default()
+    );
+    for speed_milli in [500, 750, 1333, 1500, 2000] {
+        for preserve_pitch in [true, false] {
+            let mut config = harness.defaults(&source, Operation::AudioConverter);
+            config.format = OutputFormat::Wav;
+            config.audio_codec = AudioCodec::Pcm;
+            config.audio_adjustments = Some(AudioAdjustments {
+                speed_milli,
+                preserve_pitch,
+                ..Default::default()
+            });
+            let opens = harness.provider.open_calls.load(Ordering::SeqCst);
+            let estimate = harness
+                .engine()
+                .estimate_output(source.id.clone(), config.clone())
+                .unwrap();
+            let ideal_us =
+                (2_000_000u64 * 1000 + u64::from(speed_milli) / 2) / u64::from(speed_milli);
+            let frames = (ideal_us * 48000).div_ceil(1_000_000);
+            assert_eq!(
+                estimate.size,
+                EstimatedOutputSize::MediaPayloadApproximation {
+                    bytes: frames * 4,
+                    uses_duration_derived_pcm: true
+                }
+            );
+            assert_eq!(harness.provider.open_calls.load(Ordering::SeqCst), opens);
+            let job = harness.complete(&harness.submit(&source, config).id);
+            let accepted: Value =
+                serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+            assert_eq!(accepted["version"], 3);
+            assert_eq!(
+                accepted["plan"]["streams"][0]["audio_filters"]["speed"]["speed_milli"],
+                speed_milli
+            );
+            let mut case = expectation(&job, "pcm_s16le", 2, 48000);
+            case["tones"] = json!(false);
+            case["duration"] = json!(2000.0 / f64::from(speed_milli));
+            case["duration_tolerance"] = json!(if preserve_pitch {
+                4096.0 / 48000.0
+            } else {
+                2.0 / 48000.0
+            });
+            case["speed_source"] = json!("stereo.wav");
+            case["speed_milli"] = json!(speed_milli);
+            case["preserve_pitch"] = json!(preserve_pitch);
+            if preserve_pitch {
+                speed_outputs.insert(speed_milli, job.output.as_ref().unwrap().locator.clone());
+            }
+            cases.push(case);
+        }
+    }
+    // The shortened WSOLA endpoint is measured before the real fade. Nominal
+    // duration alone leaves an audible final sample for a slow playback rate.
+    for speed_milli in [500, 1500, 2000] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_adjustments = Some(AudioAdjustments {
+            speed_milli,
+            fade_in_us: 200_000,
+            fade_out_us: 250_000,
+            gain_centidb: if speed_milli == 1500 { 602 } else { 0 },
+            ..Default::default()
+        });
+        let opens = harness.provider.open_calls.load(Ordering::SeqCst);
+        let job = harness.complete(&harness.submit(&source, config).id);
+        assert!(harness.provider.open_calls.load(Ordering::SeqCst) >= opens + 2, "WSOLA EOF fades need a real decode/filter measurement and a fresh owned encoding input");
+        let accepted: Value =
+            serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+        assert!(
+            accepted["plan"]["streams"][0]["audio_filters"]
+                .get("measured")
+                .is_none(),
+            "Execution measurements must not mutate accepted SQLite intent"
+        );
+        let mut case = expectation(&job, "pcm_s16le", 2, 48000);
+        case["tones"] = json!(false);
+        case["duration"] = json!(2000.0 / f64::from(speed_milli));
+        case["duration_tolerance"] = json!(4096.0 / 48000.0);
+        case["speed_source"] = json!("stereo.wav");
+        case["speed_milli"] = json!(speed_milli);
+        case["preserve_pitch"] = json!(true);
+        case["speed_gain_centidb"] = json!(if speed_milli == 1500 { 602 } else { 0 });
+        case["speed_fade_in_us"] = json!(200_000);
+        case["speed_fade_out_us"] = json!(250_000);
+        case["speed_unfaded_output"] = json!(speed_outputs[&speed_milli]);
+        cases.push(case);
+    }
+    for invalid_speed in [0, 499, 2001, u32::MAX] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.audio_adjustments = Some(AudioAdjustments {
+            speed_milli: invalid_speed,
+            ..Default::default()
+        });
+        assert!(matches!(
+            harness
+                .engine()
+                .validate_configuration(source.id.clone(), config),
+            Err(EngineError::Configuration { .. })
+        ));
+    }
+    let odd = harness.inspect("odd-rate.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&odd, Operation::AudioConverter);
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.audio_adjustments = Some(AudioAdjustments {
+        speed_milli: 500,
+        preserve_pitch: false,
+        ..Default::default()
+    });
+    let job = harness.complete(&harness.submit(&odd, config).id);
+    let mut case = expectation(&job, "pcm_s16le", 1, 11025);
+    case["tones"] = json!(false);
+    case["duration"] = json!(4.0);
+    case["duration_tolerance"] = json!(2.0 / 11025.0);
+    case["speed_source"] = json!("odd-rate.wav");
+    case["speed_milli"] = json!(500);
+    case["preserve_pitch"] = json!(false);
+    cases.push(case);
+    assert_eq!(digest(&fixture("stereo.wav")), before);
+    assert_eq!(
+        harness
+            .provider
+            .maximum_worker_sources
+            .load(Ordering::SeqCst),
+        1
+    );
+    harness.engine().release_inspection(source.id).unwrap();
+    harness.engine().release_inspection(odd.id).unwrap();
+    harness.expect(cases);
+}
+
+#[test]
+fn audio_speed_normalizes_positive_source_origins_and_materializes_long_timestamp_gaps() {
+    let harness = Harness::new("m3-audio-speed-timing");
+    let mut cases = Vec::new();
+    for name in ["audio-origin.mov", "audio-gap.mkv"] {
+        let source = harness.inspect(name, Operation::AudioConverter);
+        let before = digest(&fixture(name));
+        if name == "audio-origin.mov" {
+            assert_eq!(source.info.start_time_us, Some(5_000_000));
+            assert_eq!(source.info.streams[0].duration_us, Some(2_000_000));
+            assert_eq!(
+                source.info.duration_us,
+                Some(2_000_000),
+                "A positive MOV edit origin must not be counted as playable content"
+            );
+        }
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Original;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_adjustments = Some(AudioAdjustments {
+            speed_milli: 2000,
+            preserve_pitch: false,
+            ..Default::default()
+        });
+        let job = harness.complete(&harness.submit(&source, config).id);
+        if name == "audio-origin.mov" {
+            assert_eq!(
+                job.duration_us,
+                Some(2_000_000),
+                "Jobs progress stays in the two-second source timeline"
+            );
+        }
+        let mut case = expectation(&job, "pcm_s16le", 2, 48000);
+        case["tones"] = json!(false);
+        case.as_object_mut().unwrap().remove("duration");
+        case["audio_codecs"] = json!(vec!["pcm_s16le"; source.info.streams.len()]);
+        case["timing_speed_source"] = json!(name);
+        case["speed_milli"] = json!(2000);
+        case["preserve_pitch"] = json!(false);
+        cases.push(case);
+        assert_eq!(digest(&fixture(name)), before);
+        harness.engine().release_inspection(source.id).unwrap();
+    }
+    harness.expect(cases);
+}
+
+#[test]
+fn eof_fades_use_decoded_gapless_mp3_samples_at_nominal_and_changed_playback_rates() {
+    let mut harness = Harness::new("m3-gapless-eof-fades");
+    let source = harness.inspect("gapless-8k.mp3", Operation::AudioConverter);
+    let before = digest(&fixture("gapless-8k.mp3"));
+    assert!(
+        source.info.duration_us.unwrap() > 2_100_000,
+        "This regression needs actual coded duration beyond the decoded two-second content"
+    );
+    let mut cases = Vec::new();
+    for (speed_milli, preserve_pitch) in [(1000, true), (500, false), (2000, false), (1500, true)] {
+        let mut config = harness.defaults(&source, Operation::AudioConverter);
+        config.format = OutputFormat::Wav;
+        config.audio_codec = AudioCodec::Pcm;
+        config.audio_adjustments = Some(AudioAdjustments {
+            speed_milli,
+            preserve_pitch,
+            ..Default::default()
+        });
+        let plain = harness.complete(&harness.submit(&source, config.clone()).id);
+        config.audio_adjustments.as_mut().unwrap().fade_in_us = 100_000;
+        config.audio_adjustments.as_mut().unwrap().fade_out_us = 250_000;
+        let opens = harness.provider.open_calls.load(Ordering::SeqCst);
+        let faded = harness.complete(&harness.submit(&source, config).id);
+        assert!(
+            harness.provider.open_calls.load(Ordering::SeqCst) >= opens + 2,
+            "Every new EOF fade must measure actual decoded samples before encoding"
+        );
+        let saved: Value =
+            serde_json::from_str(&accepted_request_text(&harness, &faded.id)).unwrap();
+        assert_eq!(
+            saved["plan"]["streams"][0]["audio_filters"]["measure_decoded_duration"],
+            true
+        );
+        let mut plain_case = expectation(&plain, "pcm_s16le", 1, 8000);
+        plain_case["tones"] = json!(false);
+        plain_case["duration"] = json!(2000.0 / f64::from(speed_milli));
+        plain_case["duration_tolerance"] = json!(if preserve_pitch && speed_milli != 1000 {
+            1024.0 / 8000.0
+        } else {
+            2.0 / 8000.0
+        });
+        plain_case["speed_source"] = json!("gapless-8k.mp3");
+        plain_case["speed_milli"] = json!(speed_milli);
+        plain_case["preserve_pitch"] = json!(preserve_pitch);
+        let mut faded_case = plain_case.clone();
+        faded_case["path"] = json!(faded.output.as_ref().unwrap().locator);
+        faded_case["speed_unfaded_output"] = json!(plain.output.as_ref().unwrap().locator);
+        faded_case["speed_fade_in_us"] = json!(100_000);
+        faded_case["speed_fade_out_us"] = json!(250_000);
+        cases.extend([plain_case, faded_case]);
+    }
+    // Saving a verified result must reuse its measured validation across a
+    // process-owned Engine restart; coded source duration cannot reject it.
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.audio_adjustments = Some(AudioAdjustments {
+        speed_milli: 2000,
+        preserve_pitch: false,
+        fade_in_us: 100_000,
+        fade_out_us: 250_000,
+        ..Default::default()
+    });
+    harness
+        .provider
+        .fail_publications
+        .store(1, Ordering::SeqCst);
+    let save = harness.submit(&source, config);
+    let failed = harness.finished(&save.id);
+    assert_eq!(failed.state, JobState::Failed);
+    assert!(failed.verified);
+    let intent = accepted_request_text(&harness, &save.id);
+    let opens = harness.provider.open_calls.load(Ordering::SeqCst);
+    harness.close();
+    harness.reopen();
+    after_worker_ack(|| harness.engine().retry_publication(save.id.clone()));
+    let completed = harness.complete(&save.id);
+    assert_eq!(
+        harness.provider.open_calls.load(Ordering::SeqCst),
+        opens,
+        "Save retry must not reopen the original or repeat decoding/encoding"
+    );
+    assert_eq!(accepted_request_text(&harness, &save.id), intent);
+    let mut saved_case = cases
+        .iter()
+        .find(|case| case["speed_milli"] == 2000 && case.get("speed_unfaded_output").is_some())
+        .unwrap()
+        .clone();
+    saved_case["path"] = json!(completed.output.as_ref().unwrap().locator);
+    cases.push(saved_case);
+    assert_eq!(digest(&fixture("gapless-8k.mp3")), before);
+    // Engine shutdown already released the workspace inspection owner.
+    harness.expect(cases);
+}
+
+struct CancelDuringAudioAnalysis {
+    engine: Weak<Engine>,
+    observed: Arc<AtomicBool>,
+}
+impl JobObserver for CancelDuringAudioAnalysis {
+    fn on_jobs_changed(&self) {
+        if self.observed.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(engine) = self.engine.upgrade() {
+            if let Some(job) = engine
+                .jobs()
+                .unwrap()
+                .into_iter()
+                .find(|job| job.state == JobState::Preparing && job.processed_us > 2_000_000)
+            {
+                if !self.observed.swap(true, Ordering::SeqCst) {
+                    engine.cancel_job(job.id).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cancellation_during_real_speed_gap_analysis_terminates_before_cleanup_or_publication() {
+    let harness = Harness::new("m3-audio-speed-cancel");
+    let source = harness.inspect("audio-long-gap.mkv", Operation::AudioConverter);
+    let before = digest(&fixture("audio-long-gap.mkv"));
+    let observed = Arc::new(AtomicBool::new(false));
+    harness
+        .engine()
+        .observe_jobs(Box::new(CancelDuringAudioAnalysis {
+            engine: Arc::downgrade(harness.engine()),
+            observed: observed.clone(),
+        }))
+        .unwrap();
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.audio_adjustments = Some(AudioAdjustments {
+        speed_milli: 500,
+        fade_out_us: 250_000,
+        ..Default::default()
+    });
+    let job = harness.submit(&source, config);
+    harness.engine().release_inspection(source.id).unwrap();
+    let done = harness.finished(&job.id);
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "Cancellation was not triggered after actual timestamp-gap analysis work"
+    );
+    assert_eq!(done.state, JobState::Canceled);
+    assert_eq!(harness.provider.publish_calls.load(Ordering::SeqCst), 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (harness.provider.worker_sources.load(Ordering::SeqCst) != 0
+        || harness.root.join("operational/jobs").join(&job.id).exists())
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(harness.provider.worker_sources.load(Ordering::SeqCst), 0);
+    assert!(!harness.root.join("operational/jobs").join(&job.id).exists());
+    assert!(harness.provider.leases.lock().unwrap().is_empty());
+    assert_eq!(digest(&fixture("audio-long-gap.mkv")), before);
+}
+
+#[test]
+fn v2_accepted_audio_adjustments_restart_with_nominal_speed_and_immutable_records() {
+    let mut harness = Harness::new("m3-v2-audio-adjustments");
+    harness
+        .provider
+        .fail_publications
+        .store(1, Ordering::SeqCst);
+    let source = harness.inspect("stereo.wav", Operation::AudioConverter);
+    let mut config = harness.defaults(&source, Operation::AudioConverter);
+    config.format = OutputFormat::Wav;
+    config.audio_codec = AudioCodec::Pcm;
+    config.audio_adjustments = Some(AudioAdjustments {
+        gain_centidb: -300,
+        fade_out_us: 500_000,
+        ..Default::default()
+    });
+    let job = harness.submit(&source, config);
+    let mut record = harness.finished(&job.id);
+    assert_eq!(record.state, JobState::Failed);
+    harness.close();
+    let database = harness.root.join("operational/operations.sqlite3");
+    let mut saved: Value = serde_json::from_str(&accepted_request_text(&harness, &job.id)).unwrap();
+    saved["version"] = json!(2);
+    for field in ["speed_milli", "preserve_pitch"] {
+        saved["plan"]["config"]["audio_adjustments"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
+    saved["plan"]["streams"][0]["audio_filters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("speed");
+    saved["plan"]["streams"][0]["audio_filters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("measure_decoded_duration");
+    let exact = serde_json::to_string(&saved).unwrap();
+    Connection::open(&database)
+        .unwrap()
+        .execute(
+            "UPDATE jobs SET request=?1 WHERE id=?2",
+            params![exact, job.id],
+        )
+        .unwrap();
+    record.state = JobState::Interrupted;
+    record.verified = false;
+    record.verified_size = None;
+    record.verified_hash = None;
+    harness.persist_record(&record, "interrupted");
+    harness.reopen();
+    harness.engine().restart_job(job.id.clone()).unwrap();
+    let done = harness.complete(&job.id);
+    assert_eq!(accepted_request_text(&harness, &job.id), exact);
+    let mut case = expectation(&done, "pcm_s16le", 2, 48000);
+    case["tones"] = json!(false);
+    case["decoded_samples"] = json!(96000);
+    case["adjusted_audio_source"] = json!("stereo.wav");
+    case["gain_centidb"] = json!(-300);
+    case["fade_in_us"] = json!(0);
+    case["fade_out_us"] = json!(500000);
+    harness.expect(vec![case]);
 }
 
 fn assert_compatible_stereo_pcm_is_copied(harness: &Harness, record: &JobRecord) {

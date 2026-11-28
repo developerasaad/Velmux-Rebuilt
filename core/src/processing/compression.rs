@@ -153,17 +153,90 @@ fn metadata_bytes(source: &MediaInfo) -> Result<u64, EngineError> {
         .ok_or_else(|| invalid("The required chapter budget exceeds supported bounds."))
 }
 
+/// A timing measurement changes only the variable target allocation. Accepted
+/// codec-specific presets and all other streams remain frozen as submitted.
+pub(super) fn rebudget_measured_target(
+    source: &MediaInfo,
+    plan: &mut Plan,
+) -> Result<(), EngineError> {
+    let Some(settings) = plan.config.compression.clone() else {
+        return Ok(());
+    };
+    let Some(target) = settings
+        .target
+        .filter(|_| settings.reduce_file_size && settings.mode == CompressionMode::TargetSize)
+    else {
+        return Ok(());
+    };
+    if plan.target_size_bytes != Some(target.bytes()?) {
+        return Err(invalid(
+            "The accepted target size and compression settings disagree.",
+        ));
+    }
+    let Some(receiver) = receiver(plan) else {
+        return Ok(());
+    };
+    let allocation = budget(source, plan, receiver, target)?;
+    let item = &mut plan.streams[receiver];
+    let profile = item
+        .encoding
+        .as_ref()
+        .ok_or_else(|| invalid("The accepted target encoder is missing."))?;
+    let kind = media(item, profile)?;
+    let bitrate = applicable_target_bitrate(kind, allocation.average_bitrate)?;
+    item.encoding = Some(apply_compression(profile, kind, &settings, Some(bitrate))?.encoding);
+    Ok(())
+}
+
+fn stream_output_duration(source: &MediaInfo, item: &StreamPlan) -> Result<u64, EngineError> {
+    let stream = source
+        .streams
+        .iter()
+        .find(|stream| stream.index == item.index)
+        .ok_or_else(|| invalid("The accepted stream source is missing."))?;
+    if let Some(timing) = item
+        .audio_filters
+        .as_ref()
+        .and_then(|filters| filters.timing())
+    {
+        return timing
+            .output_duration_us
+            .filter(|duration| *duration > 0)
+            .ok_or_else(|| {
+                invalid("Target File Size requires a verifiable transformed track duration.")
+            });
+    }
+    // Preserve saved nominal-speed target allocation. New speed plans freeze
+    // their own checked track durations above, including measurement overrides.
+    stream
+        .duration_us
+        .filter(|duration| *duration > 0)
+        .or(source.duration_us.filter(|duration| *duration > 0))
+        .map(|duration| duration as u64)
+        .ok_or_else(|| invalid("Target File Size requires a verifiable positive duration."))
+}
+
 fn budget(
     source: &MediaInfo,
     plan: &Plan,
     receiver: usize,
     target: TargetSize,
 ) -> Result<TargetBudget, EngineError> {
-    let duration = source
-        .duration_us
-        .filter(|duration| *duration > 0)
-        .ok_or_else(|| invalid("Target File Size requires a verifiable positive duration."))?;
-    let duration_ms = (duration as u64).div_ceil(1_000);
+    let duration = if plan.streams[receiver]
+        .audio_filters
+        .as_ref()
+        .and_then(|filters| filters.timing())
+        .is_some()
+    {
+        stream_output_duration(source, &plan.streams[receiver])?
+    } else {
+        source
+            .duration_us
+            .filter(|duration| *duration > 0)
+            .map(|duration| duration as u64)
+            .ok_or_else(|| invalid("Target File Size requires a verifiable positive duration."))?
+    };
+    let duration_ms = duration.div_ceil(1_000);
     let target_bytes = target.bytes()?;
     let mut input = TargetBudgetInput {
         duration_ms,
@@ -191,12 +264,6 @@ fn budget(
             .iter()
             .find(|stream| stream.index == item.index)
             .ok_or_else(|| invalid("The accepted stream source is missing."))?;
-        let stream_duration_ms = original
-            .duration_us
-            .filter(|duration| *duration > 0)
-            .map_or(duration_ms, |duration| {
-                (duration as u64).div_ceil(1_000).min(duration_ms)
-            });
         if let Some(profile) = &item.encoding {
             let bitrate = profile.bit_rate.filter(|rate| *rate > 0).or_else(|| {
                 if profile.codec.starts_with("pcm_") {
@@ -206,7 +273,18 @@ fn budget(
             }).ok_or_else(|| invalid("A required lossless or constant-quality auxiliary stream has no reliable target-size budget. Choose an applicable bitrate/codec or another compression mode."))?;
             input.other_encoded_streams.push(RetainedPayload::Bitrate {
                 bits_per_second: bitrate,
-                duration_ms: stream_duration_ms,
+                duration_ms: if item
+                    .audio_filters
+                    .as_ref()
+                    .and_then(|filters| filters.timing())
+                    .is_some()
+                {
+                    stream_output_duration(source, item)?.div_ceil(1_000)
+                } else {
+                    stream_output_duration(source, item)?
+                        .div_ceil(1_000)
+                        .min(duration_ms)
+                },
             });
         } else {
             // Unknown subtitle/artwork or copied payload is never counted as
@@ -215,7 +293,18 @@ fn budget(
             let payload = if let Some(bitrate) = original.bit_rate.filter(|rate| *rate > 0) {
                 RetainedPayload::Bitrate {
                     bits_per_second: bitrate,
-                    duration_ms: stream_duration_ms,
+                    duration_ms: if item
+                        .audio_filters
+                        .as_ref()
+                        .and_then(|filters| filters.timing())
+                        .is_some()
+                    {
+                        stream_output_duration(source, item)?.div_ceil(1_000)
+                    } else {
+                        stream_output_duration(source, item)?
+                            .div_ceil(1_000)
+                            .min(duration_ms)
+                    },
                 }
             } else {
                 RetainedPayload::Bytes(source.byte_size.ok_or_else(|| {

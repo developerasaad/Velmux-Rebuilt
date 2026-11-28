@@ -429,11 +429,16 @@ final class ConversionIntegrationTests: XCTestCase {
         var configuration = try await session.defaults(sourceId: inspected.id, operation: .audioConverter)
         configuration.format = .wav; configuration.audioCodec = .pcm
         configuration.fileName = "ios-adjustments-" + UUID().uuidString.lowercased()
-        configuration.audioAdjustments = AudioAdjustments(gainCentidb: -602, fadeInUs: 500_000, fadeOutUs: 500_000)
+        var adjustments = session.audioAdjustmentDefaults()
+        adjustments.gainCentidb = -602
+        adjustments.fadeInUs = 500_000; adjustments.fadeOutUs = 500_000
+        configuration.audioAdjustments = adjustments
         let choices = try session.choices(sourceId: inspected.id, configuration: configuration)
         XCTAssertEqual(choices.audioAdjustmentLimits?.minimumGainCentidb, -6000)
         var invalid = configuration
-        invalid.audioAdjustments = AudioAdjustments(gainCentidb: 2401, fadeInUs: 0, fadeOutUs: 0)
+        var invalidAdjustments = session.audioAdjustmentDefaults()
+        invalidAdjustments.gainCentidb = 2401
+        invalid.audioAdjustments = invalidAdjustments
         do { try await session.validate(sourceId: inspected.id, configuration: invalid); XCTFail("Rust accepted invalid audio gain") }
         catch EngineError.Configuration {}
         let accepted = try await session.submit(sourceId: inspected.id, key: configuration.fileName, configuration: configuration)
@@ -451,6 +456,67 @@ final class ConversionIntegrationTests: XCTestCase {
         let expectedRms = 0.15 / sqrt(2) * pow(10, -6.02 / 20) * sqrt(2.0 / 3)
         XCTAssertEqual(proof.rms, expectedRms, accuracy: 0.001,
                        "Real sample energy must reflect gain and both linear fade envelopes")
+    }
+
+    @MainActor
+    func testAudioSpeedAndPitchReachIndependentNativeDecodedSamples() async throws {
+        let session = try await applicationSession()
+        let original = try fixture("stereo.wav")
+        let originalHash = try digest(original)
+        originalHashes[original] = originalHash
+        let inspected = try await session.inspect(IosMediaServices.selectedSource(url: original), operation: .audioConverter)
+        ownedInspections.insert(inspected.id)
+        let defaults = session.audioAdjustmentDefaults()
+        XCTAssertEqual(defaults.speedMilli, 1000)
+        XCTAssertTrue(defaults.preservePitch)
+        var evidence: [String] = []
+        for speed: UInt32 in [500, 2000] {
+            for preserve in [true, false] {
+                var configuration = try await session.defaults(sourceId: inspected.id, operation: .audioConverter)
+                configuration.format = .wav; configuration.audioCodec = .pcm
+                configuration.sampleRate = 48_000
+                configuration.fileName = "ios-speed-" + UUID().uuidString.lowercased()
+                var adjustments = defaults
+                adjustments.speedMilli = speed; adjustments.preservePitch = preserve
+                configuration.audioAdjustments = adjustments
+                let choices = try session.choices(sourceId: inspected.id, configuration: configuration)
+                XCTAssertEqual(choices.audioAdjustmentLimits?.minimumSpeedMilli, 500)
+                XCTAssertEqual(choices.audioAdjustmentLimits?.maximumSpeedMilli, 2000)
+                XCTAssertEqual(choices.audioAdjustmentLimits?.maximumFadeUs, 2_000_000_000 / UInt64(speed),
+                               "Fade bounds must describe output seconds after speed")
+                var invalid = configuration
+                var invalidAdjustments = adjustments; invalidAdjustments.speedMilli = 499
+                invalid.audioAdjustments = invalidAdjustments
+                do { try await session.validate(sourceId: inspected.id, configuration: invalid); XCTFail("Rust accepted audio speed below its limit") }
+                catch EngineError.Configuration {}
+                let accepted = try await session.submit(sourceId: inspected.id, key: configuration.fileName, configuration: configuration)
+                ownedJobs[accepted.id] = configuration.fileName + ".wav"
+                let output = try completedURL(try await waitForTerminal(session, id: accepted.id))
+                ownedOutputs.insert(output)
+                let proof = try await onWorker { try self.decodeAudio(output) }
+                let idealFrames = 96_000 * 1000 / Int(speed)
+                // atempo uses finite WSOLA windows; this fixture's 48 kHz
+                // window is 2048 frames. Bound EOF variation to two windows.
+                // Pitch-following asetrate/resample gets only sample rounding.
+                let frameTolerance = preserve ? 4096 : 1
+                XCTAssertLessThanOrEqual(abs(proof.frames - idealFrames), frameTolerance)
+                XCTAssertEqual(proof.sampleRate, 48_000)
+                XCTAssertEqual(proof.channels, 2)
+                XCTAssertEqual(proof.subtype, kAudioFormatLinearPCM)
+                let multiplier = preserve ? 1.0 : Double(speed) / 1000
+                XCTAssertEqual(proof.leftHz, 440 * multiplier, accuracy: 8)
+                XCTAssertEqual(proof.rightHz, 660 * multiplier, accuracy: 8)
+                XCTAssertEqual(proof.duration, Double(proof.frames) / 48_000, accuracy: 0.002)
+                XCTAssertEqual(proof.duration, 2 * 1000 / Double(speed), accuracy: Double(frameTolerance) / 48_000 + 0.002)
+                XCTAssertGreaterThan(proof.rms, 0.08)
+                XCTAssertLessThan(proof.rms, 0.13)
+                evidence.append("speed=\(speed)/1000 preservePitch=\(preserve): \(proof.frames) PCM frames, \(proof.duration)s, \(proof.leftHz)/\(proof.rightHz)Hz")
+            }
+        }
+        XCTAssertEqual(try digest(original), originalHash)
+        let proof = XCTAttachment(string: evidence.joined(separator: "\n"))
+        proof.name = "Independent native audio speed and pitch verification"
+        proof.lifetime = .keepAlways; add(proof)
     }
 
     @MainActor

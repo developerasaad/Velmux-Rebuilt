@@ -25,6 +25,18 @@ run_ffmpeg -i "$fixtures/video.mp4" -vf transpose=clock -c:v libx264 \
 run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=48000:d=2' \
   -c:a pcm_s16le -map_metadata -1 "$fixtures/stereo.wav"
 run_ffmpeg -i "$fixtures/stereo.wav" -c:a flac -compression_level 5 "$fixtures/stereo.flac"
+# PCM fixtures exercise fractional playback-rate arithmetic and real timestamp
+# gaps without an intervening lossy codec. MOV preserves per-track durations.
+run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t):s=11025:d=2' \
+  -c:a pcm_s16le "$fixtures/odd-rate.wav"
+run_ffmpeg -itsoffset 5 -i "$fixtures/stereo.wav" \
+  -map 0:a -c:a pcm_s16le -copyts -avoid_negative_ts disabled "$fixtures/audio-origin.mov"
+run_ffmpeg -i "$fixtures/stereo.wav" -af 'asetpts=PTS+2*gte(T\,1)/TB' \
+  -c:a pcm_s16le -avoid_negative_ts disabled "$fixtures/audio-gap.mkv"
+# A tiny packet file with a long timeline gap exercises cooperative cancellation
+# during real bounded silence feeding/WSOLA analysis, without a large fixture.
+run_ffmpeg -i "$fixtures/stereo.wav" -af 'asetpts=PTS+3600*gte(T\,1)/TB' \
+  -c:a pcm_s16le -avoid_negative_ts disabled "$fixtures/audio-long-gap.mkv"
 run_ffmpeg -f lavfi -i 'color=c=0xb87333:size=32x32:duration=0.1' \
   -frames:v 1 -c:v png -threads:v 1 -update 1 "$fixtures/cover.png"
 run_ffmpeg -i "$fixtures/stereo.flac" -i "$fixtures/cover.png" \
@@ -36,6 +48,8 @@ run_ffmpeg -f lavfi -i 'aevalsrc=0.15*sin(2*PI*440*t)|0.15*sin(2*PI*660*t):s=192
 run_ffmpeg -f lavfi -i 'aevalsrc=0.1*sin(2*PI*440*t)|0.1*sin(2*PI*660*t)|0.1*sin(2*PI*880*t)|0|0.1*sin(2*PI*440*t)|0.1*sin(2*PI*660*t):s=48000:d=2:c=5.1' \
   -c:a flac "$fixtures/surround.flac"
 run_ffmpeg -f lavfi -i 'sine=frequency=440:sample_rate=8000:duration=2' -c:a flac "$fixtures/low-rate.flac"
+# Coded MPEG-2.5 duration includes priming/padding; decoded audio is exactly 2 s.
+run_ffmpeg -i "$fixtures/low-rate.flac" -c:a libmp3lame -b:a 64000 "$fixtures/gapless-8k.mp3"
 run_ffmpeg -i "$fixtures/stereo.wav" -c:a pcm_s32le "$fixtures/pcm32.wav"
 # Distinct speaker tones and nonzero low sample bits expose channel swaps,
 # precision truncation and accidental mixing in lossless conversion routes.
@@ -123,10 +137,14 @@ root = pathlib.Path(sys.argv[1])
 (root / 'truncated.mp4').write_bytes((root / 'video.mp4').read_bytes()[:256])
 probes = {}
 for path in root.iterdir():
-    if path.suffix in {'.mp4', '.mkv', '.wav', '.flac'} and path.name != 'truncated.mp4':
+    if path.suffix in {'.mp4', '.mkv', '.mov', '.wav', '.flac', '.mp3'} and path.name != 'truncated.mp4':
         probes[path.name] = json.loads(subprocess.check_output(
             ['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-show_chapters', '-of', 'json', str(path)], text=True, timeout=15))
 (root / 'probes.json').write_text(json.dumps(probes, indent=2) + '\n')
+gapless_packets = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_packets', '-of', 'json', str(root / 'gapless-8k.mp3')], text=True))['packets']
+assert sum(float(packet['duration_time']) for packet in gapless_packets) > 2.1, 'Gapless fixture lost its coded padding interval'
+gapless_samples = subprocess.check_output(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(root / 'gapless-8k.mp3'), '-f', 's16le', '-acodec', 'pcm_s16le', '-'])
+assert len(gapless_samples) == 16000 * 2, 'Gapless fixture must decode to exactly two seconds'
 precision = probes['precision24.wav']['streams'][0]
 assert precision['channels'] == 6 and precision['channel_layout'] == '5.1' and int(precision['bits_per_sample']) == 24
 for name in ['precision10.mkv', 'camera10.mp4', 'camera10-hdr.mp4', 'hdr.mkv', 'hlg.mkv']:

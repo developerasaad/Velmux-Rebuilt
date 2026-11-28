@@ -221,6 +221,9 @@ impl Engine {
     ) -> Result<crate::OutputEstimate, EngineError> {
         self.media_runtime()?.estimate(&id, &configuration)
     }
+    pub fn audio_adjustment_defaults(&self) -> crate::AudioAdjustments {
+        crate::AudioAdjustments::default()
+    }
     pub fn submit_conversion(
         &self,
         id: String,

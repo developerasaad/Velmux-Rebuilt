@@ -76,6 +76,99 @@ def float_samples(raw):
     return values
 
 
+def check_audio_speed(path, case):
+    rate, channels = case['sample_rate'], case['channels']
+    actual = float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
+    source = float_samples(decoded_audio(FIXTURES / case['speed_source'], 'f64le', 'pcm_f64le'))
+    frames = len(actual) // channels
+    ideal = len(source) / channels * 1000 / case['speed_milli']
+    # WSOLA's boundary is content-dependent. Pinned atempo uses a power-of-two
+    # rate/24 window; asetrate/resampling has only sample rounding here.
+    window = 1 << max(0, (max(1, rate // 24) - 1).bit_length())
+    tolerance = 2 * window if case['preserve_pitch'] else 2
+    assert abs(frames - ideal) <= tolerance, f'{path}: transformed sample count {frames}, expected {ideal} ± {tolerance}'
+    begin = min(frames // 4, rate // 4)
+    count = min(frames // 4, rate // 4)
+    assert count > rate // 20, f'{path}: missing audible speed samples'
+    for channel in range(channels):
+        values = actual[begin * channels + channel:(begin + count) * channels:channels]
+        frequency = ([440, 660][channel] if channels == 2 else 440) * (1 if case['preserve_pitch'] else case['speed_milli'] / 1000)
+        amplitude = 2 * math.hypot(
+            sum(value * math.cos(2 * math.pi * frequency * i / rate) for i, value in enumerate(values)),
+            sum(value * math.sin(2 * math.pi * frequency * i / rate) for i, value in enumerate(values))) / len(values)
+        gain = 10 ** (case.get('speed_gain_centidb', 0) / 2000)
+        assert 0.08 * gain < amplitude < 0.2 * gain, f'{path}: accepted pitch/channel tone {frequency} Hz is missing: {amplitude}'
+    if 'speed_unfaded_output' in case:
+        reference = float_samples(decoded_audio(case['speed_unfaded_output'], 'f64le', 'pcm_f64le'))
+        assert len(actual) == len(reference), f'{path}: EOF fade changed transformed sample count'
+        fade_in = case['speed_fade_in_us'] * rate / 1_000_000
+        fade_out = case['speed_fade_out_us'] * rate / 1_000_000
+        gain = 10 ** (case.get('speed_gain_centidb', 0) / 2000)
+        def faded(index, value):
+            sample = index // channels
+            return value * gain * max(0, min(1, sample / fade_in, (frames - sample) / fade_out))
+        error = max(abs(value - faded(index, reference[index])) for index, value in enumerate(actual))
+        assert error <= 3 / 32768, f'{path}: speed fade does not reach the actual sample endpoint: {error}'
+        peak = max(abs(value) for value in actual[-channels:])
+        assert peak <= 2 / 32768, f'{path}: audible truncated EOF fade: last sample peak {peak}'
+    elif not case['preserve_pitch']:
+        # A separately installed tool performs the exact accepted representation,
+        # including the integer-rate bridge needed at 11025 Hz × 0.5.
+        speed = case['speed_milli']
+        processing = rate if rate * speed % 1000 == 0 else math.ceil(rate / 48000) * 48000
+        chain = (f'aresample={processing},' if processing != rate else '') + f'asetrate={processing * speed // 1000},aresample={rate}'
+        raw = run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(FIXTURES / case['speed_source']),
+                   '-af', chain, '-f', 'f64le', '-acodec', 'pcm_f64le', '-'])
+        reference = float_samples(raw)
+        assert len(reference) == len(actual), f'{path}: pitch-following sample sequence length differs from independent resampling'
+        error = max(abs(a - b) for a, b in zip(actual, reference))
+        assert error <= 3 / 32768, f'{path}: pitch-following samples/precision/channel order differ: {error}'
+
+
+def check_audio_speed_timing(path, case):
+    source = FIXTURES / case['timing_speed_source']
+    document = probe(source)
+    source_origin = min(float(stream['start_time']) for stream in document['streams'])
+    result = probe(path)
+    speed = case['speed_milli'] / 1000
+    for index, stream in enumerate(document['streams']):
+        rate, channels = int(stream['sample_rate']), stream['channels']
+        frames_doc = json.loads(run(['ffprobe', '-v', 'error', '-select_streams', f'a:{index}',
+                                    '-show_frames', '-of', 'json', str(source)]))['frames']
+        raw = run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(source), '-map', f'0:a:{index}',
+                   '-f', 'f64le', '-acodec', 'pcm_f64le', '-'])
+        decoded = float_samples(raw)
+        reconstructed = []
+        consumed = 0
+        start = float(stream['start_time'])
+        time_base = Fraction(stream['time_base'])
+        quantization = max(1, math.ceil(float(time_base) * rate))
+        for frame in frames_doc:
+            position = round((float(frame['best_effort_timestamp_time']) - start) * rate)
+            count = int(frame['nb_samples'])
+            current = len(reconstructed) // channels
+            assert position >= current - quantization, f'{source}: fixture unexpectedly overlaps audio frames'
+            if position > current + quantization:
+                reconstructed.extend([0.0] * ((position - current) * channels))
+            reconstructed.extend(decoded[consumed:consumed + count * channels])
+            consumed += count * channels
+        assert consumed == len(decoded), f'{source}: independent fixture frame/sample accounting differs'
+        # Independent resampling of the timestamp-reconstructed PCM verifies the
+        # actual long silence, not merely a container duration or first tone.
+        command = ['ffmpeg', '-v', 'error', '-nostdin', '-f', 'f64le', '-ar', str(rate), '-ac', str(channels), '-i', '-',
+                   '-af', f'asetrate={rate * case["speed_milli"] // 1000},aresample={rate}', '-f', 'f64le', '-acodec', 'pcm_f64le', '-']
+        payload = array.array('d', reconstructed)
+        if sys.byteorder != 'little': payload.byteswap()
+        expected = float_samples(subprocess.run(command, input=payload.tobytes(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout)
+        actual = float_samples(run(['ffmpeg', '-v', 'error', '-nostdin', '-i', str(path), '-map', f'0:a:{index}', '-f', 'f64le', '-acodec', 'pcm_f64le', '-']))
+        assert len(actual) == len(expected), f'{path}: speed dropped timestamp silence or track samples: {len(actual)} != {len(expected)}'
+        assert max(abs(a - b) for a, b in zip(actual, expected)) <= 3 / 32768, f'{path}: independently reconstructed audio timeline differs'
+        expected_start = (start - source_origin) / speed
+        assert_close(float(result['streams'][index]['start_time']), expected_start, 0.0011, f'{path}: transformed track origin')
+    if case['timing_speed_source'] == 'audio-gap.mkv':
+        assert len(reconstructed) // channels >= rate * 3.9, 'Long-gap fixture no longer has a gap exceeding one second'
+
+
 def described_aiff_pcm(path, case):
     """Check actual CoreAudio labels and decode PCM without guessing speakers.
 
@@ -260,6 +353,10 @@ def check_case(case):
         actual = described_aiff['s32'] if described_aiff is not None else decoded_audio(path)
         expected = decoded_audio(FIXTURES / case['exact_audio_source'])
         assert actual and actual == expected, f'{path}: lossless encoding changed sample values, speaker order or duration'
+    if 'speed_source' in case:
+        check_audio_speed(path, case)
+    if 'timing_speed_source' in case:
+        check_audio_speed_timing(path, case)
     if 'adjusted_audio_source' in case:
         actual = float_samples(decoded_audio(path, 'f64le', 'pcm_f64le'))
         original = float_samples(decoded_audio(FIXTURES / case['adjusted_audio_source'], 'f64le', 'pcm_f64le'))

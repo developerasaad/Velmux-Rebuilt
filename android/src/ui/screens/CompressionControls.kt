@@ -106,6 +106,8 @@ internal fun CompressionControls(
     evaluation: CompressionEdit, onChange: (CompressionSettings) -> Unit,
 ) {
     var sheet by remember { mutableStateOf<String?>(null) }
+    val compressionAvailable = choices.video.isNotEmpty() || choices.audio.isNotEmpty()
+    val videoCompressionAvailable = video && choices.video.isNotEmpty()
     fun commit(base: CompressionSettings = settings) {
         editor.settings = base
         val result = editor.evaluate(media, base, choices)
@@ -118,8 +120,12 @@ internal fun CompressionControls(
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        CompressionSwitch("Reduce File Size", settings.reduceFileSize, enabled, "reduce-file-size") {
+        CompressionSwitch("Reduce File Size", settings.reduceFileSize,
+            enabled && (compressionAvailable || settings.reduceFileSize), "reduce-file-size") {
             commit(settings.copy(reduceFileSize = it))
+        }
+        if (!compressionAvailable) {
+            Text("Choose an applicable compressed codec to use file-size reduction.", style = MaterialTheme.typography.bodySmall)
         }
         if (settings.reduceFileSize) {
             CompressionChoice("Compression", modeLabel(settings.mode), enabled) { sheet = "mode" }
@@ -137,19 +143,20 @@ internal fun CompressionControls(
                 CompressionMode.CUSTOM -> {
                     if (video) ControlEditor("Video", editor.videoKind, editor, choices.video, enabled, { sheet = "video" }, { commit() })
                     ControlEditor("Audio", editor.audioKind, editor, choices.audio, enabled, { sheet = "audio" }, { commit() })
-                    if (choices.video.isEmpty() && choices.audio.isEmpty()) {
-                        Text("No Custom control applies to these output settings. Choose a preset or change the codec.", style = MaterialTheme.typography.bodySmall)
-                    }
                 }
                 else -> Unit
             }
-            if (video) {
+            if (video && (videoCompressionAvailable || settings.optimizeResolution)) {
                 CompressionSwitch("Optimize resolution", settings.optimizeResolution, enabled, "optimize-resolution") {
                     commit(settings.copy(optimizeResolution = it))
                 }
+            }
+            if (video && (videoCompressionAvailable || settings.optimizeFrameRate)) {
                 CompressionSwitch("Optimize frame rate", settings.optimizeFrameRate, enabled, "optimize-frame-rate") {
                     commit(settings.copy(optimizeFrameRate = it))
                 }
+            }
+            if (video && (videoCompressionAvailable || settings.optimizeResolution || settings.optimizeFrameRate)) {
                 Text("Optimization requires Original resolution or frame rate. Explicit selections remain unchanged.", style = MaterialTheme.typography.bodySmall)
             }
             evaluation.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }

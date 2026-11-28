@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 mod adjustments;
 mod audio;
-pub(crate) use adjustments::duration as audio_duration;
+pub(crate) use adjustments::{stream_duration, timing as audio_timing, AudioTiming};
 pub use adjustments::{AudioAdjustmentLimits, AudioAdjustments};
 mod catalog;
 mod compression;
@@ -883,7 +883,7 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
                 .iter()
                 .filter(|stream| stream.kind == StreamKind::Audio)
                 .all(|stream| stream.decoder_available))
-        .then(|| adjustments::limits(info)),
+        .then(|| adjustments::limits(info, config.audio_adjustments.as_ref())),
         video_sizes: Vec::new(),
         frame_rates: vec![FrameRate::Original],
         sample_rates: Vec::new(),
