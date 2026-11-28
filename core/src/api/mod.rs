@@ -177,6 +177,22 @@ impl Engine {
     ) -> Result<crate::TargetSize, EngineError> {
         crate::TargetSize::parse_decimal(&value, unit)
     }
+    /// Construct a named control without duplicating codec scales in native UI.
+    /// Complete source/format applicability is still validated at submission.
+    pub fn video_compression_control(
+        &self,
+        kind: crate::CompressionControlKind,
+        value: u64,
+    ) -> Result<crate::VideoRateControl, EngineError> {
+        kind.video_control(value)
+    }
+    pub fn audio_compression_control(
+        &self,
+        kind: crate::CompressionControlKind,
+        value: u64,
+    ) -> Result<crate::AudioRateControl, EngineError> {
+        kind.audio_control(value)
+    }
     pub fn media_catalog_for_source(
         &self,
         id: String,

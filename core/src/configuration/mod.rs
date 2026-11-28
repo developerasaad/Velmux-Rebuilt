@@ -7,6 +7,7 @@ pub(crate) use adjustments::duration as audio_duration;
 pub use adjustments::{AudioAdjustmentLimits, AudioAdjustments};
 mod catalog;
 mod compression;
+mod compression_choices;
 pub(crate) use compression::{
     apply_compression, compression_copy_policy, target_budget, CompressionCopyPolicy,
     CompressionMedia, RetainedPayload, TargetBudget, TargetBudgetInput,
@@ -14,6 +15,9 @@ pub(crate) use compression::{
 pub use compression::{
     AudioRateControl, CompressionMode, CompressionSettings, TargetSize, TargetSizeUnit,
     VideoRateControl,
+};
+pub use compression_choices::{
+    CompressionChoices, CompressionControlKind, CompressionControlOption,
 };
 mod geometry;
 mod video;
@@ -345,6 +349,7 @@ pub struct FormatOption {
 /// sampling/layout or automatic bitrate; no source probing or pipeline planning.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ConfigurationChoices {
+    pub compression_choices: CompressionChoices,
     pub audio_adjustment_limits: Option<AudioAdjustmentLimits>,
     pub video_sizes: Vec<VideoSize>,
     pub frame_rates: Vec<FrameRate>,
@@ -826,6 +831,31 @@ fn audio_choice_supported(
     false
 }
 
+/// Share the existing verified bitrate candidates without changing ordinary
+/// selector semantics. Prospective Custom choices may assess a clean copy of
+/// conflicting workspace intent while preserving that original intent.
+fn audio_bitrate_choices(
+    audio: &[&crate::StreamInfo],
+    format: OutputFormat,
+    config: &ConversionConfig,
+) -> Vec<u32> {
+    [
+        0, 4750, 5150, 5900, 6000, 6600, 6700, 7400, 7950, 8000, 8850, 10200, 12200, 12650, 14250,
+        15850, 16000, 18250, 19850, 23050, 23850, 24000, 32000, 40000, 48000, 56000, 64000, 80000,
+        96000, 112000, 128000, 160000, 192000, 224000, 256000, 320000, 384000, 448000, 512000,
+        576000, 640000, 768000, 1024000, 1536000,
+    ]
+    .into_iter()
+    .filter(|bitrate| {
+        let mut candidate = config.clone();
+        candidate.audio_bitrate = (*bitrate != 0).then_some(*bitrate);
+        audio
+            .iter()
+            .all(|stream| audio_choice_supported(stream, format, &candidate, AudioChoice::Bitrate))
+    })
+    .collect()
+}
+
 pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> ConfigurationChoices {
     use crate::StreamKind;
     let video_facts = info
@@ -836,6 +866,10 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
     let (default_custom_width, default_custom_height, default_custom_frame_rate) =
         custom_geometry_defaults(video_facts);
     let mut result = ConfigurationChoices {
+        compression_choices: CompressionChoices {
+            video: compression_choices::video(info, config),
+            audio: Vec::new(),
+        },
         audio_adjustment_limits: (config.operation == Operation::AudioConverter
             && info
                 .streams
@@ -1012,18 +1046,9 @@ pub(crate) fn choices(info: &MediaInfo, config: &ConversionConfig) -> Configurat
             .as_ref()
             .is_some_and(|codecs| codecs.iter().all(|codec| !lossless_codec(*codec)))
     {
-        for bitrate in [
-            0, 4750, 5150, 5900, 6000, 6600, 6700, 7400, 7950, 8000, 8850, 10200, 12200, 12650,
-            14250, 15850, 16000, 18250, 19850, 23050, 23850, 24000, 32000, 40000, 48000, 56000,
-            64000, 80000, 96000, 112000, 128000, 160000, 192000, 224000, 256000, 320000, 384000,
-            448000, 512000, 576000, 640000, 768000, 1024000, 1536000,
-        ] {
-            let mut candidate = config.clone();
-            candidate.audio_bitrate = (bitrate != 0).then_some(bitrate);
-            if supported(&candidate, AudioChoice::Bitrate) {
-                result.audio_bitrates.push(bitrate);
-            }
-        }
+        result.audio_bitrates = audio_bitrate_choices(&audio, format, config);
     }
+    result.compression_choices.audio =
+        compression_choices::audio(info, config, &result.audio_bitrates);
     result
 }

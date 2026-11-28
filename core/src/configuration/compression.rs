@@ -442,6 +442,43 @@ fn bounded(value: u8, minimum: u8, maximum: u8, label: &str) -> Result<u8, Engin
     Ok(value)
 }
 
+/// Shared Custom-control limits. Codec applicability remains in the encoder
+/// policy below; these numbers do not imply equivalent quality across codecs.
+pub(super) fn video_control_bounds(control: &VideoRateControl) -> (u64, u64) {
+    match control {
+        VideoRateControl::AverageBitrate { .. } => (1, 1_000_000_000),
+        VideoRateControl::H264Crf { .. } | VideoRateControl::HevcCrf { .. } => (0, 51),
+        VideoRateControl::Av1Crf { .. }
+        | VideoRateControl::Vp8Cq { .. }
+        | VideoRateControl::Vp9Crf { .. } => (0, 63),
+        VideoRateControl::Mpeg4Qscale { .. } | VideoRateControl::MjpegQscale { .. } => (2, 31),
+        VideoRateControl::Ffv1Context { .. } => (0, 1),
+    }
+}
+
+pub(super) fn audio_control_bounds(control: &AudioRateControl) -> Option<(u64, u64)> {
+    Some(match control {
+        AudioRateControl::AverageBitrate { .. } => return None,
+        AudioRateControl::Mp3VbrQuality { .. } => (0, 9),
+        AudioRateControl::VorbisQuality { .. } => (0, 10),
+        AudioRateControl::FlacLevel { .. } => (0, 12),
+        AudioRateControl::AlacLevel { .. } => (1, 2),
+        AudioRateControl::WavpackLevel { .. } => (0, 8),
+    })
+}
+
+fn video_value(control: &VideoRateControl, value: u8, label: &str) -> Result<u8, EngineError> {
+    let (minimum, maximum) = video_control_bounds(control);
+    bounded(value, minimum as u8, maximum as u8, label)
+}
+
+fn audio_value(control: &AudioRateControl, value: u8, label: &str) -> Result<u8, EngineError> {
+    let (minimum, maximum) = audio_control_bounds(control).ok_or_else(|| {
+        invalid("Audio bitrate limits depend on the codec, sampling and channel layout.")
+    })?;
+    bounded(value, minimum as u8, maximum as u8, label)
+}
+
 fn video_control(
     profile: &mut EncodingSettings,
     codec: VideoCodec,
@@ -457,21 +494,21 @@ fn video_control(
             set_option(profile, "context", u8::from(*large));
         }
         (VideoCodec::Ffv1, _) => return Err(invalid("FFV1 uses lossless context effort, not lossy rate control.")),
-        (_, AverageBitrate { bits_per_second }) if (1..=1_000_000_000).contains(bits_per_second) => {
+        (_, AverageBitrate { bits_per_second }) if (video_control_bounds(control).0..=video_control_bounds(control).1).contains(bits_per_second) => {
             profile.bit_rate = Some(*bits_per_second);
         }
-        (VideoCodec::H264, H264Crf { value }) => set_option(profile, "crf", bounded(*value, 0, 51, "H.264 CRF")?),
-        (VideoCodec::Hevc, HevcCrf { value }) => set_option(profile, "crf", bounded(*value, 0, 51, "HEVC CRF")?),
-        (VideoCodec::Av1, Av1Crf { value }) => set_option(profile, "crf", bounded(*value, 0, 63, "AV1 CRF")?),
+        (VideoCodec::H264, H264Crf { value }) => set_option(profile, "crf", video_value(control, *value, "H.264 CRF")?),
+        (VideoCodec::Hevc, HevcCrf { value }) => set_option(profile, "crf", video_value(control, *value, "HEVC CRF")?),
+        (VideoCodec::Av1, Av1Crf { value }) => set_option(profile, "crf", video_value(control, *value, "AV1 CRF")?),
         (VideoCodec::Vp8, Vp8Cq { value }) => {
-            let value = bounded(*value, 0, 63, "VP8 CQ")?;
+            let value = video_value(control, *value, "VP8 CQ")?;
             set_option(profile, "crf", value);
             set_option(profile, "qmin", value);
             set_option(profile, "qmax", value);
         }
-        (VideoCodec::Vp9, Vp9Crf { value }) => set_option(profile, "crf", bounded(*value, 0, 63, "VP9 CRF")?),
+        (VideoCodec::Vp9, Vp9Crf { value }) => set_option(profile, "crf", video_value(control, *value, "VP9 CRF")?),
         (VideoCodec::Mpeg4, Mpeg4Qscale { value }) | (VideoCodec::Mjpeg, MjpegQscale { value }) => {
-            profile.qscale = Some(u32::from(bounded(*value, 2, 31, "Video QScale")?));
+            profile.qscale = Some(u32::from(video_value(control, *value, "Video QScale")?));
         }
         _ => return Err(invalid("This custom video rate control does not apply to the selected codec, or its bitrate is outside supported bounds.")),
     }
@@ -489,25 +526,25 @@ fn audio_control(
     clear_rate_control(profile);
     match (codec, control) {
         (AudioCodec::Mp3, Mp3VbrQuality { value }) => {
-            profile.qscale = Some(u32::from(bounded(*value, 0, 9, "MP3 VBR quality")?))
+            profile.qscale = Some(u32::from(audio_value(control, *value, "MP3 VBR quality")?))
         }
         (AudioCodec::Vorbis, VorbisQuality { value }) => {
-            profile.qscale = Some(u32::from(bounded(*value, 0, 10, "Vorbis quality")?))
+            profile.qscale = Some(u32::from(audio_value(control, *value, "Vorbis quality")?))
         }
         (AudioCodec::Flac, FlacLevel { value }) => set_option(
             profile,
             "compression_level",
-            bounded(*value, 0, 12, "FLAC compression level")?,
+            audio_value(control, *value, "FLAC compression level")?,
         ),
         (AudioCodec::Alac, AlacLevel { value }) => set_option(
             profile,
             "compression_level",
-            bounded(*value, 1, 2, "ALAC compression level")?,
+            audio_value(control, *value, "ALAC compression level")?,
         ),
         (AudioCodec::Wavpack, WavpackLevel { value }) => set_option(
             profile,
             "compression_level",
-            bounded(*value, 0, 8, "WavPack compression level")?,
+            audio_value(control, *value, "WavPack compression level")?,
         ),
         (_, AverageBitrate { bits_per_second })
             if !lossless(CompressionMedia::Audio {
@@ -532,7 +569,10 @@ fn audio_control(
     Ok(())
 }
 
-fn video_preset(codec: VideoCodec, mode: CompressionMode) -> Result<VideoRateControl, EngineError> {
+pub(super) fn video_preset(
+    codec: VideoCodec,
+    mode: CompressionMode,
+) -> Result<VideoRateControl, EngineError> {
     use VideoRateControl::*;
     let index = match mode {
         CompressionMode::Balanced => 1,
@@ -570,7 +610,7 @@ fn video_preset(codec: VideoCodec, mode: CompressionMode) -> Result<VideoRateCon
     })
 }
 
-fn audio_preset(
+pub(super) fn audio_preset(
     codec: AudioCodec,
     rate: u32,
     channels: u32,
